@@ -232,57 +232,31 @@ pub(super) fn process_playback_event(
             process_playback_snapshot_event(snapshot, analysis, state)
         }
         PlaybackEvent::TrackChanged {
-            mut path,
+            path,
             queue_index,
             kind,
             track_token,
+            mut snapshot,
         } => {
-            remap_unacknowledged_engine_path(state, &mut path);
-            super::event_log::log_track_change(state, &path, &kind);
-            state.playback.current_queue_index = Some(queue_index);
-            state.analysis.waveform_peaks.clear();
-            state.analysis.waveform_coverage_seconds = 0.0;
-            state.analysis.waveform_complete = false;
-            state.analysis.waveform_ends_early = false;
-            state.analysis_track_token = track_token;
-            state.analysis.track_token = track_token;
-            state.last_track_change.generation = state.last_track_change.generation.wrapping_add(1);
-            state.last_track_change.path = Some(path.clone());
-            state.last_track_change.track_token = track_token;
-            state.play_serial = state.play_serial.wrapping_add(1);
-            note_track_change_read(state, &path, track_token);
-            metadata.request(path.clone());
-            // A track starts: check the queue's files again, since they may
-            // have changed on disk since they were last checked.
-            super::sync_queue_details(state);
-            let is_gapless = matches!(kind, TrackChangeKind::Gapless);
-            let reset_spectrogram = matches!(kind, TrackChangeKind::Manual);
-            if state.playback.state == PlaybackState::Stopped {
-                profile_eprintln!(
-                    "[bridge] TrackChanged while Stopped → deferred token={track_token}",
-                );
-                state.pending_waveform_track = Some(PendingWaveformTrack {
-                    path,
-                    reset_spectrogram,
-                    track_token,
-                });
-            } else {
-                profile_eprintln!(
-                    "[bridge] TrackChanged while {:?} → immediate SetTrack token={}",
-                    state.playback.state,
-                    track_token,
-                );
-                state.pending_waveform_track = None;
-                analysis.command(AnalysisCommand::SetTrack {
-                    path,
-                    reset_spectrogram,
-                    track_token,
-                    gapless: is_gapless,
-                });
+            // The change and the playback it leaves are applied together,
+            // so no snapshot the UI is sent shows the new row in the state
+            // of the track before.
+            process_track_change(
+                path,
+                queue_index,
+                &kind,
+                track_token,
+                analysis,
+                metadata,
+                state,
+            );
+            if let Some(current) = snapshot.current.as_mut() {
+                remap_unacknowledged_engine_path(state, current);
             }
             // The playing index travels in the playback section, so a track
             // change asks for no queue section; one already asked for stays.
-            SnapshotUrgency::Immediate
+            process_playback_snapshot_event(snapshot, analysis, state)
+                .max(SnapshotUrgency::Immediate)
         }
         PlaybackEvent::Seeked { position } => {
             super::event_log::log_seek(position);
@@ -322,6 +296,60 @@ pub(super) fn process_playback_event(
             send_error(event_tx, playback_error(&error));
             SnapshotUrgency::None
         }
+    }
+}
+
+/// Apply the engine's change to the track at `path`, row `queue_index`,
+/// before the snapshot that comes with it.
+fn process_track_change(
+    mut path: PathBuf,
+    queue_index: usize,
+    kind: &TrackChangeKind,
+    track_token: u64,
+    analysis: &AnalysisEngine,
+    metadata: &MetadataService,
+    state: &mut BridgeState,
+) {
+    remap_unacknowledged_engine_path(state, &mut path);
+    super::event_log::log_track_change(state, &path, kind);
+    state.playback.current_queue_index = Some(queue_index);
+    state.analysis.waveform_peaks.clear();
+    state.analysis.waveform_coverage_seconds = 0.0;
+    state.analysis.waveform_complete = false;
+    state.analysis.waveform_ends_early = false;
+    state.analysis_track_token = track_token;
+    state.analysis.track_token = track_token;
+    state.last_track_change.generation = state.last_track_change.generation.wrapping_add(1);
+    state.last_track_change.path = Some(path.clone());
+    state.last_track_change.track_token = track_token;
+    state.play_serial = state.play_serial.wrapping_add(1);
+    note_track_change_read(state, &path, track_token);
+    metadata.request(path.clone());
+    // A track starts: check the queue's files again, since they may
+    // have changed on disk since they were last checked.
+    super::sync_queue_details(state);
+    let is_gapless = matches!(kind, TrackChangeKind::Gapless);
+    let reset_spectrogram = matches!(kind, TrackChangeKind::Manual);
+    if state.playback.state == PlaybackState::Stopped {
+        profile_eprintln!("[bridge] TrackChanged while Stopped → deferred token={track_token}",);
+        state.pending_waveform_track = Some(PendingWaveformTrack {
+            path,
+            reset_spectrogram,
+            track_token,
+        });
+    } else {
+        profile_eprintln!(
+            "[bridge] TrackChanged while {:?} → immediate SetTrack token={}",
+            state.playback.state,
+            track_token,
+        );
+        state.pending_waveform_track = None;
+        analysis.command(AnalysisCommand::SetTrack {
+            path,
+            reset_spectrogram,
+            track_token,
+            gapless: is_gapless,
+        });
     }
 }
 
@@ -1540,12 +1568,13 @@ mod tests {
         assert_eq!(state.metadata.artist, "Artist A");
 
         playback_tx
-            .send(PlaybackEvent::TrackChanged {
-                path: p("/music/b.flac"),
-                queue_index: 1,
-                kind: TrackChangeKind::Manual,
-                track_token: 1,
-            })
+            .send(PlaybackEvent::track_change(
+                p("/music/b.flac"),
+                1,
+                TrackChangeKind::Manual,
+                1,
+                &state.playback,
+            ))
             .expect("send track-changed event");
         let changed = pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
         assert!(changed);
@@ -1580,12 +1609,13 @@ mod tests {
             // waits in the queue while playback moves on.
             analysis_tx.send(cut(7, 242.0)).expect("queue the snapshot");
             playback_tx
-                .send(PlaybackEvent::TrackChanged {
-                    path: p(next),
-                    queue_index: 1,
-                    kind: kind.clone(),
-                    track_token: 8,
-                })
+                .send(PlaybackEvent::track_change(
+                    p(next),
+                    1,
+                    kind.clone(),
+                    8,
+                    &state.playback,
+                ))
                 .expect("send the track change");
             pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
             assert_eq!(state.analysis.track_token, 8);
@@ -1713,12 +1743,13 @@ mod tests {
         }
 
         playback_tx
-            .send(PlaybackEvent::TrackChanged {
-                path: p("/music/next.flac"),
-                queue_index: 0,
-                kind: TrackChangeKind::Manual,
-                track_token: 8,
-            })
+            .send(PlaybackEvent::track_change(
+                p("/music/next.flac"),
+                0,
+                TrackChangeKind::Manual,
+                8,
+                &state.playback,
+            ))
             .expect("send the track change");
         pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
         analysis_tx
@@ -1925,12 +1956,13 @@ mod tests {
 
         // The track changes while stopped, and then plays.
         playback_tx
-            .send(PlaybackEvent::TrackChanged {
-                path: p("/music/other.flac"),
-                queue_index: 1,
-                kind: TrackChangeKind::Manual,
-                track_token: 8,
-            })
+            .send(PlaybackEvent::track_change(
+                p("/music/other.flac"),
+                1,
+                TrackChangeKind::Manual,
+                8,
+                &state.playback,
+            ))
             .expect("send track change");
         let mut playing_snapshot = state.playback.clone();
         playing_snapshot.state = PlaybackState::Playing;
@@ -1973,12 +2005,13 @@ mod tests {
         let track = p("/music/track.flac");
         let replay = |token: u64, kind: TrackChangeKind, state: &mut BridgeState| {
             playback_tx
-                .send(PlaybackEvent::TrackChanged {
-                    path: track.clone(),
-                    queue_index: 0,
+                .send(PlaybackEvent::track_change(
+                    track.clone(),
+                    0,
                     kind,
-                    track_token: token,
-                })
+                    token,
+                    &state.playback,
+                ))
                 .expect("send track change");
             pump_playback_events(&playback_rx, &analysis, &metadata, state);
         };
@@ -2423,12 +2456,13 @@ mod tests {
             (480, 1_700_000_480, TrackChangeKind::Manual),
         ] {
             playback_tx
-                .send(PlaybackEvent::TrackChanged {
-                    path: track_path.clone(),
-                    queue_index: 0,
+                .send(PlaybackEvent::track_change(
+                    track_path.clone(),
+                    0,
                     kind,
-                    track_token: 0,
-                })
+                    0,
+                    &state.playback,
+                ))
                 .expect("send track change");
             pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
             tick_lastfm_playback_at(
@@ -2460,7 +2494,7 @@ mod tests {
     }
 
     #[test]
-    fn lastfm_track_change_to_another_path_waits_for_playback_to_switch() {
+    fn lastfm_track_change_to_another_path_starts_its_play_with_the_switch() {
         let (analysis, _analysis_rx) = AnalysisEngine::new();
         let (metadata, _metadata_rx) = MetadataService::new();
         let (playback_tx, playback_rx) = crossbeam_channel::unbounded::<PlaybackEvent>();
@@ -2473,12 +2507,13 @@ mod tests {
         tick_lastfm_playback_at(&state, &lastfm_handle, &mut tracker, start, 1_700_000_000);
 
         playback_tx
-            .send(PlaybackEvent::TrackChanged {
-                path: second.clone(),
-                queue_index: 1,
-                kind: TrackChangeKind::Gapless,
-                track_token: 2,
-            })
+            .send(PlaybackEvent::track_change(
+                second.clone(),
+                1,
+                TrackChangeKind::Gapless,
+                2,
+                &state.playback,
+            ))
             .expect("send track change");
         pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
         tick_lastfm_playback_at(
@@ -2488,11 +2523,11 @@ mod tests {
             start + Duration::from_secs(10),
             1_700_000_010,
         );
-        // Still the first track's play until playback reports the switch.
-        assert_eq!(tracker.active_path.as_ref(), Some(&first));
-        assert_eq!(tracker.listened_duration, Duration::from_secs(10));
+        // The change comes with playback on the second track, whose play
+        // starts with it, before its metadata is read.
+        assert_eq!(tracker.active_path.as_ref(), Some(&second));
+        assert_eq!(tracker.started_at_utc, Some(1_700_000_010));
 
-        state.playback.current = Some(second.clone());
         state.metadata.source_path = Some(second.to_string_lossy().into_owned());
         state.metadata.title = "Second".to_string();
         tick_lastfm_playback_at(
@@ -2503,7 +2538,7 @@ mod tests {
             1_700_000_011,
         );
         assert_eq!(tracker.active_path.as_ref(), Some(&second));
-        assert_eq!(tracker.started_at_utc, Some(1_700_000_011));
+        assert_eq!(tracker.started_at_utc, Some(1_700_000_010));
         assert_eq!(
             now_playing_tracks(&commands.try_iter().collect::<Vec<_>>()),
             vec!["Track".to_string(), "Second".to_string()]
@@ -2766,12 +2801,13 @@ mod tests {
     ) {
         let (analysis, _commands, playback_tx, playback_rx, metadata) = harness;
         playback_tx
-            .send(PlaybackEvent::TrackChanged {
-                path: path.to_path_buf(),
-                queue_index: 1,
+            .send(PlaybackEvent::track_change(
+                path.to_path_buf(),
+                1,
                 kind,
                 track_token,
-            })
+                &state.playback,
+            ))
             .expect("send the track change");
         pump_playback_events(playback_rx, analysis, metadata, state);
     }
@@ -2794,9 +2830,9 @@ mod tests {
             change_track(&harness, &mut state, &next, kind.clone(), 8);
             assert_eq!(metadata_to_read_again(&mut state), None, "{kind:?}");
 
-            // The playback snapshot still names the track before when the
-            // worker drops the change's read for a late one of another file.
-            assert_eq!(state.playback.current, Some(previous.clone()));
+            // The change's snapshot names the track when the worker drops
+            // the change's read for a late one of another file.
+            assert_eq!(state.playback.current, Some(next.clone()));
             process_metadata_event(MetadataEvent::Superseded(next.clone()), &mut state);
             process_metadata_event(loaded(&p("/music/other.flac"), file_state(1)), &mut state);
             assert_eq!(
@@ -2858,11 +2894,12 @@ mod tests {
         state.playback.track_token = 7;
         let (next, renamed) = (p("/music/next.flac"), p("/music/01 next.flac"));
         change_track(&harness, &mut state, &next, TrackChangeKind::Manual, 8);
-        // Renamed before a playback snapshot names it.
-        remap_playing_file_read(
-            &mut state,
-            &PathRenames::from([(next.clone(), renamed.clone())]),
-        );
+        // Renamed after the change, as the bridge renames its playback.
+        let renames = PathRenames::from([(next.clone(), renamed.clone())]);
+        if let Some(current) = state.playback.current.as_mut() {
+            remap_path(current, &renames);
+        }
+        remap_playing_file_read(&mut state, &renames);
         assert_eq!(playing_file(&mut state), Some(renamed.clone()));
         process_metadata_event(MetadataEvent::Superseded(next), &mut state);
         assert_eq!(metadata_to_read_again(&mut state), None);
@@ -2912,17 +2949,18 @@ mod tests {
             assert_eq!(metadata_to_read_again(&mut state), Some(playing.clone()));
 
             // The track changes, and the change's request drops the read
-            // before the playback snapshot names the next track.
+            // of the track before.
             playback_tx
-                .send(PlaybackEvent::TrackChanged {
-                    path: p(next),
-                    queue_index: 1,
-                    kind: kind.clone(),
-                    track_token: 8,
-                })
+                .send(PlaybackEvent::track_change(
+                    p(next),
+                    1,
+                    kind.clone(),
+                    8,
+                    &state.playback,
+                ))
                 .expect("send the track change");
             pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
-            assert_eq!(state.playback.current, Some(playing.clone()));
+            assert_eq!(state.playback.current, Some(p(next)));
             process_metadata_event(MetadataEvent::Superseded(playing.clone()), &mut state);
             let expected = keeps_report.then(|| playing.clone());
             assert_eq!(metadata_to_read_again(&mut state), expected, "{kind:?}");

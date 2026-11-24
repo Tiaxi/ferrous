@@ -526,6 +526,22 @@ pub fn spawn_engine(
     spawn_engine_with_output(analysis_tx, event_tx, failure, exit_tx, build_output_sink)
 }
 
+/// Spawn the engine with a fake sink, which keeps the playback clock, as
+/// its output, for tests outside this module.
+#[cfg(test)]
+pub fn spawn_engine_on_test_output(
+    analysis_tx: Sender<AnalysisCommand>,
+    event_tx: Sender<PlaybackEvent>,
+    failure: &Arc<OnceLock<String>>,
+    exit_tx: Sender<EngineExit>,
+) -> Sender<PlaybackCommand> {
+    spawn_engine_with_output(analysis_tx, event_tx, failure, exit_tx, || {
+        Ok(gst::ElementFactory::make("fakesink")
+            .property("sync", true)
+            .build()?)
+    })
+}
+
 /// Wait until `GStreamer` has loaded its plugin registry, before a test
 /// starts an engine.
 ///
@@ -991,6 +1007,7 @@ impl GstPlaybackRuntime {
         self.track_token_counter
     }
 
+    /// Report a track change with the snapshot it leaves, as one event.
     fn emit_track_changed(
         &self,
         path: PathBuf,
@@ -1003,6 +1020,7 @@ impl GstPlaybackRuntime {
             queue_index,
             kind,
             track_token,
+            snapshot: self.snapshot.clone(),
         });
     }
 
@@ -1054,7 +1072,6 @@ impl GstPlaybackRuntime {
         self.switch_track(path.as_path(), &uri, force_play);
         self.buffering_active = false;
         self.emit_track_changed(path, queue_index, kind, track_token);
-        self.emit_snapshot();
     }
 
     fn stop_with_empty_queue(&mut self) {
@@ -2158,7 +2175,6 @@ impl GstPlaybackRuntime {
             TrackChangeKind::Gapless,
             track_token,
         );
-        self.emit_snapshot();
     }
 
     /// Duration of the current track. Once the pipeline was given a
@@ -6911,12 +6927,16 @@ mod engine_tests {
                     queue_index,
                     kind,
                     track_token,
-                } => self.changes.push(Change {
-                    path,
-                    index: queue_index,
-                    kind,
-                    token: track_token,
-                }),
+                    snapshot,
+                } => {
+                    self.changes.push(Change {
+                        path,
+                        index: queue_index,
+                        kind,
+                        token: track_token,
+                    });
+                    self.record(PlaybackEvent::Snapshot(snapshot));
+                }
                 PlaybackEvent::Error(error) => self.errors.push(error),
                 PlaybackEvent::Seeked { position } => self.seeked.push(position),
                 PlaybackEvent::PathsRemapped => {}

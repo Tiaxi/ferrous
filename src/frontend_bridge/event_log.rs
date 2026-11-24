@@ -268,12 +268,13 @@ mod tests {
         };
         test_log::clear();
         feed(
-            PlaybackEvent::TrackChanged {
-                path: PathBuf::from("/fixture/library/one.flac"),
-                queue_index: 0,
-                kind: TrackChangeKind::Manual,
-                track_token: 1,
-            },
+            PlaybackEvent::track_change(
+                PathBuf::from("/fixture/library/one.flac"),
+                0,
+                TrackChangeKind::Manual,
+                1,
+                &state.playback,
+            ),
             &mut state,
         );
         // A minute of playback, snapshots ten times a second, with a pause

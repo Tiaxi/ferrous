@@ -225,11 +225,15 @@ pub enum TrackChangeKind {
 #[derive(Debug, Clone)]
 pub enum PlaybackEvent {
     Snapshot(PlaybackSnapshot),
+    /// The engine changed track. `snapshot` is its playback once the change
+    /// is applied, in place of a separate [`PlaybackEvent::Snapshot`], so
+    /// the change and the state it plays in arrive as one.
     TrackChanged {
         path: PathBuf,
         queue_index: usize,
         kind: TrackChangeKind,
         track_token: u64,
+        snapshot: PlaybackSnapshot,
     },
     /// A seek was applied; `position` is where it landed. Seeks that are
     /// refused, fail, or are superseded before they land send none. A
@@ -251,6 +255,32 @@ pub enum PlaybackEvent {
     },
     /// A track could not be played, or the engine cannot play at all.
     Error(PlaybackError),
+}
+
+#[cfg(test)]
+impl PlaybackEvent {
+    /// The engine's change to `path` at row `queue_index`, sent with
+    /// `playback` moved to that track as its snapshot.
+    pub(crate) fn track_change(
+        path: PathBuf,
+        queue_index: usize,
+        kind: TrackChangeKind,
+        track_token: u64,
+        playback: &PlaybackSnapshot,
+    ) -> Self {
+        Self::TrackChanged {
+            snapshot: PlaybackSnapshot {
+                current: Some(path.clone()),
+                current_queue_index: Some(queue_index),
+                track_token,
+                ..playback.clone()
+            },
+            path,
+            queue_index,
+            kind,
+            track_token,
+        }
+    }
 }
 
 /// What playback did after an error.
@@ -537,6 +567,18 @@ impl PlaybackEngine {
         }));
     }
 
+    /// An engine that plays to no audio device: the `GStreamer` backend's
+    /// to a fake sink that keeps the playback clock, or the mock.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn on_test_output(
+        analysis_tx: Sender<AnalysisCommand>,
+    ) -> (Self, Receiver<PlaybackEvent>) {
+        Self::spawn(|event_tx, failure, exit_tx| {
+            backend::spawn_engine_on_test_output(analysis_tx, event_tx, failure, exit_tx)
+        })
+    }
+
     /// An engine whose commands go to `tx` instead of a backend.
     #[cfg(test)]
     pub(crate) fn from_command_sender(tx: Sender<PlaybackCommand>) -> Self {
@@ -810,7 +852,10 @@ mod tests {
         let deadline = Instant::now() + timeout;
         let mut last = None;
         while Instant::now() < deadline {
-            if let Ok(PlaybackEvent::Snapshot(s)) = rx.recv_timeout(Duration::from_millis(10)) {
+            if let Ok(
+                PlaybackEvent::Snapshot(s) | PlaybackEvent::TrackChanged { snapshot: s, .. },
+            ) = rx.recv_timeout(Duration::from_millis(10))
+            {
                 last = Some(s);
             }
         }
@@ -1098,7 +1143,13 @@ mod tests {
                         queue_index,
                         kind,
                         track_token,
-                    }) => changes.push((path, queue_index, kind, track_token)),
+                        snapshot,
+                    }) => {
+                        changes.push((path, queue_index, kind, track_token));
+                        if snapshot.current.as_ref() == Some(target) {
+                            break snapshot;
+                        }
+                    }
                     Ok(PlaybackEvent::Snapshot(snapshot))
                         if snapshot.current.as_ref() == Some(target) =>
                     {
@@ -1159,12 +1210,8 @@ mod tests {
         let deadline = Instant::now() + Duration::from_millis(300);
         let mut observed = None;
         while Instant::now() < deadline {
-            if let Ok(PlaybackEvent::TrackChanged {
-                path,
-                queue_index: _,
-                kind,
-                track_token: _,
-            }) = rx.recv_timeout(Duration::from_millis(10))
+            if let Ok(PlaybackEvent::TrackChanged { path, kind, .. }) =
+                rx.recv_timeout(Duration::from_millis(10))
             {
                 if path == b && matches!(kind, TrackChangeKind::Gapless) {
                     observed = Some((path, kind));
@@ -1438,7 +1485,10 @@ mod tests {
             let event = rx
                 .recv_timeout(Duration::from_secs(10))
                 .expect("the engine answers every command");
-            if matches!(event, PlaybackEvent::Snapshot(_)) {
+            if matches!(
+                event,
+                PlaybackEvent::Snapshot(_) | PlaybackEvent::TrackChanged { .. }
+            ) {
                 unanswered -= 1;
             }
             events.push(event);
@@ -1455,6 +1505,7 @@ mod tests {
                     queue_index,
                     kind,
                     track_token,
+                    ..
                 } => Some((
                     path.clone(),
                     *queue_index,
@@ -1475,7 +1526,8 @@ mod tests {
             .iter()
             .rev()
             .find_map(|event| match event {
-                PlaybackEvent::Snapshot(snapshot) => Some(snapshot.clone()),
+                PlaybackEvent::Snapshot(snapshot)
+                | PlaybackEvent::TrackChanged { snapshot, .. } => Some(snapshot.clone()),
                 _ => None,
             })
             .expect("snapshot")
