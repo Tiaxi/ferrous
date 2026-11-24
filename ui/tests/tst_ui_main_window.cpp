@@ -1190,6 +1190,8 @@ private slots:
     void nowPlayingShowsTheFileNameOfATrackWithoutTitleOrArtist();
     void nowPlayingCoverIsAKeyboardStop();
     void libraryFoldersAreFolderHeaders();
+    void libraryFoldersAfterTheFirstHaveARuleOnTop();
+    void libraryCollapseAllIsEnabledOnlyWithAnExpandedRow();
     void regionHeadersNameTheRegionAndItsTotals();
     void selectedRowsDrawTheirMarksForTheSelection();
     void libraryTreeHasOneIndentStep();
@@ -1202,8 +1204,12 @@ private slots:
     void libraryThumbnailsFollowTheFont();
     void libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors();
     void collapsedRowNameElidesBeforeTheYear();
+    void libraryRowShowsItsCutTitleWholeInItsToolTip();
     void collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath();
     void libraryRowsShowHoverSelectionAndTheCurrentRow();
+    void librarySelectedRowStepsUpItsChevron();
+    void librarySelectedRowAnswersHoverAsTheQueues_data();
+    void librarySelectedRowAnswersHoverAsTheQueues();
     void queueFocusRingStopsAtTheScrollBarLane_data();
     void queueFocusRingStopsAtTheScrollBarLane();
     void queueRowHoverIsTheListsTint();
@@ -4630,6 +4636,121 @@ void UiMainWindowTest::libraryFoldersAreFolderHeaders() {
     QVERIFY(shown(itemNamed(folder, QStringLiteral("libraryRowCount"))));
 }
 
+// A library folder's row after the first has a 1 px rule in the hairline
+// colour across its top, inside its row, as wide as the row's states: the
+// rows keep their height and places. The first folder's row and the other
+// rows have none; the selection covers it.
+void UiMainWindowTest::libraryFoldersAfterTheFirstHaveARuleOnTop() {
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    bridge->setProperty("libraryRoots", QStringList{QStringLiteral("/music"), QStringLiteral("/shelf")});
+    const QString first = QStringLiteral("/music/Artist A/Album A/01.flac");
+    const QString second = QStringLiteral("/shelf/Artist B/Album B/01.flac");
+    fixture.libraryModel.setExpandedKeys({kRootKey, QStringLiteral("root|/shelf"), kArtistKey});
+    fixture.libraryModel.setLibraryTreeFromBinary(treeOf({
+        {0, 0, 0, 1, 0, QStringLiteral("Music"), kRootKey, QString(), QStringLiteral("/music"), {}},
+        {1, 1, 0, 1, 0, QStringLiteral("Artist A (1)"), kArtistKey, QStringLiteral("Artist A"),
+         QStringLiteral("/music/Artist A"), {}},
+        {2, 2, 0, 1, 2005, QStringLiteral("Album A"), kAlbumKey, QStringLiteral("Artist A"),
+         QStringLiteral("/music/Artist A/Album A"), {}},
+        {4, 3, 1, 0, 0, QStringLiteral("First"), QStringLiteral("track|") + first, QStringLiteral("Artist A"), first,
+         first},
+        {0, 0, 0, 1, 0, QStringLiteral("Shelf"), QStringLiteral("root|/shelf"), QString(), QStringLiteral("/shelf"), {}},
+        {1, 1, 0, 1, 0, QStringLiteral("Artist B (1)"), QStringLiteral("artist|Artist B"), QStringLiteral("Artist B"),
+         QStringLiteral("/shelf/Artist B"), {}},
+        {2, 2, 0, 1, 2010, QStringLiteral("Album B"), QStringLiteral("album|Artist B|Album B"),
+         QStringLiteral("Artist B"), QStringLiteral("/shelf/Artist B/Album B"), {}},
+        {4, 3, 1, 0, 0, QStringLiteral("Other"), QStringLiteral("track|") + second, QStringLiteral("Artist B"), second,
+         second},
+    }));
+    QQuickItem *view = named(window, "libraryView");
+    QObject *controller = window->findChild<QObject *>(QStringLiteral("libraryController"));
+    QVERIFY(view && controller);
+    QTRY_COMPARE(view->property("count").toInt(), 5);
+    QTRY_VERIFY(viewRowAt(view, 4) != nullptr);
+    QQuickItem *shelf = viewRowAt(view, 3);
+    QVERIFY(shelf != nullptr && shelf->property("isRootRow").toBool());
+    const qreal rowHeight = view->property("rowHeight").toReal();
+    const auto rule = [](QQuickItem *row) { return itemNamed(row, QStringLiteral("rowBackgroundRule")); };
+    QQuickItem *music = viewRowAt(view, 0);
+    QVERIFY(music != nullptr && music->property("isRootRow").toBool());
+    QVERIFY(!shown(rule(music)));
+    QVERIFY(!shown(rule(viewRowAt(view, 1))) && !shown(rule(viewRowAt(view, 2))) && !shown(rule(viewRowAt(view, 4))));
+    QQuickItem *shelfRule = rule(shelf);
+    QVERIFY(shown(shelfRule));
+    QCOMPARE(colorOf(shelfRule), tokenHex(window, "hairline"));
+    QCOMPARE(shelfRule->height(), 1.0);
+    QCOMPARE(sceneRect(shelfRule).top(), sceneRect(shelf).top());
+    QCOMPARE(sceneRect(shelfRule).left(), sceneRect(shelf).left());
+    QCOMPARE(sceneRect(shelfRule).right(), sceneRect(itemNamed(shelf, QStringLiteral("rowBackgroundTint"))).right());
+    // The rows keep their height and their places on the grid.
+    for (int index = 0; index < 5; ++index) {
+        QCOMPARE(viewRowAt(view, index)->height(), rowHeight);
+        QCOMPARE(viewRowAt(view, index)->y(), index * rowHeight);
+    }
+    // As drawn, at the row's left end, where it has no text: the rule, and
+    // the view under it.
+    const QPointF onRule = sceneRect(shelf).topLeft() + QPointF(4.5, 0.5);
+    QTRY_VERIFY2(near(Drawn(window).at(onRule), tokenOf(window, "hairline")),
+                 qPrintable(Drawn(window).at(onRule).name()));
+    QVERIFY(near(Drawn(window).at(onRule + QPointF(0, 1)), tokenOf(window, "view")));
+    QVERIFY(tokenHex(window, "hairline") != tokenHex(window, "view"));
+    // Selected: the selection covers it.
+    QVERIFY(QMetaObject::invokeMethod(controller, "selectIndex", Q_ARG(QVariant, 3)));
+    QTRY_VERIFY(rowTinted(view, 3));
+    const QColor tint = itemNamed(shelf, QStringLiteral("rowBackgroundTint"))->property("color").value<QColor>();
+    QTRY_VERIFY2(near(Drawn(window).at(onRule), tint), qPrintable(Drawn(window).at(onRule).name()));
+}
+
+// The library's Collapse All is enabled only while a row shows expanded: an
+// artist's, an album's or a library folder's, which shows expanded unless
+// it was collapsed. With every row collapsed, or none, it would do nothing
+// (it was enabled whenever the tree had rows).
+void UiMainWindowTest::libraryCollapseAllIsEnabledOnlyWithAnExpandedRow() {
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    LibraryTreeModel &model = fixture.libraryModel;
+    QObject *item = window->findChild<QObject *>(QStringLiteral("libraryCollapseAllItem"));
+    QObject *controller = window->findChild<QObject *>(QStringLiteral("libraryController"));
+    QVERIFY(item && controller);
+    const auto enabled = [item]() { return item->property("enabled").toBool(); };
+    QVERIFY(!model.hasExpandedRows());
+    QVERIFY(!enabled());
+
+    QSignalSpy changes(&model, &LibraryTreeModel::hasExpandedRowsChanged);
+    showTree(model, kAllExpanded);
+    QTRY_COMPARE(model.rowCount(), 3);
+    QVERIFY(model.hasExpandedRows());
+    QVERIFY(enabled());
+    QCOMPARE(changes.count(), 1);
+    QVERIFY(QMetaObject::invokeMethod(controller, "collapseAll"));
+    QTRY_COMPARE(model.rowCount(), 1);
+    QVERIFY(!model.hasExpandedRows());
+    QVERIFY(!enabled());
+    // One row opened, and closed again.
+    model.toggleKey(kArtistKey);
+    QTRY_COMPARE(model.rowCount(), 2);
+    QVERIFY(enabled());
+    model.toggleKey(kArtistKey);
+    QTRY_COMPARE(model.rowCount(), 1);
+    QVERIFY(!enabled());
+    QCOMPARE(changes.count(), 4);
+
+    // Library folders show expanded until collapsed, the rows under them
+    // collapsed.
+    model.setExpandedKeys({});
+    model.setLibraryTreeFromBinary(artistAlbumTrackTree(QStringLiteral("/music/Artist A"), QStringLiteral("Album A"),
+                                                        QStringLiteral("Music")));
+    QTRY_COMPARE(model.rowCount(), 2);
+    QVERIFY(enabled());
+    QVERIFY(QMetaObject::invokeMethod(controller, "collapseAll"));
+    QTRY_COMPARE(model.rowCount(), 1);
+    QVERIFY(!enabled());
+}
+
 void UiMainWindowTest::regionHeadersNameTheRegionAndItsTotals() {
     MainWindowFixture fixture(sized());
     QQuickWindow *window = fixture.window;
@@ -5371,6 +5492,91 @@ void UiMainWindowTest::libraryRowsShowHoverSelectionAndTheCurrentRow() {
     QTRY_COMPARE(QQmlProperty(trackTint, QStringLiteral("border.width")).read().toReal(), 1.0);
     QTRY_VERIFY(!tint->isVisible());
     QCOMPARE(colorOf(itemNamed(track, QStringLiteral("libraryRowNumber"))), tokenHex(window, "textTertiarySelected"));
+}
+
+// A selected row's chevron steps up with the row's other secondary marks,
+// to the selected row's secondary colour (it stayed the plain one on the
+// selection); an unselected row's keeps the plain one.
+void UiMainWindowTest::librarySelectedRowStepsUpItsChevron() {
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    showTree(fixture.libraryModel, kAllExpanded);
+    QQuickItem *artist = nullptr;
+    QQuickItem *album = nullptr;
+    QTRY_VERIFY((artist = libraryRow(window, QStringLiteral("artist"))) != nullptr
+                && (album = libraryRow(window, QStringLiteral("album"))) != nullptr);
+    QObject *controller = window->findChild<QObject *>(QStringLiteral("libraryController"));
+    QVERIFY(controller != nullptr);
+    QQuickItem *artistChevron = itemNamed(artist, QStringLiteral("libraryRowChevron"));
+    QQuickItem *albumChevron = itemNamed(album, QStringLiteral("libraryRowChevron"));
+    QVERIFY(shown(artistChevron) && shown(albumChevron));
+    QCOMPARE(colorOf(albumChevron), tokenHex(window, "textSecondary"));
+    QVERIFY(QMetaObject::invokeMethod(controller, "selectIndex", Q_ARG(QVariant, 1)));
+    QTRY_VERIFY(album->property("rowSelected").toBool());
+    QCOMPARE(colorOf(albumChevron), tokenHex(window, "textSecondarySelected"));
+    QCOMPARE(colorOf(artistChevron), tokenHex(window, "textSecondary"));
+    QVERIFY(tokenHex(window, "textSecondarySelected") != tokenHex(window, "textSecondary"));
+}
+
+void UiMainWindowTest::librarySelectedRowAnswersHoverAsTheQueues_data() {
+    QTest::addColumn<bool>("queue");
+    QTest::addColumn<bool>("focused");
+    QTest::newRow("library") << false << true;
+    QTest::newRow("library, without focus") << false << false;
+    QTest::newRow("queue") << true << true;
+    QTest::newRow("queue, without focus") << true << false;
+}
+
+// A selected library row under the pointer steps its selection tint toward
+// the text colour, as a selected queue row does, in the same colours, with
+// focus and without it (the library's kept the plain tint, so the pointer
+// went unanswered on it); off it, the plain tint again.
+void UiMainWindowTest::librarySelectedRowAnswersHoverAsTheQueues() {
+    QFETCH(bool, queue);
+    QFETCH(bool, focused);
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QQuickItem *view = named(window, queue ? "playlistView" : "libraryView");
+    QQuickItem *other = named(window, queue ? "libraryView" : "playlistView");
+    QObject *controller = window->findChild<QObject *>(queue ? QStringLiteral("queueController")
+                                                             : QStringLiteral("libraryController"));
+    QVERIFY(view && other && controller);
+    if (queue) {
+        setQueue(bridgeOf(window), sampleQueueRows(3));
+        QTRY_COMPARE(view->property("count").toInt(), 3);
+    } else {
+        showTree(fixture.libraryModel, kAllExpanded);
+        QTRY_COMPARE(view->property("count").toInt(), 3);
+    }
+    QQuickItem *row = nullptr;
+    QTRY_VERIFY((row = viewRowAt(view, 1)) != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(controller, queue ? "setSingleSelection" : "selectIndex",
+                                      Q_ARG(QVariant, 1)));
+    QTRY_VERIFY(rowTinted(view, 1));
+    if (focused) {
+        view->forceActiveFocus();
+        QTRY_VERIFY(view->hasActiveFocus());
+    } else {
+        other->forceActiveFocus();
+        QTRY_VERIFY(!view->hasActiveFocus());
+    }
+    QQuickItem *tint = itemNamed(row, QStringLiteral("rowBackgroundTint"));
+    QVERIFY(tint != nullptr);
+    const QString plain = tokenHex(window, focused ? "selection" : "selectionInactive");
+    const QString hovered = tokenHex(window, focused ? "selectionHovered" : "selectionInactiveHovered");
+    QVERIFY(plain != hovered);
+    QTRY_COMPARE(colorOf(tint), plain);
+    QTest::mouseMove(window, sceneRect(row).center().toPoint());
+    QTRY_COMPARE(colorOf(tint), hovered);
+    // As drawn, at the row's left end, where it has no text.
+    const QPointF corner = sceneRect(row).topLeft() + QPointF(2.5, 2.5);
+    const QColor drawnHovered = tokenOf(window, focused ? "selectionHovered" : "selectionInactiveHovered");
+    QTRY_VERIFY2(near(Drawn(window).at(corner), drawnHovered),
+                 qPrintable(Drawn(window).at(corner).name() + QStringLiteral(" for ") + drawnHovered.name()));
+    QTest::mouseMove(window, QPoint(window->width() - 10, window->height() - 60));
+    QTRY_COMPARE(colorOf(tint), plain);
 }
 
 void UiMainWindowTest::queueFocusRingStopsAtTheScrollBarLane_data() {
@@ -6366,6 +6572,107 @@ void UiMainWindowTest::unreadableRowsReasonOpensBelowClearOfThePlayingRow() {
     QTRY_VERIFY(playing != nullptr && playing->property("isNow").toBool());
     QTRY_COMPARE(treeReason->property("y").toReal(), -3 - treeReason->property("height").toReal());
     QVERIFY(!reasonSceneRect(track, treeReason).intersects(sceneRect(playing)));
+}
+
+// A library row whose title is cut short shows it whole to the pointer
+// anywhere on the row, after the style's delay, in the tooltip an
+// unreadable row's reason has, at its place: from the title's start, below
+// the row, never over it. A title that fits has none, and an unreadable
+// row's reason takes the title's place. The accessible name has the whole
+// title as well.
+void UiMainWindowTest::libraryRowShowsItsCutTitleWholeInItsToolTip() {
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
+    QVERIFY(bridge && errors);
+    bridge->setProperty("libraryRoots", QStringList{QStringLiteral("/music")});
+    const QString longAlbum = QStringLiteral("An Album Whose Name Runs On ") + QStringLiteral("And On ").repeated(12);
+    const QString longTrack = QStringLiteral("A Track Whose Title Runs On ") + QStringLiteral("And On ").repeated(12);
+    const QString later = QStringLiteral("/music/Artist A/Album A/03.flac");
+    fixture.libraryModel.setExpandedKeys(kAllExpanded);
+    fixture.libraryModel.setLibraryTreeFromBinary(treeOf({
+        {1, 0, 0, 1, 0, QStringLiteral("Artist A (1)"), kArtistKey, QStringLiteral("Artist A"),
+         QStringLiteral("/music/Artist A"), {}},
+        {2, 1, 0, 2, 2005, longAlbum, kAlbumKey, QStringLiteral("Artist A"), QStringLiteral("/music/Artist A/Album A"),
+         {}},
+        {4, 2, 2, 0, 0, longTrack, QStringLiteral("track|") + kTrackPath, QStringLiteral("Artist A"), kTrackPath,
+         kTrackPath},
+        {4, 2, 3, 0, 0, QStringLiteral("Third"), QStringLiteral("track|") + later, QStringLiteral("Artist A"), later,
+         later},
+    }));
+    QQuickItem *view = named(window, "libraryView");
+    QVERIFY(view != nullptr);
+    QQuickItem *artist = nullptr;
+    QQuickItem *album = nullptr;
+    QQuickItem *track = nullptr;
+    QTRY_VERIFY((artist = viewRowAt(view, 0)) != nullptr && (album = viewRowAt(view, 1)) != nullptr
+                && (track = viewRowAt(view, 2)) != nullptr && viewRowAt(view, 3) != nullptr);
+    QQuickItem *albumTitle = itemNamed(album, QStringLiteral("libraryRowTitle"));
+    QVERIFY(albumTitle != nullptr);
+    QVERIFY(albumTitle->property("truncated").toBool());
+    QVERIFY(!itemNamed(artist, QStringLiteral("libraryRowTitle"))->property("truncated").toBool());
+    QCOMPARE(QQmlProperty(album, QStringLiteral("Accessible.name"), qmlContext(album)).read().toString(), longAlbum);
+    // None made before the pointer comes.
+    QCOMPARE(rowReasonOf(album, QStringLiteral("libraryRowTitleToolTip")), nullptr);
+    const QPoint away(window->width() - 10, window->height() - 60);
+
+    // On the row's year, away from the title: after the style's delay, the
+    // whole title, from the title's start, below the row.
+    QQuickItem *year = itemNamed(album, QStringLiteral("libraryRowYear"));
+    QVERIFY(shown(year));
+    QTest::mouseMove(window, sceneRect(year).center().toPoint() - QPoint(4, 0));
+    QTest::mouseMove(window, sceneRect(year).center().toPoint());
+    QObject *tip = nullptr;
+    QTRY_VERIFY((tip = rowReasonOf(album, QStringLiteral("libraryRowTitleToolTip"))) != nullptr);
+    QVERIFY(tip->property("delay").toInt() > 100);
+    QTest::qWait(100);
+    QVERIFY(!reasonOpen(tip));
+    QTRY_VERIFY(reasonOpen(tip));
+    QCOMPARE(tip->property("message").toString(), longAlbum);
+    QCOMPARE(tip->property("text").toString(), longAlbum);
+    QCOMPARE(tip->property("x").toReal(), album->property("titleX").toReal());
+    QCOMPARE(tip->property("y").toReal(), album->height() + 3);
+    QVERIFY(!reasonSceneRect(album, tip).intersects(sceneRect(album)));
+    QVERIFY(reasonSceneRect(album, tip).right() <= sceneRect(view).right());
+    // Held down, as a drag starts: none.
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, sceneRect(year).center().toPoint());
+    QTRY_VERIFY(!reasonOpen(tip));
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, sceneRect(year).center().toPoint());
+
+    // A title that fits: none; the cut one's fades out.
+    const QPoint onArtist = sceneRect(artist).center().toPoint();
+    QTest::mouseMove(window, onArtist);
+    QTRY_VERIFY(!reasonOpen(tip));
+    QTest::qWait(1000);
+    QVERIFY(!tip->property("visible").toBool());
+    QCOMPARE(rowReasonOf(artist, QStringLiteral("libraryRowTitleToolTip")), nullptr);
+    QCOMPARE(rowReasonOf(artist, QStringLiteral("libraryRowReason")), nullptr);
+
+    // Another cut title: its own, and the view keeps one.
+    QVERIFY(itemNamed(track, QStringLiteral("libraryRowTitle"))->property("truncated").toBool());
+    QTest::mouseMove(window, sceneRect(track).center().toPoint());
+    QObject *trackTip = nullptr;
+    QTRY_VERIFY((trackTip = rowReasonOf(track, QStringLiteral("libraryRowTitleToolTip"))) != nullptr);
+    QTRY_VERIFY(reasonOpen(trackTip));
+    QCOMPARE(trackTip->property("message").toString(), longTrack);
+    QCOMPARE(rowReasonOf(album, QStringLiteral("libraryRowTitleToolTip")), nullptr);
+    QTest::mouseMove(window, away);
+    QTRY_VERIFY(!reasonOpen(trackTip));
+
+    // An unreadable row cut short: its reason, not its title.
+    const QString why = QStringLiteral("The file cannot be read.");
+    QVERIFY(QMetaObject::invokeMethod(errors, "report", Q_ARG(QVariant, 1), Q_ARG(QVariant, 1),
+                                      Q_ARG(QVariant, kTrackPath), Q_ARG(QVariant, why), Q_ARG(QVariant, QString())));
+    QObject *reason = nullptr;
+    QTRY_VERIFY((reason = rowReasonOf(track, QStringLiteral("libraryRowReason"))) != nullptr);
+    QTest::mouseMove(window, sceneRect(track).center().toPoint());
+    QTRY_VERIFY(reasonOpen(reason));
+    QCOMPARE(reason->property("message").toString(), why);
+    QCOMPARE(rowReasonOf(track, QStringLiteral("libraryRowTitleToolTip")), nullptr);
+    QTest::mouseMove(window, away);
+    QTRY_VERIFY(!reasonOpen(reason));
 }
 
 void UiMainWindowTest::queueStopMarkWeighsNoMoreThanPause_data() {

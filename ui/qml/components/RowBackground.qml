@@ -34,6 +34,11 @@ import "../logic/ColorUtils.js" as ColorUtils
 // - opaque: the row also paints the view colour under its tints and in
 //   the lane, so a row that slides over another while its list moves rows
 //   hides it.
+//
+// - topRule (the library's, on a library folder's row after the first): a
+//   1 px rule in the hairline colour across the row's top, inside the row
+//   and as wide as its states, under them: the hover tints it, the
+//   selection covers it and the ring runs over it.
 Item {
     id: root
 
@@ -52,6 +57,7 @@ Item {
     property real scrollbarLane: 0
     property bool selectedHover: false
     property bool pressed: false
+    property bool topRule: false
 
     readonly property color selectionColor: root.active ? root.uiPalette.selection : root.uiPalette.selectionInactive
     // How far the selection has stepped toward its hovered colour: the
@@ -76,6 +82,14 @@ Item {
         anchors.rightMargin: -root.scrollbarLane
         color: root.uiPalette.view
         visible: root.opaque
+    }
+
+    Rectangle {
+        objectName: "rowBackgroundRule"
+        width: parent.width
+        height: 1
+        color: root.uiPalette.hairline
+        visible: root.topRule
     }
 
     Rectangle {

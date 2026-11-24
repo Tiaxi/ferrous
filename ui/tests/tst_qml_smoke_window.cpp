@@ -398,6 +398,8 @@ Item {
 
     ListModel {
         id: sidebarModel
+        // LibraryTreeModel's, for the library's Collapse All.
+        property bool hasExpandedRows: false
     }
 
     Components.UiPalette {
