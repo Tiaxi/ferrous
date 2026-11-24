@@ -4,7 +4,7 @@ What each part of Ferrous does, in more detail than the [README](../README.md). 
 
 ## Playback
 
-- GStreamer plays the queue with seeking, repeat, shuffle and volume. A track goes on gaplessly into the next one when both are files of the same type, such as FLAC into FLAC.
+- GStreamer plays the queue with seeking, repeat, shuffle and volume. A track goes on gaplessly into the next one when their file name extensions match, such as two `.flac` files.
 - The queue comes back on the next launch, with the current track where you left it.
 - Clearing the queue, removing, moving or replacing tracks can be undone and redone until the queue changes another way ([details](SHORTCUTS.md#library-and-queue)).
 - Open files, add folders, import M3U and M3U8 playlists, and drag tracks to reorder them.
@@ -63,7 +63,7 @@ Connect an account in the Last.fm page of Configure Ferrous; Ferrous authenticat
 
 - **Progress.** In the status bar, a short bar beside the Last.fm glyph fills with the time listened towards the scrobble. A seek doesn't move it, and only a new play starts it over; its tooltip gives the time left. When playback stops before the scrobble point, the bar keeps a mark where the play got to, and its tooltip says that play wasn't scrobbled.
 - **Pause.** Clicking the slot pauses scrobbling until you click it again or quit, and strikes the glyph through. A track that plays while paused, before its scrobble point, is never scrobbled, and Ferrous starts no Now Playing updates or scrobbles until you resume; queued scrobbles wait.
-- **Outages.** When Last.fm can't be reached or is busy, scrobbles stay queued, and Ferrous tries again on a schedule: after 30 seconds, then at doubling intervals of up to 30 minutes, or sooner once Last.fm answers again. When Last.fm asks Ferrous to slow down, nothing is sent until its wait is over, for at most a day, unless you reconnect the account.
+- **Outages.** When Last.fm can't be reached or is busy, scrobbles stay queued, and Ferrous tries again on a schedule: after 30 seconds, then at doubling intervals of up to 30 minutes. A new scrobble or a Now Playing update that goes through can bring the next try forward. When Last.fm asks Ferrous to slow down, nothing is sent automatically until its wait is over, for at most a day, unless you reconnect the account.
 - **Limits.** Last.fm takes no scrobble older than 14 days, so Ferrous discards queued scrobbles of that age, and the oldest beyond 10,000 queued ones. The Last.fm page counts those discarded since Ferrous started.
 - **What you see.** The slot says when scrobbles wait or one failed, and the Last.fm page shows when the next retry is. Recent Issues lists only what needs you, such as reconnecting the account or scrobbles Last.fm refused. The diagnostics log records each Now Playing update, submission and failure. The Last.fm page can hide the slot.
 
