@@ -67,10 +67,10 @@ const Scheme kBreezeDark{QStringLiteral("#202326"), QStringLiteral("#141618"), Q
 const Scheme kBreezeLight{QStringLiteral("#eff0f1"), QStringLiteral("#ffffff"), QStringLiteral("#232629"),
                           QStringLiteral("#707d8a"), QStringLiteral("#3daee9"), QStringLiteral("#fcfcfc")};
 
-// A window in `scheme`, `width` × `height`, with a 48 px transport band at
-// the top and the palette over a fake bridge and the real controller and
-// results model.
-QByteArray harnessQml(const Scheme &scheme, int width, int height) {
+// A window in `scheme`, `width` × `height`, with a transport band at the
+// top, 48 px unless told otherwise, under a menu bar where asked for, and
+// the palette over a fake bridge and the real controller and results model.
+QByteArray harnessQml(const Scheme &scheme, int width, int height, bool menuBar = false, int transportHeight = 48) {
     return QStringLiteral(R"QML(
 import QtQuick 2.15
 import QtQuick.Controls 2.15
@@ -95,7 +95,7 @@ ApplicationWindow {
     property alias controller: controller
     property alias dialog: dialog
     property alias transport: transport
-
+%9
     QtObject {
         id: bridge
         property var globalSearchModel: searchModel
@@ -148,7 +148,7 @@ ApplicationWindow {
             id: transport
             objectName: "transportBar"
             width: parent.width
-            height: 48
+            height: %10
             color: tokens.chrome
             property int presses: 0
             property int wheels: 0
@@ -177,6 +177,16 @@ ApplicationWindow {
         .arg(scheme.window, scheme.view, scheme.text, scheme.inactiveText, scheme.highlight, scheme.button)
         .arg(width)
         .arg(height)
+        .arg(menuBar ? QStringLiteral(R"QML(
+    menuBar: MenuBar {
+        objectName: "harnessMenuBar"
+        Menu { title: "File" }
+        Menu { title: "Edit" }
+        Menu { title: "View" }
+    }
+)QML")
+                     : QString())
+        .arg(transportHeight)
         .toUtf8();
 }
 
@@ -307,6 +317,23 @@ qreal rowHeightFor(const QString &kind, int index) {
     return kind == QStringLiteral("section") && index > 0 ? 36.0 : 28.0;
 }
 
+// How many of `model`'s rows, from the first, show whole in `room` at the
+// default font, and their height: a heading only with the row under it.
+std::pair<int, qreal> wholeRowsIn(const GlobalSearchResultsModel &model, qreal room) {
+    qreal whole = 0;
+    int shown = 0;
+    while (shown < model.rowCount()) {
+        const QString kind = model.rowDataAt(shown).value(QStringLiteral("kind")).toString();
+        const qreal under = kind == QStringLiteral("section") && shown + 1 < model.rowCount()
+            ? rowHeightFor(model.rowDataAt(shown + 1).value(QStringLiteral("kind")).toString(), shown + 1)
+            : 0.0;
+        if (whole + rowHeightFor(kind, shown) + under > room) break;
+        whole += rowHeightFor(kind, shown);
+        ++shown;
+    }
+    return {shown, whole};
+}
+
 QColor colorOf(QQuickItem *item) {
     return item->property("color").value<QColor>();
 }
@@ -325,7 +352,8 @@ struct Harness {
     QTemporaryDir covers;
     QString coverUrl;
 
-    bool load(const Scheme &scheme, QString *errorText, int width = 1600, int height = 1000) {
+    bool load(const Scheme &scheme, QString *errorText, int width = 1600, int height = 1000, bool menuBar = false,
+              int transportHeight = 48) {
         if (!covers.isValid()) {
             *errorText = QStringLiteral("no temporary directory");
             return false;
@@ -337,7 +365,7 @@ struct Harness {
         coverUrl = QUrl::fromLocalFile(coverPath).toString();
         engine.rootContext()->setContextProperty(QStringLiteral("searchModel"), &model);
         QQmlComponent component(&engine);
-        component.setData(harnessQml(scheme, width, height),
+        component.setData(harnessQml(scheme, width, height, menuBar, transportHeight),
                           QUrl::fromLocalFile(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/SearchPaletteHarness.qml")));
         root.reset(component.create());
         if (!root) {
@@ -477,6 +505,7 @@ private slots:
     void moreRowShowsTheWholeSectionAndKeepsTheSelection();
     void resultsListEndsOnAWholeRow_data();
     void resultsListEndsOnAWholeRow();
+    void noHeadingEndsTheResults();
     void scrolledResultsTakeANewRowCountWithoutABindingLoop_data();
     void scrolledResultsTakeANewRowCountWithoutABindingLoop();
     void modelNotifiesItsCountAsRowsChange();
@@ -1522,12 +1551,7 @@ void SearchPaletteTest::resultsListEndsOnAWholeRow() {
     // their two seams.
     const qreal paletteTop = sceneRect(harness.palette()).top();
     const qreal room = std::min(16 * 32.0, windowHeight - paletteTop - 32 - 44 - 2 - footer->height());
-    qreal whole = 0;
-    int shown = 0;
-    while (shown < heights.size() && whole + heights.at(shown) <= room) {
-        whole += heights.at(shown);
-        ++shown;
-    }
+    const auto [shown, whole] = wholeRowsIn(harness.model, room);
     QVERIFY2(shown > 2 && shown < heights.size(), qPrintable(QStringLiteral("%1 rows in %2 px").arg(shown).arg(room)));
     QTRY_COMPARE(view->height(), whole);
     // The rest scroll under the app's lane scrollbar, as the library's and
@@ -1579,6 +1603,49 @@ void SearchPaletteTest::resultsListEndsOnAWholeRow() {
     if (few + 6 <= room) {
         QTRY_COMPARE(view->height(), few + 6);
     }
+}
+
+// A section's heading never ends the list: in a window where the heading
+// would fit but not the row under it, the list ends over the heading and
+// the scrollbar leads on to both (the heading ended the list, a section
+// with nothing in it).
+void SearchPaletteTest::noHeadingEndsTheResults() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText, 1000, 600), qPrintable(errorText));
+    QVERIFY(harness.open());
+    harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    QQuickItem *view = harness.view();
+    QQuickItem *footer = harness.item(QStringLiteral("globalSearchFooter"));
+    const qreal paletteTop = sceneRect(harness.palette()).top();
+    int headingsHeldBack = 0;
+    for (int windowHeight = 360; windowHeight <= 560; windowHeight += 2) {
+        harness.window->resize(1000, windowHeight);
+        // The overlay the palette is in takes the window's height when it
+        // is next laid out.
+        QTRY_COMPARE(harness.palette()->parentItem()->height(), qreal(windowHeight));
+        const qreal room = windowHeight - paletteTop - 32 - 44 - 2 - footer->height();
+        const auto [shown, whole] = wholeRowsIn(harness.model, room);
+        if (shown == harness.model.rowCount()) continue;
+        const QString next = harness.model.rowDataAt(shown).value(QStringLiteral("kind")).toString();
+        // Where the heading fits by itself.
+        if (next == QStringLiteral("section") && whole + rowHeightFor(next, shown) <= room) ++headingsHeldBack;
+        QTRY_COMPARE(view->height(), whole);
+        // The last row in view is a result.
+        QString last;
+        for (int i = 0; i < harness.model.rowCount(); ++i) {
+            QQuickItem *row = harness.row(i);
+            if (row == nullptr || !row->isVisible() || row->height() <= 0) continue;
+            if (std::abs(sceneRect(row).bottom() - sceneRect(view).bottom()) < 0.5) {
+                last = harness.model.rowDataAt(i).value(QStringLiteral("kind")).toString();
+            }
+        }
+        QVERIFY2(last == QStringLiteral("item"),
+                 qPrintable(QStringLiteral("%1 px: the list ends on a %2 row").arg(windowHeight).arg(last)));
+        QTRY_VERIFY(harness.item(QStringLiteral("globalSearchScrollBar"))->isVisible());
+    }
+    QVERIFY2(headingsHeldBack > 0, "no window held a heading back");
 }
 
 void SearchPaletteTest::scrolledResultsTakeANewRowCountWithoutABindingLoop_data() {

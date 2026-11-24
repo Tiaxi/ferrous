@@ -616,7 +616,10 @@ Dialog {
             // the first, as fit it whole, and the rest scroll (the
             // list ended in half a row). From the rows' kinds, not from the
             // view's content height, which is an estimate while only some
-            // of its rows have items.
+            // of its rows have items. A heading counts only with the row
+            // under it: where both don't fit, the list ends over the
+            // heading, and the scrollbar leads on to them (a heading that
+            // ended the list started a section with nothing in it).
             readonly property real resultsHeight: {
                 const room = root.maximumHeight - root.fieldHeight - 2 - root.footerHeight
                 const rows = root.controller.globalSearchModelApi
@@ -624,7 +627,9 @@ Dialog {
                 for (let i = 0; root.rowsRevision >= 0 && i < root.rowCount; ++i) {
                     const kind = rows.rowDataAt(i).kind || ""
                     const rowHeight = root.rowHeightAt(kind, i)
-                    if (used + rowHeight > room) {
+                    const firstRowHeight = kind === "section" && i + 1 < root.rowCount
+                        ? root.rowHeightAt(rows.rowDataAt(i + 1).kind || "", i + 1) : 0
+                    if (used + rowHeight + firstRowHeight > room) {
                         return used
                     }
                     used += rowHeight
