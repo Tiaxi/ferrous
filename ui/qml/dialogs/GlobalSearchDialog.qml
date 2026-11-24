@@ -89,6 +89,9 @@ Dialog {
     readonly property real footerHeight: Math.max(28, footerHints.implicitHeight + 8)
     // The line under the no-results title.
     readonly property real hintHeight: Math.max(20, Math.round(smallMetrics.height) + 4)
+    // Over the no-results message, and under it or the recent searches:
+    // 8 px, scaled, as the rows' text is.
+    readonly property real messageGap: root.uiPalette.scaledSize(8)
     // The footer's gaps: between a key and its action, half again a word
     // space, so "Ctrl+Enter Add to Queue" reads as a key and an action, not
     // as one phrase; between pairs three times that, so the pairs read
@@ -127,14 +130,38 @@ Dialog {
         return Math.max(0, Math.min(root.uiPalette.scaledSize(380), Math.max(least, spared)))
     }
     readonly property real contextX: root.titleX + root.titleWidth + root.columnGap
-    // Where the palette's top is: set when it opens, from where the
-    // transport is then.
+    // Where the palette's top is: set when it opens, and kept while it is
+    // open, so typing never moves the field. 32 px under the transport;
+    // higher where the window is too short to show five results there
+    // (at a large font in a small window it showed three), as far as the
+    // field, the results' footer, two headings and five results then fit
+    // above the window's 32 px bottom margin, but at least 8 px under the
+    // menu bar.
     property real paletteTop: 32
+    readonly property int leastResultRows: 5
     function updatePlacement() {
-        root.paletteTop = root.anchorItem && root.parent
-            ? Math.round(root.anchorItem.mapToItem(root.parent, 0, root.anchorItem.height).y) + 1 + 32
+        const windowItem = root.parent
+        if (!windowItem) {
+            root.paletteTop = 32
+            return
+        }
+        const underTransport = root.anchorItem
+            ? Math.round(root.anchorItem.mapToItem(windowItem, 0, root.anchorItem.height).y) + 1 + 32
             : 32
+        const resultsFooterHeight = Math.max.apply(null, ["artist", "album", "track"].map(function(kind) {
+            return root.footerHeightFor(root.hintsFor(kind))
+        }))
+        const leastHeight = root.fieldHeight + 1 + root.rowHeightAt("section", 0) + root.rowHeightAt("section", 1)
+            + root.leastResultRows * root.resultHeight + 1 + resultsFooterHeight
+        const menuBar = root.windowRoot && root.windowRoot.menuBar && root.windowRoot.menuBar.visible
+            ? root.windowRoot.menuBar : null
+        const highest = (menuBar ? Math.ceil(menuBar.mapToItem(windowItem, 0, menuBar.height).y) : 0) + 8
+        root.paletteTop = Math.max(highest, Math.min(underTransport, Math.floor(windowItem.height - 32 - leastHeight)))
     }
+    // The selection is the inactive one while a result's menu is open,
+    // which has the keys then, as the library's and the queue's is while
+    // theirs is, until the menu has closed.
+    readonly property bool selectionActive: !resultMenu.visible
     // Counts the result rows' changes, for what depends on the selected
     // row's data rather than on its index.
     property int rowsRevision: 0
@@ -420,10 +447,42 @@ Dialog {
         return root.selectedAuxRow ? root.selectedAuxRow.kind : "none"
     }
     // What Enter, Ctrl+Enter and Alt+Enter do for the selected row, as
-    // {key, action} pairs, with Esc last.
-    readonly property var keyHints: {
-        const kind = root.selectionKind
+    // {key, action} pairs, with Esc last. Esc is left out where the pairs
+    // would wrap with it and fit one line without it: the line it took at
+    // a large font was a result's room, and Esc closes every dialog.
+    readonly property var keyHints: root.hintsFor(root.selectionKind)
+    function hintsFor(kind) {
+        const pairs = root.actionHintsFor(kind)
         const close = { key: I18n.i18nc("@info:shortcut key name", "Esc"), action: I18n.i18nc("@info:shortcut action", "Close") }
+        const all = pairs.concat([close])
+        return pairs.length > 0 && root.hintLines(all) > 1 && root.hintLines(pairs) === 1 ? pairs : all
+    }
+    // The width of a pair in the footer's line, with the gap after it
+    // unless it is the last, as its Row is laid out.
+    function hintPairWidth(hint, last) {
+        return Math.ceil(smallMetrics.advanceWidth(hint.key)) + root.hintKeyGap
+            + Math.ceil(smallMetrics.advanceWidth(hint.action)) + (last ? 0 : root.hintPairGap)
+    }
+    // How many lines `hints` wrap to in the footer, as its Flow wraps them.
+    readonly property real footerHintsWidth: root.width - root.titleX - root.sideInset
+    function hintLines(hints) {
+        let lines = hints.length > 0 ? 1 : 0
+        let x = 0
+        for (let i = 0; i < hints.length; ++i) {
+            const width = root.hintPairWidth(hints[i], i === hints.length - 1)
+            if (x > 0 && x + width > root.footerHintsWidth) {
+                lines += 1
+                x = 0
+            }
+            x += width
+        }
+        return lines
+    }
+    function footerHeightFor(hints) {
+        return Math.max(28, root.hintLines(hints) * root.footerLineHeight + 8)
+    }
+    // The pairs for a row of `kind`, without Esc.
+    function actionHintsFor(kind) {
         const enter = I18n.i18nc("@info:shortcut key name", "Enter")
         if (kind === "artist" || kind === "album" || kind === "track") {
             return [
@@ -431,14 +490,13 @@ Dialog {
                     : (kind === "album" ? I18n.i18nc("@info:shortcut action", "Play Album")
                                         : I18n.i18nc("@info:shortcut action", "Play Track")) },
                 { key: I18n.i18nc("@info:shortcut key name", "Ctrl+Enter"), action: I18n.i18nc("@info:shortcut action", "Add to Queue") },
-                { key: I18n.i18nc("@info:shortcut key name", "Alt+Enter"), action: I18n.i18nc("@info:shortcut action", "Show in Library") },
-                close
+                { key: I18n.i18nc("@info:shortcut key name", "Alt+Enter"), action: I18n.i18nc("@info:shortcut action", "Show in Library") }
             ]
         }
-        if (kind === "more") return [{ key: enter, action: I18n.i18nc("@info:shortcut action", "Show All") }, close]
-        if (kind === "recent") return [{ key: enter, action: I18n.i18nc("@info:shortcut action", "Search") }, close]
-        if (kind === "suggestion") return [{ key: enter, action: I18n.i18nc("@info:shortcut action", "Search Instead") }, close]
-        return [close]
+        if (kind === "more") return [{ key: enter, action: I18n.i18nc("@info:shortcut action", "Show All") }]
+        if (kind === "recent") return [{ key: enter, action: I18n.i18nc("@info:shortcut action", "Search") }]
+        if (kind === "suggestion") return [{ key: enter, action: I18n.i18nc("@info:shortcut action", "Search Instead") }]
+        return []
     }
 
     function moveAuxSelection(step, wrap) {
@@ -505,9 +563,11 @@ Dialog {
             width: parent.width
             height: root.fieldHeight
 
+            // Centred on the results' lead column, on one axis with the
+            // artists' glyphs and the covers.
             Kirigami.Icon {
                 objectName: "globalSearchFieldIcon"
-                x: root.sideInset
+                x: root.sideInset + (root.leadSize - width) / 2
                 y: Math.round((parent.height - height) / 2)
                 width: root.glyphSize
                 height: root.glyphSize
@@ -616,7 +676,10 @@ Dialog {
             // the first, as fit it whole, and the rest scroll (the
             // list ended in half a row). From the rows' kinds, not from the
             // view's content height, which is an estimate while only some
-            // of its rows have items.
+            // of its rows have items. A heading counts only with the row
+            // under it: where both don't fit, the list ends over the
+            // heading, and the scrollbar leads on to them (a heading that
+            // ended the list started a section with nothing in it).
             readonly property real resultsHeight: {
                 const room = root.maximumHeight - root.fieldHeight - 2 - root.footerHeight
                 const rows = root.controller.globalSearchModelApi
@@ -624,7 +687,9 @@ Dialog {
                 for (let i = 0; root.rowsRevision >= 0 && i < root.rowCount; ++i) {
                     const kind = rows.rowDataAt(i).kind || ""
                     const rowHeight = root.rowHeightAt(kind, i)
-                    if (used + rowHeight > room) {
+                    const firstRowHeight = kind === "section" && i + 1 < root.rowCount
+                        ? root.rowHeightAt(rows.rowDataAt(i + 1).kind || "", i + 1) : 0
+                    if (used + rowHeight + firstRowHeight > room) {
                         return used
                     }
                     used += rowHeight
@@ -635,7 +700,7 @@ Dialog {
                 ? body.resultsHeight
                 : (noResultsMessage.visible ? noResultsMessage.y + noResultsMessage.height : 0)
                     + (auxColumn.visible ? auxColumn.implicitHeight : 0)
-                    + (noResultsMessage.visible || auxColumn.visible ? 8 : 0)
+                    + (noResultsMessage.visible || auxColumn.visible ? root.messageGap : 0)
 
             ListView {
                 id: resultsView
@@ -745,6 +810,13 @@ Dialog {
                         && model.trackPath === (root.controller.uiBridge.currentTrackPath || "")
                         && (root.controller.uiBridge.playbackState || "Stopped") !== "Stopped"
                     readonly property var titleRuns: isResult ? root.titleRuns(model.label, isNow) : []
+                    // On the selection the secondary marks and the amber
+                    // step up to hold their contrast on its tint, as the
+                    // library's and the queue's do.
+                    readonly property color titleColor: !isNow ? root.uiPalette.text
+                        : (selected ? root.uiPalette.nowSelected : root.uiPalette.now)
+                    readonly property color secondaryColor: selected
+                        ? root.uiPalette.textSecondarySelected : root.uiPalette.textSecondary
                     readonly property string context: isResult ? root.rowContext(model, false) : ""
                     readonly property string matchedContext: isResult ? root.matchedContext(model) : ""
                     // The context's room: up to the length's column, or the
@@ -792,7 +864,7 @@ Dialog {
                         visible: resultRow.selectable
                         hovered: resultRow.hovered && resultRow.isResult
                         selected: resultRow.selected
-                        active: true
+                        active: root.selectionActive
                         focused: false
                         scrollbarLane: resultsView.scrollbarLane
                     }
@@ -843,10 +915,19 @@ Dialog {
                     // file up again on the GUI thread whenever its source
                     // changes, which recycled rows would do on every query.
                     Loader {
+                        id: artistGlyphLoader
                         x: root.sideInset + (root.leadSize - root.glyphSize) / 2
                         y: Math.round((parent.height - root.glyphSize) / 2)
                         active: resultRow.isResult && resultRow.rowType === "artist"
                         sourceComponent: artistGlyph
+                    }
+                    // The artist's glyph in the row's secondary colour,
+                    // selected too.
+                    Binding {
+                        target: artistGlyphLoader.item
+                        property: "color"
+                        value: resultRow.secondaryColor
+                        when: artistGlyphLoader.status === Loader.Ready
                     }
                     Loader {
                         x: root.sideInset
@@ -918,7 +999,7 @@ Dialog {
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.basePointSize
                         font.weight: run && run.match ? Font.DemiBold : Font.Normal
-                        color: resultRow.isNow ? root.uiPalette.now : root.uiPalette.text
+                        color: resultRow.titleColor
                     }
                     Text {
                         readonly property var run: resultRow.titleRuns.length > 1 ? resultRow.titleRuns[1] : null
@@ -934,7 +1015,7 @@ Dialog {
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.basePointSize
                         font.weight: run && run.match ? Font.DemiBold : Font.Normal
-                        color: resultRow.isNow ? root.uiPalette.now : root.uiPalette.text
+                        color: resultRow.titleColor
                     }
                     Text {
                         readonly property var run: resultRow.titleRuns.length > 2 ? resultRow.titleRuns[2] : null
@@ -950,7 +1031,7 @@ Dialog {
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.basePointSize
                         font.weight: run && run.match ? Font.DemiBold : Font.Normal
-                        color: resultRow.isNow ? root.uiPalette.now : root.uiPalette.text
+                        color: resultRow.titleColor
                     }
                     Text {
                         readonly property var run: resultRow.titleRuns.length > 3 ? resultRow.titleRuns[3] : null
@@ -966,7 +1047,7 @@ Dialog {
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.basePointSize
                         font.weight: run && run.match ? Font.DemiBold : Font.Normal
-                        color: resultRow.isNow ? root.uiPalette.now : root.uiPalette.text
+                        color: resultRow.titleColor
                     }
                     Text {
                         readonly property var run: resultRow.titleRuns.length > 4 ? resultRow.titleRuns[4] : null
@@ -982,7 +1063,7 @@ Dialog {
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.basePointSize
                         font.weight: run && run.match ? Font.DemiBold : Font.Normal
-                        color: resultRow.isNow ? root.uiPalette.now : root.uiPalette.text
+                        color: resultRow.titleColor
                     }
                     // The context, whole and regular; where the title has
                     // no match, its matches are in the text colour.
@@ -1002,7 +1083,7 @@ Dialog {
                         elide: Text.ElideRight
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.smallPointSize
-                        color: root.uiPalette.textSecondary
+                        color: resultRow.secondaryColor
                     }
                     Text {
                         id: lengthText
@@ -1019,7 +1100,7 @@ Dialog {
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.smallPointSize
                         font.features: root.uiPalette.tabularFigures
-                        color: root.uiPalette.textSecondary
+                        color: resultRow.secondaryColor
                     }
 
                     MouseArea {
@@ -1057,7 +1138,7 @@ Dialog {
                 id: noResultsMessage
                 objectName: "globalSearchNoResults"
                 visible: root.noResults
-                y: 8
+                y: root.messageGap
                 width: parent.width
                 height: root.suggestion.length > 0 ? root.resultHeight : root.resultHeight + root.hintHeight
                 Text {
@@ -1077,6 +1158,8 @@ Dialog {
                     objectName: "globalSearchNoResultsHint"
                     visible: root.suggestion.length === 0
                     x: root.titleX
+                    // Drawn up into the title row's padding, which is 12 px
+                    // at every font, so this stays 6 px.
                     y: root.resultHeight - 6
                     width: parent.width - x - root.sideInset
                     height: root.hintHeight
@@ -1132,7 +1215,7 @@ Dialog {
                             uiPalette: root.uiPalette
                             hovered: auxMouse.containsMouse
                             selected: auxRow.selected
-                            active: true
+                            active: root.selectionActive
                             focused: false
                             scrollbarLane: 0
                         }
