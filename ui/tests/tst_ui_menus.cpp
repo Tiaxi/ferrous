@@ -414,6 +414,8 @@ ApplicationWindow {
 
     menuBar: MenuBar {
         objectName: "harnessMenuBar"
+        // The scheme's window colour, which Breeze's Header set has.
+        Kirigami.Theme.backgroundColor: "%1"
         delegate: Components.AppMenuBarItem {
             uiPalette: tokens
         }
@@ -591,6 +593,8 @@ private slots:
     void drawsOffscreenUnlessAPlatformIsChosen();
     void menuBarTitleReadsWhenOpenOrHovered_data();
     void menuBarTitleReadsWhenOpenOrHovered();
+    void menuBarTellsHoverFromOpen_data();
+    void menuBarTellsHoverFromOpen();
     void menusReadInKdesWordsAndOrder();
     void libraryFolderMenuNamesTheFolder();
     void menusAnswerThePointerAndTheKeyboard();
@@ -1077,7 +1081,7 @@ void UiMenusTest::checkMenuBarHasTheSixKdeMenusInOrder(QQuickWindow *window) {
                                   QStringLiteral("&Help")}));
 }
 
-// Main.qml's titles are the app's: plain, they show the bar; lit, the
+// Main.qml's titles are the app's: plain, they show the bar; open, the
 // selection tint of the lists, with the text colour on both.
 void UiMenusTest::checkMenuBarTitlesAreLitWithTheSelectionTint(QQuickWindow *window) {
     auto *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
@@ -1098,7 +1102,6 @@ void UiMenusTest::checkMenuBarTitlesAreLitWithTheSelectionTint(QQuickWindow *win
         QQuickItem *background = childNamed(title, "menuBarItemBackground");
         QVERIFY2(label != nullptr && background != nullptr, qPrintable(name));
         QCOMPARE(label->property("color").value<QColor>(), text);
-        QCOMPARE(background->property("color").value<QColor>(), selection);
         QVERIFY2(!background->isVisible(), qPrintable(name));
     }
 
@@ -1110,6 +1113,7 @@ void UiMenusTest::checkMenuBarTitlesAreLitWithTheSelectionTint(QQuickWindow *win
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRect(view).center().toPoint());
     QTRY_VERIFY(menus.at(2)->property("visible").toBool());
     QTRY_COMPARE(viewBackground->opacity(), 1.0);
+    QCOMPARE(viewBackground->property("color").value<QColor>(), selection);
     QTest::mouseMove(window, QPoint(window->width() / 2, window->height() / 2));
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(!menus.at(2)->property("visible").toBool());
@@ -1127,8 +1131,8 @@ void UiMenusTest::menuBarTitleReadsWhenOpenOrHovered_data() {
     QTest::newRow("light") << false;
 }
 
-// The open or hovered title is the text colour on the selection tint, as
-// in the lists, and well over 4.5:1 in both themes (the style's white on
+// The open title is the text colour on the selection tint, as in the
+// lists, and well over 4.5:1 in both themes (the style's white on
 // a translucent accent was 2.08:1 in light). It keeps the style's
 // size, padding and Alt mnemonics, and Alt+letter opens its menu.
 void UiMenusTest::menuBarTitleReadsWhenOpenOrHovered() {
@@ -1182,10 +1186,10 @@ void UiMenusTest::menuBarTitleReadsWhenOpenOrHovered() {
     QVERIFY(!background->isVisible());
     QCOMPARE(label->property("color").value<QColor>(), text);
 
-    // Hovered: lit.
+    // Hovered: lit with the chrome's hover tint (see
+    // menuBarTellsHoverFromOpen).
     QTest::mouseMove(window, sceneRect(file).center().toPoint());
     QTRY_COMPARE(background->opacity(), 1.0);
-    QCOMPARE(background->property("color").value<QColor>(), selection);
     QCOMPARE(label->property("color").value<QColor>(), text);
     QVERIFY(!childNamed(edit, "menuBarItemBackground")->isVisible());
 
@@ -1216,6 +1220,121 @@ void UiMenusTest::menuBarTitleReadsWhenOpenOrHovered() {
     QTRY_COMPARE(background->opacity(), 1.0);
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(!fileMenu->property("visible").toBool());
+}
+
+void UiMenusTest::menuBarTellsHoverFromOpen_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("dark") << true;
+    QTest::newRow("light") << false;
+}
+
+// A title the pointer only passes over, with no menu open, takes the
+// chrome's neutral hover tint; an open title, or the current one the
+// keyboard is on, the selection tint. The two read apart as drawn, and
+// the hover still stands out from the bar.
+void UiMenusTest::menuBarTellsHoverFromOpen() {
+    QFETCH(bool, dark);
+    const Scheme &scheme = dark ? kBreezeDark : kBreezeLight;
+    movePointerOffTheWindows();
+    QQmlEngine engine;
+    QQmlComponent component(&engine);
+    component.setData(menuBarHarnessQml(scheme),
+                      QUrl::fromLocalFile(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/MenuBarHarness.qml")));
+    std::unique_ptr<QObject> root(component.create());
+    QVERIFY2(root != nullptr, qPrintable(component.errorString()));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
+    window->requestActivate();
+    QVERIFY(QTest::qWaitForWindowActive(window));
+    auto *tokens = qvariant_cast<QObject *>(root->property("tokens"));
+    QObject *menuBar = qvariant_cast<QObject *>(root->property("menuBar"));
+    QVERIFY(tokens != nullptr && menuBar != nullptr);
+    QObject *fileMenu = root->findChild<QObject *>(QStringLiteral("harnessFileMenu"));
+    QQuickItem *file = menuBarItemAt(menuBar, 0);
+    QVERIFY(fileMenu != nullptr && file != nullptr);
+    QQuickItem *background = childNamed(file, "menuBarItemBackground");
+    QVERIFY(background != nullptr);
+
+    const QColor selection = tokens->property("selection").value<QColor>();
+    const QColor chrome = tokens->property("chrome").value<QColor>();
+    QVariant hoverTint;
+    QVERIFY(QMetaObject::invokeMethod(tokens, "hoverOn", Q_RETURN_ARG(QVariant, hoverTint), Q_ARG(QVariant, chrome)));
+    const QColor hover = hoverTint.value<QColor>();
+    QVERIFY(hover.isValid() && hover.alpha() < 255);
+
+    // A pixel of the title's background, inside its corner, as drawn.
+    const auto drawnTitle = [&]() {
+        const QImage image = window->grabWindow();
+        const qreal scale = static_cast<qreal>(image.width()) / window->width();
+        const QPointF corner = sceneRect(file).topLeft() + QPointF(2, 2);
+        return image.pixelColor(static_cast<int>(corner.x() * scale), static_cast<int>(corner.y() * scale));
+    };
+    const QColor bar = drawnTitle();
+
+    // Hovered, no menu open: the hover tint, though the bar makes the
+    // title its current one.
+    QTest::mouseMove(window, sceneRect(file).center().toPoint());
+    QTRY_VERIFY(file->property("hovered").toBool());
+    QVERIFY(file->property("highlighted").toBool());
+    QTRY_COMPARE(background->opacity(), 1.0);
+    QCOMPARE(background->property("color").value<QColor>(), hover);
+    QVERIFY(!file->property("selected").toBool());
+    const QColor hovered = drawnTitle();
+    QVERIFY2(channelDistance(hovered, drawnOver(hover, bar)) <= 2,
+             qPrintable(QStringLiteral("drawn %1, hover %2 over %3")
+                            .arg(hovered.name(), drawnOver(hover, bar).name(), bar.name())));
+    QVERIFY2(contrastRatio(hovered, bar) >= 1.2,
+             qPrintable(QStringLiteral("hover %1 on the bar %2").arg(hovered.name(), bar.name())));
+
+    // Passed over: plain, though the bar may keep it current until the
+    // pointer leaves the bar (offscreen, the bar has no hover events).
+    QTest::mouseMove(window, QPoint(window->width() - 10, window->height() - 10));
+    QTRY_VERIFY(!file->property("hovered").toBool());
+    QTRY_VERIFY(!background->isVisible());
+
+    // Open, under the pointer: the selection tint, which reads apart from
+    // the hover.
+    QTest::mouseMove(window, sceneRect(file).center().toPoint());
+    QTRY_VERIFY(file->property("hovered").toBool());
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRect(file).center().toPoint());
+    QTRY_VERIFY(fileMenu->property("visible").toBool());
+    QVERIFY(file->property("hovered").toBool());
+    QTRY_COMPARE(background->property("color").value<QColor>(), selection);
+    QTRY_COMPARE(background->opacity(), 1.0);
+    const QColor open = drawnTitle();
+    QVERIFY2(channelDistance(open, selection) <= 1,
+             qPrintable(QStringLiteral("drawn %1, selection %2").arg(open.name(), selection.name())));
+    QVERIFY2(channelDistance(open, hovered) >= 20,
+             qPrintable(QStringLiteral("open %1, hovered %2").arg(open.name(), hovered.name())));
+
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!fileMenu->property("visible").toBool());
+
+    // The keyboard on the bar, as after Alt, with no menu open: the
+    // selection tint, the pointer off the bar.
+    QTest::mouseMove(window, QPoint(window->width() - 10, window->height() - 10));
+    QTRY_VERIFY(!file->property("hovered").toBool());
+    QTRY_VERIFY(!background->isVisible());
+    QMetaObject::invokeMethod(menuBar, "forceActiveFocus");
+    QTRY_VERIFY(menuBar->property("activeFocus").toBool());
+    if (file->property("highlighted").toBool()) {
+        // Still the bar's current title from the pointer: Right and Left
+        // come back to it.
+        QTest::keyClick(window, Qt::Key_Right);
+        QTest::keyClick(window, Qt::Key_Left);
+    } else {
+        QTest::keyClick(window, Qt::Key_Right);
+    }
+    QTRY_VERIFY(file->property("highlighted").toBool());
+    QVERIFY(!fileMenu->property("visible").toBool());
+    QTRY_VERIFY(file->property("keyboardCurrent").toBool());
+    QTRY_COMPARE(background->opacity(), 1.0);
+    QCOMPARE(background->property("color").value<QColor>(), selection);
+
+    // Escape leaves the bar: plain.
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!file->property("highlighted").toBool());
+    QTRY_VERIFY(!background->isVisible());
 }
 
 void UiMenusTest::checkMenusListTheirItemsInOrder(QQuickWindow *window) {

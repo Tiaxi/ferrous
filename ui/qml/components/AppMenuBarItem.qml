@@ -5,10 +5,15 @@ import QtQuick.Controls 2.15
 import org.kde.kirigami 2.20 as Kirigami
 
 // A title of the menu bar, as the style draws it, but lit as the lists
-// show a selection: open, hovered or reached with the keyboard, it takes
-// the selection tint with the text colour on it. The style draws white on
-// a translucent accent there, 2.08:1 in Breeze Light, so the menu the user
+// show a selection: open or reached with the keyboard, it takes the
+// selection tint with the text colour on it. The style draws white on a
+// translucent accent there, 2.08:1 in Breeze Light, so the menu the user
 // is in was the hardest word to read; this is 9.7:1 and 10.9:1.
+//
+// Only hovered, with no menu open, it takes the neutral hover tint of the
+// window's other chrome, as the transport's buttons do: the selection
+// tint stays the mark of the menu the user is in, so a title the pointer
+// passes over does not read as open.
 //
 // Only the label and the background are the app's. The style's item keeps
 // its size and padding, its Alt mnemonics and its keyboard and pointer
@@ -18,8 +23,24 @@ MenuBarItem {
 
     required property var uiPalette
 
-    // Open, hovered or current: the menu bar marks it.
-    readonly property bool lit: root.down || root.highlighted || root.hovered
+    // Open, pressed, or the title the keyboard is on: the selection tint.
+    // The menu bar makes a title its current one as the pointer enters it
+    // too, and keeps it so until the pointer leaves the bar; the keyboard's
+    // title has the focus as well (after Alt, or a click that closed its
+    // menu), so a current title without it is only the pointer's.
+    readonly property bool menuOpen: root.menu !== null && root.menu.visible
+    readonly property bool keyboardCurrent: root.highlighted
+        && (root.activeFocus || (root.menuBar !== null && root.menuBar.activeFocus))
+    readonly property bool selected: root.down || root.menuOpen || root.keyboardCurrent
+    // Selected or hovered: the menu bar marks it.
+    readonly property bool lit: root.selected || root.hovered
+    // The fill of a lit title, which it keeps as it fades out.
+    property color fill: root.uiPalette.selection
+    Binding on fill {
+        when: root.lit
+        value: root.selected ? root.uiPalette.selection : root.uiPalette.hoverOn(root.uiPalette.chrome)
+        restoreMode: Binding.RestoreNone
+    }
 
     contentItem: Label {
         objectName: "menuBarItemLabel"
@@ -39,7 +60,7 @@ MenuBarItem {
         // The style's.
         implicitWidth: 40
         implicitHeight: Kirigami.Units.gridUnit + 2 * Kirigami.Units.smallSpacing
-        color: root.uiPalette.selection
+        color: root.fill
         opacity: root.lit ? 1 : 0
         visible: opacity > 0
 
