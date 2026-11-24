@@ -1180,6 +1180,24 @@ void TransportStatusTest::transportToolTipsPassAlongTheRowAtOnce() {
     QVERIFY(!buttonToolTip(buttons.at(2))->property("visible").toBool());
     QTRY_VERIFY(buttonToolTip(buttons.at(2))->property("opened").toBool());
     QVERIFY2(timer.elapsed() >= 350, qPrintable(QString::number(timer.elapsed())));
+
+    // A tooltip the keyboard's focus shows waits the delay, also in the gap
+    // between two buttons while the last one fades out (the focused
+    // volume's opened there at once, for a moment, then went again).
+    QQuickItem *volume = harness.item(QStringLiteral("volumeSlider"));
+    QObject *volumeTip = harness.root->findChild<QObject *>(QStringLiteral("volumeToolTip"));
+    QVERIFY(volume && volumeTip);
+    volume->forceActiveFocus(Qt::TabFocusReason);
+    QTest::mouseMove(harness.window, sceneCentre(buttons.at(0)));
+    QTRY_VERIFY(buttonToolTip(buttons.at(0))->property("opened").toBool());
+    QTRY_VERIFY(volume->property("visualFocus").toBool());
+    QTest::mouseMove(harness.window, QPointF((sceneRect(buttons.at(0)).right() + sceneRect(buttons.at(1)).left()) / 2,
+                                             sceneRect(buttons.at(1)).center().y()).toPoint());
+    QVERIFY(!buttons.at(0)->property("hovered").toBool() && !buttons.at(1)->property("hovered").toBool());
+    QVERIFY(!volumeTip->property("visible").toBool());
+    QTest::mouseMove(harness.window, sceneCentre(buttons.at(1)));
+    QVERIFY(buttonToolTip(buttons.at(1))->property("visible").toBool());
+    QVERIFY(!volumeTip->property("visible").toBool());
 }
 
 void TransportStatusTest::seekWaveformMeetsItsContrastAsDrawn_data() {

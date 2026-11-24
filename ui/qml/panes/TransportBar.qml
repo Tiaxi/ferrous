@@ -492,9 +492,13 @@ ToolBar {
     readonly property real laneBoxEdgeContrast: 1.8
     readonly property real laneBoxDarkLift: 0.08
     readonly property color toolTipFill: laneBoxColors.Kirigami.Theme.backgroundColor
+    readonly property color toolTipText: laneBoxColors.Kirigami.Theme.textColor
     readonly property color laneBoxFill: ColorUtils.colorLuma(root.toolTipFill) < 0.45
-        ? ColorUtils.mixColor(root.toolTipFill, laneBoxColors.Kirigami.Theme.textColor, root.laneBoxDarkLift)
+        ? ColorUtils.mixColor(root.toolTipFill, root.toolTipText, root.laneBoxDarkLift)
         : root.toolTipFill
+    // The text of a box: the tooltip's, at least 4.5:1 on the fill, which
+    // the lift brings nearer to it.
+    readonly property color laneBoxText: root.uiPalette.readableOn(root.toolTipText, [root.laneBoxFill], 4.5)
     readonly property color laneBoxEdge: root.uiPalette.readableOn(
         ColorUtils.mixColor(root.laneBoxFill, laneBoxColors.Kirigami.Theme.textColor,
             laneBoxColors.Kirigami.Theme.frameContrast),
@@ -515,15 +519,20 @@ ToolBar {
     // The popups of the lane.
     readonly property var lanePopups: [seekTimeBox, previousButton.laneToolTip, playPauseButton.laneToolTip,
         stopButton.laneToolTip, nextButton.laneToolTip, muteToolTip, volumeToolTip]
-    // Whether a box of the lane is drawn, fading out included. The next
-    // box then opens at once, the lane passing from one to the other as
-    // the pointer moves along the row: with the tooltip's delay between
-    // them, the lane stood empty for most of a second at each button, and
-    // the menu's titles came back in between.
+    // Whether a box of the lane is drawn, fading out included. The box of
+    // the control the pointer goes on to then opens at once, the lane
+    // passing from one to the other as the pointer moves along the row:
+    // with the tooltip's delay between them, the lane stood empty for most
+    // of a second at each button, and the menu's titles came back in
+    // between.
     readonly property bool laneWarm: root.lanePopups.some(popup => popup.background.visible)
-    // The delay of a tooltip in the lane: the style's, or none while the
-    // lane is warm.
-    readonly property int laneToolTipDelay: root.laneWarm ? 0 : Kirigami.Units.toolTipDelay
+    // The delay of a tooltip in the lane: the style's, or none for the
+    // control under the pointer, `pointed`, while the lane is warm. A
+    // tooltip the keyboard's focus shows waits it (in the gap between two
+    // buttons, the focused volume's opened at once, for a moment).
+    function laneToolTipDelay(pointed) {
+        return pointed && root.laneWarm ? 0 : Kirigami.Units.toolTipDelay
+    }
 
     // Over the menu bar's row, while a box of the lane covers or comes
     // within laneBackdropReach of a menu title, all of the titles go under
@@ -550,14 +559,24 @@ ToolBar {
         height: span.height
         color: root.menuBarFill
         opacity: 0
-        visible: opacity > 0 && span.width > 0 && !root.windowMenuActive
-        states: State {
-            name: "held"
-            when: laneBackdrop.held
-            PropertyChanges {
-                laneBackdrop.opacity: 1
+        visible: opacity > 0 && span.width > 0
+        // The menu bar in use first, whatever the boxes do as they give
+        // way: gone at once, and not back as the pointer leaves a title
+        // (fading out under it, it showed again over the titles with no box
+        // in the lane).
+        states: [
+            State {
+                name: "givenWay"
+                when: root.windowMenuActive
+            },
+            State {
+                name: "held"
+                when: laneBackdrop.held
+                PropertyChanges {
+                    laneBackdrop.opacity: 1
+                }
             }
-        }
+        ]
         // In as quickly as the time box comes in, and out over the style's
         // tooltips' fade, slowly at first, so that it stays while the
         // pointer crosses the gap between two buttons.
@@ -573,6 +592,7 @@ ToolBar {
             },
             Transition {
                 from: "held"
+                to: ""
                 enabled: Kirigami.Units.longDuration > 0
                 NumberAnimation {
                     property: "opacity"
@@ -667,6 +687,7 @@ ToolBar {
             textFormat: Text.PlainText
             text: laneToolTip.text
             font: laneToolTip.font
+            color: root.laneBoxText
         }
     }
 
@@ -742,8 +763,15 @@ ToolBar {
             rowItem: transportButton
             wanted: (transportButton.hovered || transportButton.visualFocus) && !transportButton.down
                 && root.laneFreeFor(transportButton)
-            visible: wanted
-            delay: root.laneToolTipDelay
+            // Set together with the delay, which the tooltip reads as it is
+            // made visible: a binding of each could see the other still
+            // unchanged.
+            visible: false
+            delay: 0
+            onWantedChanged: {
+                delay = root.laneToolTipDelay(transportButton.hovered)
+                visible = wanted
+            }
             message: transportButton.toolTipText
         }
         // Space presses the focused button rather than playing or pausing;
@@ -1565,6 +1593,7 @@ ToolBar {
                 contentItem: Label {
                     objectName: "seekDragTime"
                     textFormat: Text.PlainText
+                    color: root.laneBoxText
                     text: seekTimeBox.text
                     font.family: seekTimeBox.font.family
                     font.pointSize: seekTimeBox.font.pointSize
@@ -1706,8 +1735,13 @@ ToolBar {
                 rowItem: muteButton
                 wanted: (muteButton.hovered || muteButton.visualFocus) && !muteButton.down
                     && root.laneFreeFor(muteButton)
-                visible: wanted
-                delay: root.laneToolTipDelay
+                // Set together with the delay, as the other buttons' are.
+                visible: false
+                delay: 0
+                onWantedChanged: {
+                    delay = root.laneToolTipDelay(muteButton.hovered)
+                    visible = wanted
+                }
                 message: muteButton.toolTipText
             }
             focusPolicy: Qt.TabFocus
@@ -1798,7 +1832,7 @@ ToolBar {
                 visible: false
                 delay: 0
                 function showOrHide() {
-                    delay = volumeSlider.pressed ? 0 : root.laneToolTipDelay
+                    delay = volumeSlider.pressed ? 0 : root.laneToolTipDelay(volumeSlider.hovered)
                     visible = wanted
                 }
                 onWantedChanged: showOrHide()

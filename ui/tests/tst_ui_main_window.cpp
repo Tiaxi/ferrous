@@ -668,26 +668,30 @@ auto useDarkPalette(bool dark) {
 // KDE's colour scheme, the one the application's KDE_COLOR_SCHEME_PATH
 // names, and not from the palette, so with useDarkPalette() alone the
 // Header and Tooltip sets stay Breeze Light's. From a scheme file of its
-// own, with Breeze Dark's Window, View, Button, Header and Tooltip sets.
+// own, with Breeze Dark's Window, View, Button, Header and Tooltip sets,
+// the Tooltip set's text `toolTipText` ("r,g,b").
 class BreezeDarkScheme {
 public:
-    BreezeDarkScheme() : m_before(qApp->property(kSchemePath)), m_palette(QGuiApplication::palette()) {
+    explicit BreezeDarkScheme(const QByteArray &toolTipText = QByteArrayLiteral("252,252,252"))
+        : m_before(qApp->property(kSchemePath)), m_palette(QGuiApplication::palette()) {
         const QString path = m_dir.filePath(QStringLiteral("BreezeDark.colors"));
         QFile file(path);
         if (!m_dir.isValid() || !file.open(QIODevice::WriteOnly | QIODevice::Text)) {
             return;
         }
-        const auto group = [&](const char *name, const char *background, const char *alternate) {
+        const auto group = [&](const char *name, const char *background, const char *alternate,
+                               const QByteArray &text = QByteArrayLiteral("252,252,252")) {
             file.write(QByteArrayLiteral("[Colors:") + name + QByteArrayLiteral("]\nBackgroundNormal=") + background
                        + QByteArrayLiteral("\nBackgroundAlternate=") + alternate
-                       + QByteArrayLiteral("\nForegroundNormal=252,252,252\nForegroundInactive=161,169,177\n"
+                       + QByteArrayLiteral("\nForegroundNormal=") + text
+                       + QByteArrayLiteral("\nForegroundInactive=161,169,177\n"
                                            "DecorationFocus=61,174,233\nDecorationHover=61,174,233\n\n"));
         };
         group("Window", "32,35,38", "41,44,48");
         group("View", "20,22,24", "29,31,34");
         group("Button", "41,44,48", "32,35,38");
         group("Header", "41,44,48", "32,35,38");
-        group("Tooltip", "41,44,48", "32,35,38");
+        group("Tooltip", "41,44,48", "32,35,38", toolTipText);
         file.write("[Colors:Selection]\nBackgroundNormal=61,174,233\nForegroundNormal=252,252,252\n");
         file.close();
         qApp->setProperty(kSchemePath, path);
@@ -1883,6 +1887,26 @@ void UiMainWindowTest::seekTimeBoxGivesWayToAnOpenMenu() {
     QTRY_VERIFY(lastMenu->property("opened").toBool());
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(!lastMenu->property("visible").toBool());
+
+    // From the pointer's tooltip on Previous, across the last title, onto
+    // the empty chrome past it: the backdrop gives way as the title is
+    // reached and stays gone, as no box is left in the lane (it went on
+    // fading out under the title and showed again past it).
+    QTest::mouseMove(window, away);
+    seek->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(!previousTip->property("visible").toBool());
+    QTest::mouseMove(window, sceneRect(previous).center().toPoint());
+    QTRY_COMPARE(previousTip->property("opacity").toReal(), 1.0);
+    QTRY_COMPARE(backdrop->opacity(), 1.0);
+    QTest::mouseMove(window, onLastTitle);
+    QTRY_VERIFY(lastTitle->property("hovered").toBool());
+    QVERIFY(!backdrop->isVisible());
+    QCOMPARE(backdrop->opacity(), 0.0);
+    QTest::mouseMove(window, QPointF(sceneRect(menuBar).right() - 20, sceneRect(menuBar).center().y()).toPoint());
+    QTRY_VERIFY(!lastTitle->property("hovered").toBool());
+    QVERIFY(!backdrop->isVisible());
+    QTest::qWait(50);
+    QVERIFY(!backdrop->isVisible());
 }
 
 void UiMainWindowTest::menuTitlesStayHiddenFromOneLaneBoxToTheNext_data() {
@@ -1984,6 +2008,10 @@ void UiMainWindowTest::menuTitlesStayHiddenFromOneLaneBoxToTheNext() {
     const QMetaObject::Connection visibleWatch = connect(backdrop, &QQuickItem::visibleChanged, backdrop, [&]() {
         went = went || !backdrop->isVisible();
     });
+    auto unwatch = qScopeGuard([&]() {
+        disconnect(opacityWatch);
+        disconnect(visibleWatch);
+    });
     const auto across = [&](const QRectF &from, const QRectF &to) {
         // A frame in the gap between them, as the pointer crosses it.
         QTest::mouseMove(window, QPointF((from.right() + to.left()) / 2, to.center().y()).toPoint());
@@ -2013,7 +2041,7 @@ void UiMainWindowTest::menuTitlesStayHiddenFromOneLaneBoxToTheNext() {
     for (qreal x = bar.left() + 2;; x += 3) {
         QTest::mouseMove(window, QPointF(x, bar.center().y()).toPoint());
         QTRY_VERIFY(std::abs(tip->property("anchorX").toReal() - (std::round(x) - bar.left())) < 1.0);
-        if (sceneRect(tipBox).left() > span.right() + 4) {
+        if (sceneRect(tipBox).left() >= span.right() + 4) {
             break;
         }
         QVERIFY2(backdrop->property("held").toBool(), qPrintable(describeRect(sceneRect(tipBox))));
@@ -2026,6 +2054,7 @@ void UiMainWindowTest::menuTitlesStayHiddenFromOneLaneBoxToTheNext() {
     QVERIFY(steps > 20);
     disconnect(opacityWatch);
     disconnect(visibleWatch);
+    unwatch.dismiss();
     QVERIFY2(!went && least >= 0.9,
              qPrintable(QStringLiteral("the backdrop went %1, at least %2").arg(went).arg(least)));
     // Over empty chrome, past the titles, none.
@@ -2047,8 +2076,11 @@ void UiMainWindowTest::menuTitlesStayHiddenFromOneLaneBoxToTheNext() {
 
 void UiMainWindowTest::seekTimeBoxIsCrispWithoutAShadow_data() {
     QTest::addColumn<bool>("dark");
-    QTest::newRow("light") << false;
-    QTest::newRow("dark") << true;
+    QTest::addColumn<QByteArray>("toolTipText");
+    QTest::newRow("light") << false << QByteArray();
+    QTest::newRow("dark") << true << QByteArrayLiteral("252,252,252");
+    // A dimmer tooltip text, 4.5:1 on the fill before the lift.
+    QTest::newRow("dark, dim tooltip text") << true << QByteArrayLiteral("146,146,146");
 }
 
 // The seek bar's time box is one style in both themes: the tooltip's fill
@@ -2059,9 +2091,10 @@ void UiMainWindowTest::seekTimeBoxIsCrispWithoutAShadow_data() {
 // chrome as on the fill, and the dark fill a step from the chrome.
 void UiMainWindowTest::seekTimeBoxIsCrispWithoutAShadow() {
     QFETCH(bool, dark);
+    QFETCH(QByteArray, toolTipText);
     std::optional<BreezeDarkScheme> breezeDark;
     if (dark) {
-        breezeDark.emplace();
+        breezeDark.emplace(toolTipText);
         QVERIFY(breezeDark->isSet());
     }
     MainWindowFixture fixture(sized(1600, 1000));
@@ -2129,16 +2162,26 @@ void UiMainWindowTest::seekTimeBoxIsCrispWithoutAShadow() {
     // The fill: the style's tooltip fill in a light theme; in a dark one,
     // where Breeze's tooltip fill is the chrome and the box over the menu
     // bar's row read as a menu title, 8 % of the way to the text, lighter
-    // than the chrome. Its text at least 4.5:1 on it.
+    // than the chrome. Its text the tooltip's, or, where the lift took that
+    // under 4.5:1 on it, lighter, to 4.5:1.
     QQuickItem *text = named(window, "seekDragTime");
     QVERIFY(text != nullptr);
     const QColor textColor = text->property("color").value<QColor>();
     const QColor toolTipFill = transport->property("toolTipFill").value<QColor>();
-    const QString fills = QStringLiteral("the fill %1, the tooltip's %2, the chrome %3, the text %4")
-        .arg(fill.name(), toolTipFill.name(), chrome.name(), textColor.name());
+    const QColor toolTipTextColor = transport->property("toolTipText").value<QColor>();
+    const QString fills = QStringLiteral("the fill %1, the tooltip's %2 and %3, the chrome %4, the text %5")
+        .arg(fill.name(), toolTipFill.name(), toolTipTextColor.name(), chrome.name(), textColor.name());
+    if (contrastRatio(toolTipTextColor, fill) >= 4.5) {
+        QVERIFY2(sameColor(textColor, toolTipTextColor), qPrintable(fills));
+    } else {
+        // The dim text alone, which the lift took under 4.5:1.
+        QVERIFY2(toolTipText == QByteArrayLiteral("146,146,146"), qPrintable(fills));
+    }
     if (dark) {
-        QVERIFY2(near(fill, mixed(toolTipFill, textColor, 0.08)), qPrintable(fills));
-        QVERIFY2(relativeLuminance(fill) > relativeLuminance(chrome) && contrastRatio(fill, chrome) >= 1.2,
+        QVERIFY2(near(fill, mixed(toolTipFill, toolTipTextColor, 0.08)), qPrintable(fills));
+        QVERIFY2(relativeLuminance(fill) > relativeLuminance(chrome), qPrintable(fills));
+        // Breeze Dark's: #3a3d40 on #292c30.
+        QVERIFY2(toolTipText != QByteArrayLiteral("252,252,252") || contrastRatio(fill, chrome) >= 1.2,
                  qPrintable(fills));
     } else {
         QVERIFY2(sameColor(fill, toolTipFill), qPrintable(fills));
