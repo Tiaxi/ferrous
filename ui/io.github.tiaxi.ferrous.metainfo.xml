@@ -3,7 +3,7 @@
 <component type="desktop-application">
   <id>io.github.tiaxi.ferrous</id>
   <name>Ferrous</name>
-  <summary>Play and inspect a local music library</summary>
+  <summary>Play, browse and inspect your music library</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
   <developer id="io.github.tiaxi">
@@ -12,15 +12,18 @@
 
   <description>
     <p>
-      Ferrous is a fast desktop music player built with Rust, Qt 6 and KDE
-      Kirigami. It treats your folder structure as your library.
+      Ferrous is a music player for KDE Plasma, made for listening closely.
+      It aims to feel at home next to Dolphin and Kate, to stay quick however
+      large your library grows, and to let you look into the music as well as
+      listen to it.
     </p>
     <ul>
-      <li>Gapless playback through GStreamer, with repeat, shuffle and a session-restoring queue</li>
-      <li>Folder-first library browsing that follows changes on disk, with ranked global search</li>
-      <li>Live spectrogram and waveform views with centered and rolling modes</li>
-      <li>Multi-file tag editing, renaming files from tags and album art lookup</li>
-      <li>Media controls through MPRIS and optional Last.fm scrobbling</li>
+      <li>Gapless playback, with a queue that comes back where you left it and changes you can undo</li>
+      <li>A spectrogram inspired by Adobe Audition's spectral view, a zoomable waveform and fullscreen viewers</li>
+      <li>A folder-first library that follows your folders as files change, with ranked search as you type</li>
+      <li>A tag editor for many files at once, with renames from tags that you see before anything changes</li>
+      <li>Full-size album art from the iTunes catalog, previewed beside yours before it is applied</li>
+      <li>Last.fm scrobbling, MPRIS media controls and media keys</li>
     </ul>
     <p>
       Which formats play depends on the installed GStreamer plugins.
@@ -40,8 +43,13 @@
   <keywords>
     <keyword>music</keyword>
     <keyword>player</keyword>
+    <keyword>audio</keyword>
     <keyword>spectrogram</keyword>
+    <keyword>waveform</keyword>
     <keyword>tag editor</keyword>
+    <keyword>FLAC</keyword>
+    <keyword>gapless</keyword>
+    <keyword>Last.fm</keyword>
   </keywords>
 
   <url type="homepage">https://github.com/Tiaxi/ferrous</url>
@@ -50,10 +58,35 @@
 
   <screenshots>
     <screenshot type="default">
-      <caption>Library, queue and spectrogram</caption>
-      <image>https://raw.githubusercontent.com/Tiaxi/ferrous/main/docs/assets/screenshot.png</image>
+      <caption>Playing an album, with the library, the queue, the album art and a live spectrogram</caption>
+      <image>https://raw.githubusercontent.com/Tiaxi/ferrous/main/docs/assets/screenshots/main-dark.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>The spectrogram in its fullscreen viewer, one lane per channel</caption>
+      <image>https://raw.githubusercontent.com/Tiaxi/ferrous/main/docs/assets/screenshots/spectrogram-fullscreen-dark.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>The waveform, zoomed in, with the zoomed range marked on the seek bar</caption>
+      <image>https://raw.githubusercontent.com/Tiaxi/ferrous/main/docs/assets/screenshots/waveform-dark.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Editing the tags of six tracks at once; fields that differ show as Mixed</caption>
+      <image>https://raw.githubusercontent.com/Tiaxi/ferrous/main/docs/assets/screenshots/edit-tags-light.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Replacing album art with suggestions from the iTunes catalog</caption>
+      <image>https://raw.githubusercontent.com/Tiaxi/ferrous/main/docs/assets/screenshots/itunes-dark.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>The main window in Breeze Light</caption>
+      <image>https://raw.githubusercontent.com/Tiaxi/ferrous/main/docs/assets/screenshots/main-light.png</image>
     </screenshot>
   </screenshots>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#ebe7f4</color>
+    <color type="primary" scheme_preference="dark">#251c4a</color>
+  </branding>
 
   <!-- Last.fm scrobbling, when the user turns it on, sends listening history
        tied to their account; album art lookup queries the iTunes catalog. -->
