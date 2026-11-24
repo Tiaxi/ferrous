@@ -55,6 +55,8 @@ pub(super) fn run(
     let OpenedLibrary { conn, notice } = match opened {
         Ok(opened) => opened,
         Err(err) => {
+            // The library was not read, so it is not `loaded`: the UI shows
+            // the error, and offers no first run for it.
             library.status.last_error = Some(err);
             library.publish(event_tx);
             return;

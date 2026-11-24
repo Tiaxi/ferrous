@@ -3142,8 +3142,9 @@ fn encode_library_meta_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     push_u8(&mut out, u8::from(files_total.is_some()));
     push_u32(&mut out, files_total.map_or(0, clamp_u32));
     // Whether the counts and roots are the library's, or the empty start
-    // the library worker has not replaced yet.
-    push_u8(&mut out, u8::from(snapshot.library_loaded));
+    // the library worker has not replaced yet, or could not, as when it
+    // could not open the database.
+    push_u8(&mut out, u8::from(snapshot.library_status.loaded));
     push_u16(&mut out, clamp_u16(snapshot.library.roots.len()));
     for root in &snapshot.library.roots {
         let root_str = root.path.to_string_lossy().to_string();
@@ -3950,8 +3951,10 @@ mod tests {
                 }]),
                 ..LibrarySnapshot::default()
             }),
-            library_loaded: true,
-            library_status: crate::library::LibraryStatus::default(),
+            library_status: crate::library::LibraryStatus {
+                loaded: true,
+                ..crate::library::LibraryStatus::default()
+            },
             queue_details: Arc::default(),
             library_artist_count: 1,
             library_album_count: 1,
@@ -6177,7 +6180,7 @@ mod tests {
         // Without a tree, the section ends with the roots.
         snapshot.pre_built_tree_bytes = None;
         for loaded in [false, true] {
-            snapshot.library_loaded = loaded;
+            snapshot.library_status.loaded = loaded;
             let section = encode_library_meta_section(&snapshot);
             let mut tail = Vec::new();
             push_u8(&mut tail, u8::from(loaded));

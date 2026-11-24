@@ -323,6 +323,7 @@ struct View {
     tracks: Vec<std::sync::Arc<crate::library::LibraryTrack>>,
     scan_in_progress: bool,
     last_error: Option<String>,
+    loaded: bool,
 }
 
 /// The worker's events, applied as they are received.
@@ -345,6 +346,7 @@ impl Events {
             tracks: self.mirror.snapshot.tracks.clone(),
             scan_in_progress: self.mirror.status.scan_in_progress,
             last_error: self.mirror.status.last_error.clone(),
+            loaded: self.mirror.status.loaded,
         }
     }
 }
@@ -680,6 +682,56 @@ fn the_worker_reports_a_damaged_database_that_it_moved_aside() {
     assert!(error.contains("was damaged"), "{error}");
     assert!(error.contains(".damaged-"), "{error}");
     assert!(first.roots.is_empty());
+    assert!(first.loaded, "the new, empty library is the library");
+    drop(service);
+}
+
+fn service_on(db: &Path) -> (LibraryService, Events) {
+    let (service, events) = LibraryService::with_database(
+        db.to_path_buf(),
+        Duration::from_secs(5),
+        ScanTuning {
+            batch_rows: 2,
+            batch_interval: Duration::from_secs(60),
+            workers: 2,
+        },
+    );
+    (service, Events::new(events))
+}
+
+#[test]
+fn the_worker_publishes_an_empty_library_it_read_as_loaded() {
+    let fixture = Fixture::new("empty", &[]);
+    let (service, mut events) = service_on(&fixture.db);
+
+    let first = next_snapshot(&mut events, |_| true);
+
+    assert!(first.loaded, "no roots, as read from the database");
+    assert!(first.roots.is_empty());
+    assert_eq!(first.last_error, None);
+    drop(service);
+}
+
+#[test]
+fn a_database_the_worker_cannot_open_is_an_error_and_no_library() {
+    // A folder where the database should be: SQLite cannot open it, and it
+    // is not a damaged database to move aside (#759).
+    let fixture = Fixture::new("unopenable", &[]);
+    fs::create_dir_all(&fixture.db).expect("folder in the database's place");
+    let (service, mut events) = service_on(&fixture.db);
+
+    let first = next_snapshot(&mut events, |_| true);
+
+    let error = first.last_error.expect("the failure is shown");
+    assert!(
+        error.contains("could not open the library database"),
+        "{error}"
+    );
+    assert!(
+        !first.loaded,
+        "a library that was not read is not one without folders"
+    );
+    assert!(fixture.db.is_dir(), "the folder is left alone");
     drop(service);
 }
 

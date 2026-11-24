@@ -189,7 +189,8 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int libraryVersion READ libraryVersion NOTIFY libraryChanged)
     Q_PROPERTY(bool libraryScanInProgress READ libraryScanInProgress NOTIFY libraryScanChanged)
     // Whether the library counts and roots are the backend's library, not
-    // the empty start: until then, no roots is not yet a first run.
+    // the empty start: until then, no roots is not yet a first run. It stays
+    // false when the backend could not open the library.
     Q_PROPERTY(bool libraryLoaded READ libraryLoaded NOTIFY libraryChanged)
     Q_PROPERTY(int libraryRootCount READ libraryRootCount NOTIFY libraryChanged)
     Q_PROPERTY(int libraryTrackCount READ libraryTrackCount NOTIFY libraryChanged)
