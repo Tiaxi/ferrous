@@ -88,6 +88,11 @@ MenuItem {
     contentItem: RowLayout {
         id: row
         objectName: "appMenuItemRow"
+        // A mirrored item, where Breeze draws its mark on the right, reads
+        // from the right: the mark's column, the glyph, the words aligned
+        // right, and the shortcut.
+        LayoutMirroring.enabled: root.mirrored
+        LayoutMirroring.childrenInherit: true
 
         // The check mark's own column, in every item of a menu that has
         // marks that do not share the glyphs' column.

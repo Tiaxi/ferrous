@@ -604,6 +604,7 @@ private slots:
     void marksShareTheGlyphColumn_data();
     void marksShareTheGlyphColumn();
     void markedGlyphsKeepTwoColumns();
+    void mirroredMenusReadFromTheRight();
     void queueMenuNamesHowManyRowsItRemoves();
     void showInLibraryShowsTheLibraryTree();
     void clearQueueShowsALineGlyph();
@@ -1678,6 +1679,96 @@ ApplicationWindow {
     }
     QMetaObject::invokeMethod(menu, "close");
     QTRY_VERIFY(!menu->property("visible").toBool());
+}
+
+// In a mirrored layout, as of a right-to-left language, Breeze draws its
+// check mark on the right: the row reads from the right as well, the
+// mark's column, the glyph, the words and the shortcut, so the mark sits in
+// the column kept for it and the words read from the glyph.
+void UiMenusTest::mirroredMenusReadFromTheRight() {
+    QQmlEngine engine;
+    QQmlComponent component(&engine);
+    component.setData(QByteArrayLiteral(R"QML(
+import QtQuick
+import QtQuick.Controls
+import "components" as Components
+
+ApplicationWindow {
+    width: 400
+    height: 300
+    visible: true
+    property alias shared: shared
+    property alias separate: separate
+    Components.AppMenu {
+        id: shared
+        Components.AppMenuItem {
+            objectName: "mark"; text: "&Mark"; checkable: true; checked: true
+            LayoutMirroring.enabled: true
+        }
+        Components.AppMenuItem {
+            objectName: "glyph"
+            LayoutMirroring.enabled: true
+            action: Action { text: "&Glyph"; icon.name: "document-open"; shortcut: "Ctrl+O" }
+        }
+    }
+    Components.AppMenu {
+        id: separate
+        Components.AppMenuItem {
+            objectName: "both"; text: "&Both"; checkable: true; checked: true
+            icon.name: "media-playlist-shuffle"
+            LayoutMirroring.enabled: true
+        }
+        Components.AppMenuItem {
+            objectName: "glyph"; text: "&Glyph"; icon.name: "document-open"
+            LayoutMirroring.enabled: true
+        }
+    }
+}
+)QML"),
+                      QUrl::fromLocalFile(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/MirroredMenuHarness.qml")));
+    std::unique_ptr<QObject> root(component.create());
+    QVERIFY2(root != nullptr, qPrintable(component.errorString()));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
+    const auto left = [](QQuickItem *part, QQuickItem *item) { return part->mapToItem(item, QPointF()).x(); };
+    const auto right = [](QQuickItem *part, QQuickItem *item) {
+        return part->mapToItem(item, QPointF(part->width(), 0)).x();
+    };
+    for (const char *name : {"shared", "separate"}) {
+        QObject *menu = qvariant_cast<QObject *>(root->property(name));
+        QVERIFY(menu != nullptr);
+        QMetaObject::invokeMethod(menu, "open");
+        QTRY_VERIFY(menu->property("opened").toBool());
+        for (QQuickItem *item : menuItems(menu)) {
+            const QString what = QStringLiteral("%1: %2").arg(QLatin1String(name), item->objectName());
+            QVERIFY2(item->property("mirrored").toBool(), qPrintable(what));
+            QQuickItem *label = childNamed(item, "appMenuItemLabel");
+            QQuickItem *column = childNamed(item, "appMenuItemGlyphColumn");
+            QVERIFY(label != nullptr && column != nullptr);
+            // The glyph's column right of the words, which align right.
+            QVERIFY2(left(column, item) >= right(label, item), qPrintable(what));
+            QCOMPARE(label->property("effectiveHorizontalAlignment").toInt(), int(Qt::AlignRight));
+            QQuickItem *shortcut = childNamed(item, "appMenuItemShortcut");
+            if (shortcut != nullptr && shortcut->isVisible()) {
+                QVERIFY2(right(shortcut, item) <= left(label, item), qPrintable(what));
+            }
+            if (!item->property("checkable").toBool()) {
+                continue;
+            }
+            auto *indicator = qvariant_cast<QQuickItem *>(item->property("indicator"));
+            QVERIFY(indicator != nullptr && indicator->isVisible());
+            if (qstrcmp(name, "shared") == 0) {
+                // The mark, centred in the column it shares with the glyphs.
+                const qreal centre = column->mapToItem(item, QPointF(column->width() / 2, 0)).x();
+                QVERIFY2(std::abs(indicator->x() + indicator->width() / 2 - centre) <= 0.5, qPrintable(what));
+            } else {
+                // The mark in its own column, right of the glyph's.
+                QVERIFY2(indicator->x() >= right(column, item), qPrintable(what));
+            }
+        }
+        QMetaObject::invokeMethod(menu, "close");
+        QTRY_VERIFY(!menu->property("visible").toBool());
+    }
 }
 
 // On one of several selected rows, the queue's Remove acts on them all and
