@@ -580,6 +580,8 @@ private slots:
     void statusBarFormatShowsWhatFitsWhole();
     void statusBarFormatKeepsItsPlace_data();
     void statusBarFormatKeepsItsPlace();
+    void statusBarGroupsAreEvenlySpacedAfterTheBitrate_data();
+    void statusBarGroupsAreEvenlySpacedAfterTheBitrate();
     void statusBarShowsTheScanWithItsBar();
     void statusBarScanBarReadsAsAShare_data();
     void statusBarScanBarReadsAsAShare();
@@ -3478,9 +3480,11 @@ void TransportStatusTest::statusBarFormatKeepsItsPlace_data() {
 }
 
 // The format keeps one x as Repeat and Shuffle toggle, after the playback
-// state, and the modes follow it at an x a changing bitrate doesn't move
-// (the format jumped some 210 px with the modes). Where there is too little
-// room, the format gives its parts up and the modes stay whole.
+// state, and the modes follow it at an x a changing bitrate moves only
+// when it has more digits than it has had in the track, and never back
+// while the track plays (the format jumped some 210 px with the modes).
+// Where there is too little room, the format gives its parts up and the
+// modes stay whole.
 void TransportStatusTest::statusBarFormatKeepsItsPlace() {
     QFETCH(qreal, pointSize);
     const ScopedApplicationFont font(pointSize);
@@ -3514,12 +3518,31 @@ void TransportStatusTest::statusBarFormatKeepsItsPlace() {
     const qreal modesLeft = sceneRect(modes).left();
     // It follows the format, and is not at the bar's other end.
     QVERIFY(modesLeft - sceneRect(row).right() < 16.0 + 2 * pointSize * 2);
-    for (const int kbps : {64, 320, 999, 1411, 9216, 987, 1000}) {
+    for (const int kbps : {64, 320, 999}) {
         bridge->setProperty("currentTrackCurrentBitrateKbps", kbps);
         laidOut();
         QCOMPARE(sceneRect(modes).left(), modesLeft);
         QCOMPARE(sceneRect(row).left(), formatLeft);
     }
+    // Four digits: the modes step once, by about a figure's width, and
+    // hold there for the rest of the track, back under 1,000 too.
+    bridge->setProperty("currentTrackCurrentBitrateKbps", 1411);
+    laidOut();
+    const qreal fourDigitModesLeft = sceneRect(modes).left();
+    QVERIFY2(fourDigitModesLeft > modesLeft && fourDigitModesLeft - modesLeft < 1.5 * pointSize,
+             qPrintable(QStringLiteral("%1 to %2").arg(modesLeft).arg(fourDigitModesLeft)));
+    for (const int kbps : {9216, 987, 64, 1000}) {
+        bridge->setProperty("currentTrackCurrentBitrateKbps", kbps);
+        laidOut();
+        QCOMPARE(sceneRect(modes).left(), fourDigitModesLeft);
+        QCOMPARE(sceneRect(row).left(), formatLeft);
+    }
+    // A new track starts from its own bitrate's digits.
+    bridge->setProperty("currentTrackCurrentBitrateKbps", 557);
+    bridge->setProperty("currentTrackPath", QStringLiteral("/music/next.flac"));
+    laidOut();
+    QCOMPARE(sceneRect(modes).left(), modesLeft);
+    bridge->setProperty("currentTrackCurrentBitrateKbps", 1000);
 
     // With less room than both take, the modes stay whole and in the bar.
     const int narrow = int(std::ceil(sceneRect(state).right() + 16 + modes->width() + 40));
@@ -3565,6 +3588,50 @@ void TransportStatusTest::statusBarFormatKeepsItsPlace() {
     QVERIFY2(modes->parentItem()->width() >= modes->width()
                  && modes->parentItem()->width() < modes->width() + 16,
              qPrintable(QString::number(modes->parentItem()->width())));
+}
+
+void TransportStatusTest::statusBarGroupsAreEvenlySpacedAfterTheBitrate_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("10 pt, dark") << 10.0 << true;
+    QTest::newRow("10 pt, light") << 10.0 << false;
+    QTest::newRow("24 pt, dark") << 24.0 << true;
+    QTest::newRow("24 pt, light") << 24.0 << false;
+}
+
+// The bitrate keeps the room of its own digits, and the format is
+// measured whole, so the groups after it stand as far from it as the
+// format from the playback state, 16 px: with the room of four digits for
+// every bitrate and each part in whole pixels, "514 kbps" had some 15 px
+// of empty room after it, and the groups stood 20, 33 and 20 px apart.
+void TransportStatusTest::statusBarGroupsAreEvenlySpacedAfterTheBitrate() {
+    QFETCH(qreal, pointSize);
+    QFETCH(bool, dark);
+    const ScopedApplicationFont font(pointSize);
+    Harness harness;
+    QVERIFY2(harness.load(breeze(dark), 2400), qPrintable(harness.error));
+    QQuickItem *row = harness.item(QStringLiteral("statusBarFormatRow"));
+    QQuickItem *modes = harness.item(QStringLiteral("statusBarRepeatShuffle"));
+    QQuickItem *state = harness.item(QStringLiteral("statusBarPlaybackState"));
+    QVERIFY(row && modes && state);
+    QObject *bridge = harness.bridge;
+    bridge->setProperty("repeatMode", 2);
+    bridge->setProperty("shuffleEnabled", true);
+    qreal scale = 1;
+    for (const int kbps : {514, 128, 999}) {
+        bridge->setProperty("currentTrackPath", QStringLiteral("/music/%1.flac").arg(kbps));
+        bridge->setProperty("currentTrackCurrentBitrateKbps", kbps);
+        grabbed(harness.window, &scale);
+        QVERIFY(modes->isVisible());
+        QVERIFY(row->property("implicitWidth").toReal() > 0);
+        const qreal leading = sceneRect(row).left() - sceneRect(state).right();
+        const qreal afterFormat = sceneRect(modes).left() - sceneRect(row).left() - row->implicitWidth();
+        const QString gaps = QStringLiteral("%1 kbps: %2 px after the state, %3 px after the format")
+                                 .arg(kbps).arg(leading).arg(afterFormat);
+        QCOMPARE(leading, 16.0);
+        // The format in whole pixels: less than one more.
+        QVERIFY2(afterFormat >= 16.0 && afterFormat < 17.0, qPrintable(gaps));
+    }
 }
 
 void TransportStatusTest::statusBarScanBarReadsAsAShare_data() {
