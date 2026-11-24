@@ -463,7 +463,11 @@ Rectangle {
                       root.uiBridge.queueLength, root.uiBridge.queueDurationText || "0:00")
         : ""
     // No library folder and nothing queued: the queue shows the first steps.
-    readonly property bool firstRun: root.uiBridge.queueLength === 0
+    // Until the backend has read the library, no folder is not yet known,
+    // and the queue shows neither message.
+    readonly property bool libraryLoaded: root.uiBridge.libraryLoaded === true
+    readonly property bool firstRun: root.libraryLoaded
+        && root.uiBridge.queueLength === 0
         && root.uiBridge.libraryRootCount === 0
 
     // A track change: the row that was now fades its amber out as the row
@@ -1339,7 +1343,7 @@ Rectangle {
             ColumnLayout {
                 id: emptyQueueMessage
                 objectName: "queueEmptyMessage"
-                visible: root.uiBridge.queueLength === 0 && !root.firstRun
+                visible: root.libraryLoaded && root.uiBridge.queueLength === 0 && !root.firstRun
                 anchors.centerIn: parent
                 width: Math.max(0, Math.min(parent.width - 6 * Kirigami.Units.largeSpacing,
                                             Math.max(implicitWidth, Kirigami.Units.gridUnit * 20)))

@@ -437,6 +437,7 @@ private slots:
     void libraryViewStateAvailabilityFollowsSnapshot();
     void volumeTheBackendSendsReachesTheSliderAndMpris();
     void libraryChangesNotifyOnlyLibraryProperties();
+    void libraryLoadedFollowsTheBackend();
     void testBinariesSetNoFileBrowserNameDetector();
     void detectedFileBrowserNameNotifiesOnlyWhenItChanges();
     void aDetectedFileBrowserNameIsNeverMarkup_data();
@@ -10190,6 +10191,51 @@ void BridgeClientTest::libraryChangesNotifyOnlyLibraryProperties() {
     QCOMPARE(client.libraryScanTotal(), -1);
 }
 
+// The backend starts with an empty library and sends it before the library
+// worker has read the database: no roots then is not a first run, and the
+// client says so until a snapshot says the library is loaded (#373: the
+// first-run prompt and "No folders" flashed at startup).
+void BridgeClientTest::libraryLoadedFollowsTheBackend() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QVERIFY(!client.libraryLoaded());
+    QCOMPARE(client.property("libraryLoaded").toBool(), false);
+
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.library.present = true;
+    snapshot.library.loaded = false;
+    client.processBinarySnapshot(snapshot);
+    QVERIFY(!client.libraryLoaded());
+    QCOMPARE(client.libraryRootCount(), 0);
+    QVERIFY(!client.m_pollLibraryChanged);
+
+    // The worker's library, with a folder: both at once, in one notification.
+    snapshot.library.loaded = true;
+    snapshot.library.rootCount = 1;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QVERIFY(client.libraryLoaded());
+    QCOMPARE(client.libraryRootCount(), 1);
+    QVERIFY(client.m_pollLibraryChanged);
+
+    // A snapshot without the library section keeps it.
+    client.m_pollLibraryChanged = false;
+    BinaryBridgeCodec::DecodedSnapshot other;
+    client.processBinarySnapshot(other);
+    QVERIFY(client.libraryLoaded());
+    QVERIFY(!client.m_pollLibraryChanged);
+
+    // A new install's library, empty but loaded, is told too.
+    BridgeClient fresh;
+    isolateBridgeClient(fresh);
+    snapshot.library.rootCount = 0;
+    QVERIFY(fresh.processBinarySnapshot(snapshot));
+    QVERIFY(fresh.libraryLoaded());
+    QVERIFY(fresh.m_pollLibraryChanged);
+    QSignalSpy library(&fresh, &BridgeClient::libraryChanged);
+    fresh.scheduleLibraryChanged();
+    QTRY_COMPARE(library.count(), 1);
+}
+
 // The file manager's name that xdg-mime finds would change the name guessed
 // from $XDG_CURRENT_DESKTOP after a test's client starts, and notify
 // snapshotChanged while the test counts it; main() sets no detector.
@@ -10308,6 +10354,7 @@ void BridgeClientTest::libraryWatchingDecodesFromBinaryPayload() {
     append(float(-1.0f));
     append(quint8(1));                                       // files to scan known
     append(quint32(40));                                     // files to scan
+    append(quint8(1));                                       // library loaded
     append(quint16(2));
     text(QStringLiteral("/music"));
     text(QStringLiteral("Music"));
@@ -10340,6 +10387,22 @@ void BridgeClientTest::libraryWatchingDecodesFromBinaryPayload() {
     QCOMPARE(decoded.library.filesDiscovered, 3);
     QCOMPARE(decoded.library.filesProcessed, 2);
     QCOMPARE(decoded.library.filesTotal, 40);
+    QVERIFY(decoded.library.loaded);
+    // The backend's empty start, before the library worker's library: the
+    // flag follows the files to scan.
+    constexpr qsizetype loadedOffset = 4 * 4 + 1 + 4 + 4 + 4 * 4 + 4 + 4 + 1 + 4;
+    QCOMPARE(bytes.at(loadedOffset), char(1));
+    bytes[loadedOffset] = char(0);
+    decoded = {};
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(section(BinaryBridgeCodec::SectionLibraryMeta),
+                                                     &decoded, &error),
+             qPrintable(error));
+    QVERIFY(!decoded.library.loaded);
+    bytes[loadedOffset] = char(2);
+    decoded = {};
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(section(BinaryBridgeCodec::SectionLibraryMeta),
+                                                     &decoded, &error));
+    bytes[loadedOffset] = char(1);
     // A scan that cannot tell its total, as the first scan of a folder.
     // The flag follows the counts, the error, the progress and the rate.
     constexpr qsizetype totalKnownOffset = 4 * 4 + 1 + 4 + 4 + 4 * 4 + 4 + 4;

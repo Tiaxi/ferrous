@@ -3142,6 +3142,9 @@ fn encode_library_meta_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     // The files the scan will have processed when it ends, if it can tell.
     push_u8(&mut out, u8::from(files_total.is_some()));
     push_u32(&mut out, files_total.map_or(0, clamp_u32));
+    // Whether the counts and roots are the library's, or the empty start
+    // the library worker has not replaced yet.
+    push_u8(&mut out, u8::from(snapshot.library_loaded));
     push_u16(&mut out, clamp_u16(snapshot.library.roots.len()));
     for root in &snapshot.library.roots {
         let root_str = root.path.to_string_lossy().to_string();
@@ -3931,6 +3934,7 @@ mod tests {
                 }]),
                 ..LibrarySnapshot::default()
             }),
+            library_loaded: true,
             library_status: crate::library::LibraryStatus::default(),
             queue_details: Arc::default(),
             library_artist_count: 1,
@@ -6146,6 +6150,27 @@ mod tests {
         let mut snapshot = sample_snapshot();
         snapshot.keyboard_shortcuts_generation = 2;
         assert!(encode_settings_section(&snapshot).ends_with(&keyboard_shortcuts_payload(&[], 2)));
+    }
+
+    #[test]
+    fn library_meta_tells_whether_the_library_is_loaded_before_its_roots() {
+        // The empty library the bridge starts with is not the user's: the
+        // UI waits for this flag before it calls no roots a first run.
+        let mut snapshot = sample_snapshot();
+        snapshot.library = Arc::new(LibrarySnapshot::default());
+        // Without a tree, the section ends with the roots.
+        snapshot.pre_built_tree_bytes = None;
+        for loaded in [false, true] {
+            snapshot.library_loaded = loaded;
+            let section = encode_library_meta_section(&snapshot);
+            let mut tail = Vec::new();
+            push_u8(&mut tail, u8::from(loaded));
+            push_u16(&mut tail, 0);
+            assert!(
+                section.ends_with(&tail),
+                "loaded={loaded}: the flag, then no roots"
+            );
+        }
     }
 
     #[test]

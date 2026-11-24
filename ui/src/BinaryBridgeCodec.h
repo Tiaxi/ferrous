@@ -402,6 +402,9 @@ struct DecodedLibraryMeta {
     // The files the scan will have processed when it ends; -1 while the
     // scan cannot tell, as in the first scan of a folder.
     int filesTotal{-1};
+    // Whether the backend has the library worker's library, rather than the
+    // empty one it starts with: until then, no roots does not mean none.
+    bool loaded{false};
     QStringList rootPaths;
     QVector<DecodedLibraryRoot> rootEntries;
     bool viewStatePresent{false};
