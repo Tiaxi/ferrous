@@ -561,9 +561,11 @@ Rectangle {
                 // Above the region header's hairline.
                 anchors.bottomMargin: 1
                 spacing: 0
-                // An empty queue shows only its name; the columns keep their
-                // places, so nothing moves when tracks arrive.
-                readonly property real labelOpacity: root.uiBridge.queueLength > 0 ? 1 : 0
+                // An empty queue keeps its column labels and dividers, so
+                // "Queue" heads its column as in every other state and
+                // nothing changes in the header when tracks arrive but the
+                // count (the labels and dividers only came with the first
+                // track, and "Queue" read as a lone title over nothing).
 
                 Item {
                     id: indicatorHeader
@@ -596,7 +598,6 @@ Rectangle {
 
                 Label {
                     id: artistHeader
-                    opacity: queueHeaderRow.labelOpacity
                     objectName: "queueHeader_artist"
                     visible: root.artistColumnVisible
                     textFormat: Text.PlainText
@@ -611,7 +612,6 @@ Rectangle {
                 }
                 Label {
                     id: albumHeader
-                    opacity: queueHeaderRow.labelOpacity
                     objectName: "queueHeader_album"
                     visible: root.albumColumnVisible
                     textFormat: Text.PlainText
@@ -626,7 +626,6 @@ Rectangle {
                 }
                 Label {
                     id: lengthHeader
-                    opacity: queueHeaderRow.labelOpacity
                     objectName: "queueHeader_length"
                     elide: Text.ElideRight
                     textFormat: Text.PlainText
@@ -638,6 +637,189 @@ Rectangle {
                     font.family: root.uiPalette.baseFont.family
                     font.pointSize: root.uiPalette.smallPointSize
                     color: root.uiPalette.textSecondary
+                }
+            }
+
+            // The resize handles over the header. They come before the
+            // list in the item tree, which orders the Tab chain, so Tab
+            // goes from the library to the header's handles and then to
+            // the rows, in reading order (the focus went down to the rows
+            // and back up to the header).
+            Item {
+                objectName: "queueColumnHandles"
+                anchors.fill: parent
+
+                // A handle on the left of each resizable column, in the gap
+                // before it: the title fills the width the others leave, so
+                // dragging it left widens the column after it. Double-click,
+                // or Home, restores the column's default width; Left and Right
+                // move it from the keyboard. It shows only under the pointer
+                // and with keyboard focus.
+                Repeater {
+                    model: [
+                        { "column": "artist", "label": I18n.i18nc("@title:column", "Artist"), "header": artistHeader },
+                        { "column": "album", "label": I18n.i18nc("@title:column", "Album"), "header": albumHeader },
+                        { "column": "length", "label": I18n.i18nc("@title:column", "Length"), "header": lengthHeader }
+                    ]
+
+                    delegate: Item {
+                        id: resizeHandle
+                        objectName: "queueColumnHandle_" + modelData.column
+                        required property var modelData
+                        readonly property string column: modelData.column
+                        readonly property bool highlighted: resizeMouseArea.containsMouse
+                            || resizeMouseArea.pressed || resizeHandle.activeFocus
+                        // Where the pointer was when the drag started, in the
+                        // pane, which stays put as the columns move.
+                        property real pressX: 0
+
+                        visible: modelData.header.visible
+                        // On whole pixels, for the frame's edges.
+                        x: Math.round(queueHeaderRow.x + modelData.header.x - root.columnGap / 2) - resizeHandle.lineX
+                        width: Kirigami.Units.largeSpacing
+                        height: parent.height
+                        // An empty queue's columns resize as a full one's do.
+                        activeFocusOnTab: visible
+
+                        Accessible.role: Accessible.Separator
+                        readonly property string actionText: I18n.i18nc("@action %1 is a column title",
+                            "Resize the %1 column", modelData.label)
+                        readonly property string keysText: I18n.i18nc("@info",
+                            "Left or Right to resize, Home for the default width")
+                        Accessible.name: resizeHandle.actionText
+                        Accessible.description: resizeHandle.keysText
+                        Accessible.focusable: true
+
+                        // The ring's inset from the header's top seam and from its
+                        // hairline, so neither line merges into the ring's edge.
+                        readonly property real ringInset: 2
+                        // The divider's x, on a whole pixel, mid-gap.
+                        readonly property real lineX: Math.floor(width / 2)
+                        // The ring's half width past the divider: within the gap,
+                        // 3 px clear of the label after it at least (at 12 px wide
+                        // it was 2 px off "Artist"). Odd in all, so the divider is
+                        // its middle pixel.
+                        readonly property real ringReach: Math.floor(root.columnGap / 2) - 4
+
+                        // The divider: 1 px in the tertiary text colour under the
+                        // pointer (the seam colour, 1.5:1, barely showed), the
+                        // focus colour while dragged. With keyboard focus it stays
+                        // drawn inside the ring, so the ring reads as around a
+                        // column's divider rather than an empty box.
+                        Rectangle {
+                            objectName: "queueColumnHandleLine"
+                            x: resizeHandle.lineX
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            anchors.topMargin: resizeHandle.activeFocus
+                                ? resizeHandle.ringInset + 4 : Kirigami.Units.smallSpacing
+                            anchors.bottomMargin: resizeHandle.activeFocus
+                                ? 1 + resizeHandle.ringInset + 4 : Kirigami.Units.smallSpacing
+                            width: 1
+                            visible: resizeHandle.highlighted
+                            color: resizeMouseArea.pressed ? root.uiPalette.focusRing : root.uiPalette.textTertiary
+                        }
+
+                        // At rest: a short stroke in the seam colour where the
+                        // divider is, centred on the labels, so a pointer user can
+                        // see where to resize (the boundary had nothing to aim at).
+                        // It gives way to the divider
+                        // under the pointer, while dragged and with focus.
+                        Rectangle {
+                            objectName: "queueColumnHandleRest"
+                            x: resizeHandle.lineX
+                            // Centred above the header's 1 px hairline.
+                            y: Math.round((resizeHandle.height - 1 - height) / 2)
+                            width: 1
+                            height: root.uiPalette.scaledSize(10)
+                            visible: !resizeHandle.highlighted
+                            color: root.uiPalette.seam
+                        }
+
+                        // With keyboard focus, the app's ring around the divider,
+                        // within the gap between the columns and clear of the
+                        // header's top seam and hairline (a 2 px line alone read as
+                        // a hover).
+                        Rectangle {
+                            objectName: "queueColumnHandleFocus"
+                            x: resizeHandle.lineX - resizeHandle.ringReach
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            anchors.topMargin: resizeHandle.ringInset
+                            // Over the header's hairline.
+                            anchors.bottomMargin: 1 + resizeHandle.ringInset
+                            width: 2 * resizeHandle.ringReach + 1
+                            radius: 3
+                            visible: resizeHandle.activeFocus
+                            color: "transparent"
+                            border.width: 2
+                            border.color: root.uiPalette.focusRing
+                        }
+
+                        // Keyboard focus says what the handle is, and its keys.
+                        ToolTip.visible: resizeHandle.activeFocus && root.keyboardInUse
+                        ToolTip.delay: Kirigami.Units.toolTipDelay
+                        ToolTip.text: I18n.i18nc("@info:tooltip what a handle does, then its keys", "%1 · %2",
+                            resizeHandle.actionText, resizeHandle.keysText)
+
+                        MouseArea {
+                            id: resizeMouseArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            preventStealing: true
+                            cursorShape: Qt.SplitHCursor
+
+                            onPressed: function(mouse) {
+                                resizeHandle.pressX = mapToItem(root, mouse.x, 0).x
+                                root.beginColumnResize(resizeHandle.column)
+                            }
+                            onPositionChanged: function(mouse) {
+                                if (pressed && root.resizingColumn === resizeHandle.column) {
+                                    const x = mapToItem(root, mouse.x, 0).x
+                                    root.resizeColumnBy(resizeHandle.column, resizeHandle.pressX - x)
+                                }
+                            }
+                            onReleased: root.finishColumnResize()
+                            onCanceled: root.cancelColumnResize()
+                            onDoubleClicked: root.restoreDefaultColumnWidth(resizeHandle.column)
+                        }
+
+                        function keyResizes(event) {
+                            return KeyUtils.isUnmodified(event)
+                                && (event.key === Qt.Key_Left || event.key === Qt.Key_Right
+                                    || event.key === Qt.Key_Home)
+                        }
+                        // The keys move the focused handle rather than seeking.
+                        Keys.onShortcutOverride: function(event) {
+                            event.accepted = resizeHandle.keyResizes(event)
+                        }
+                        Keys.onPressed: function(event) {
+                            if (!resizeHandle.keyResizes(event)) {
+                                return
+                            }
+                            event.accepted = true
+                            if (event.key === Qt.Key_Home) {
+                                root.restoreDefaultColumnWidth(resizeHandle.column)
+                                return
+                            }
+                            root.beginColumnResize(resizeHandle.column)
+                            root.resizeColumnBy(resizeHandle.column, root.resizeDelta
+                                + (event.key === Qt.Key_Left ? root.keyboardResizeStep : -root.keyboardResizeStep))
+                        }
+                        // A held key moves the handle until it is let go, when
+                        // the width is kept.
+                        Keys.onReleased: function(event) {
+                            if (!event.isAutoRepeat && resizeHandle.keyResizes(event)) {
+                                event.accepted = true
+                                root.finishColumnResize()
+                            }
+                        }
+                        onActiveFocusChanged: {
+                            if (!resizeHandle.activeFocus && !resizeMouseArea.pressed) {
+                                root.finishColumnResize()
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -655,6 +837,12 @@ Rectangle {
                 clip: true
                 activeFocusOnTab: true
                 model: root.uiBridge.queueRows
+                // The row the keyboard is on is the view's current item,
+                // which the view gives the focus within it, so Tab into the
+                // queue lands on that row, and a screen reader reads its
+                // title, artist and state, as the library's Tab stop reads
+                // its row (it read "Queue, list" with no current item).
+                currentIndex: root.controller.currentRowIndex
                 boundsBehavior: Flickable.StopAtBounds
                 boundsMovement: Flickable.StopAtBounds
                 flickDeceleration: root.snappyScrollFlickDeceleration
@@ -1503,191 +1691,6 @@ Rectangle {
                 visible: playlistDropArea.containsDrag
                     && playlistDropArea.queueDropAccepted
                     && playlistDropArea.queueDropInsertIndex >= 0
-            }
-        }
-    }
-
-    // The resize handles over the header. They come after the list in the
-    // item tree, which orders the Tab chain, so Tab goes from the library
-    // to the queue's rows, and on to the handles only after them.
-    Item {
-        objectName: "queueColumnHandles"
-        // The header's place: the column layout fills the pane.
-        x: queueHeader.x
-        y: queueHeader.y
-        width: queueHeader.width
-        height: queueHeader.height
-
-        // A handle on the left of each resizable column, in the gap
-        // before it: the title fills the width the others leave, so
-        // dragging it left widens the column after it. Double-click,
-        // or Home, restores the column's default width; Left and Right
-        // move it from the keyboard. It shows only under the pointer
-        // and with keyboard focus.
-        Repeater {
-            model: [
-                { "column": "artist", "label": I18n.i18nc("@title:column", "Artist"), "header": artistHeader },
-                { "column": "album", "label": I18n.i18nc("@title:column", "Album"), "header": albumHeader },
-                { "column": "length", "label": I18n.i18nc("@title:column", "Length"), "header": lengthHeader }
-            ]
-
-            delegate: Item {
-                id: resizeHandle
-                objectName: "queueColumnHandle_" + modelData.column
-                required property var modelData
-                readonly property string column: modelData.column
-                readonly property bool highlighted: resizeMouseArea.containsMouse
-                    || resizeMouseArea.pressed || resizeHandle.activeFocus
-                // Where the pointer was when the drag started, in the
-                // pane, which stays put as the columns move.
-                property real pressX: 0
-
-                visible: modelData.header.visible
-                // On whole pixels, for the frame's edges.
-                x: Math.round(queueHeaderRow.x + modelData.header.x - root.columnGap / 2) - resizeHandle.lineX
-                width: Kirigami.Units.largeSpacing
-                height: parent.height
-                // An empty queue's columns have no labels to resize.
-                activeFocusOnTab: visible && root.uiBridge.queueLength > 0
-
-                Accessible.role: Accessible.Separator
-                readonly property string actionText: I18n.i18nc("@action %1 is a column title",
-                    "Resize the %1 column", modelData.label)
-                readonly property string keysText: I18n.i18nc("@info",
-                    "Left or Right to resize, Home for the default width")
-                Accessible.name: resizeHandle.actionText
-                Accessible.description: resizeHandle.keysText
-                Accessible.focusable: true
-
-                // The ring's inset from the header's top seam and from its
-                // hairline, so neither line merges into the ring's edge.
-                readonly property real ringInset: 2
-                // The divider's x, on a whole pixel, mid-gap.
-                readonly property real lineX: Math.floor(width / 2)
-                // The ring's half width past the divider: within the gap,
-                // 3 px clear of the label after it at least (at 12 px wide
-                // it was 2 px off "Artist"). Odd in all, so the divider is
-                // its middle pixel.
-                readonly property real ringReach: Math.floor(root.columnGap / 2) - 4
-
-                // The divider: 1 px in the tertiary text colour under the
-                // pointer (the seam colour, 1.5:1, barely showed), the
-                // focus colour while dragged. With keyboard focus it stays
-                // drawn inside the ring, so the ring reads as around a
-                // column's divider rather than an empty box.
-                Rectangle {
-                    objectName: "queueColumnHandleLine"
-                    x: resizeHandle.lineX
-                    anchors.top: parent.top
-                    anchors.bottom: parent.bottom
-                    anchors.topMargin: resizeHandle.activeFocus
-                        ? resizeHandle.ringInset + 4 : Kirigami.Units.smallSpacing
-                    anchors.bottomMargin: resizeHandle.activeFocus
-                        ? 1 + resizeHandle.ringInset + 4 : Kirigami.Units.smallSpacing
-                    width: 1
-                    visible: resizeHandle.highlighted
-                    color: resizeMouseArea.pressed ? root.uiPalette.focusRing : root.uiPalette.textTertiary
-                }
-
-                // At rest, over a populated header: a short stroke in the
-                // seam colour where the divider is, centred on the labels,
-                // so a pointer user can see where to resize (the boundary
-                // had nothing to aim at). It gives way to the divider
-                // under the pointer, while dragged and with focus.
-                Rectangle {
-                    objectName: "queueColumnHandleRest"
-                    x: resizeHandle.lineX
-                    // Centred above the header's 1 px hairline.
-                    y: Math.round((resizeHandle.height - 1 - height) / 2)
-                    width: 1
-                    height: root.uiPalette.scaledSize(10)
-                    visible: !resizeHandle.highlighted && root.uiBridge.queueLength > 0
-                    color: root.uiPalette.seam
-                }
-
-                // With keyboard focus, the app's ring around the divider,
-                // within the gap between the columns and clear of the
-                // header's top seam and hairline (a 2 px line alone read as
-                // a hover).
-                Rectangle {
-                    objectName: "queueColumnHandleFocus"
-                    x: resizeHandle.lineX - resizeHandle.ringReach
-                    anchors.top: parent.top
-                    anchors.bottom: parent.bottom
-                    anchors.topMargin: resizeHandle.ringInset
-                    // Over the header's hairline.
-                    anchors.bottomMargin: 1 + resizeHandle.ringInset
-                    width: 2 * resizeHandle.ringReach + 1
-                    radius: 3
-                    visible: resizeHandle.activeFocus
-                    color: "transparent"
-                    border.width: 2
-                    border.color: root.uiPalette.focusRing
-                }
-
-                // Keyboard focus says what the handle is, and its keys.
-                ToolTip.visible: resizeHandle.activeFocus && root.keyboardInUse
-                ToolTip.delay: Kirigami.Units.toolTipDelay
-                ToolTip.text: I18n.i18nc("@info:tooltip what a handle does, then its keys", "%1 · %2",
-                    resizeHandle.actionText, resizeHandle.keysText)
-
-                MouseArea {
-                    id: resizeMouseArea
-                    anchors.fill: parent
-                    hoverEnabled: root.uiBridge.queueLength > 0
-                    preventStealing: true
-                    cursorShape: Qt.SplitHCursor
-
-                    onPressed: function(mouse) {
-                        resizeHandle.pressX = mapToItem(root, mouse.x, 0).x
-                        root.beginColumnResize(resizeHandle.column)
-                    }
-                    onPositionChanged: function(mouse) {
-                        if (pressed && root.resizingColumn === resizeHandle.column) {
-                            const x = mapToItem(root, mouse.x, 0).x
-                            root.resizeColumnBy(resizeHandle.column, resizeHandle.pressX - x)
-                        }
-                    }
-                    onReleased: root.finishColumnResize()
-                    onCanceled: root.cancelColumnResize()
-                    onDoubleClicked: root.restoreDefaultColumnWidth(resizeHandle.column)
-                }
-
-                function keyResizes(event) {
-                    return KeyUtils.isUnmodified(event)
-                        && (event.key === Qt.Key_Left || event.key === Qt.Key_Right
-                            || event.key === Qt.Key_Home)
-                }
-                // The keys move the focused handle rather than seeking.
-                Keys.onShortcutOverride: function(event) {
-                    event.accepted = resizeHandle.keyResizes(event)
-                }
-                Keys.onPressed: function(event) {
-                    if (!resizeHandle.keyResizes(event)) {
-                        return
-                    }
-                    event.accepted = true
-                    if (event.key === Qt.Key_Home) {
-                        root.restoreDefaultColumnWidth(resizeHandle.column)
-                        return
-                    }
-                    root.beginColumnResize(resizeHandle.column)
-                    root.resizeColumnBy(resizeHandle.column, root.resizeDelta
-                        + (event.key === Qt.Key_Left ? root.keyboardResizeStep : -root.keyboardResizeStep))
-                }
-                // A held key moves the handle until it is let go, when
-                // the width is kept.
-                Keys.onReleased: function(event) {
-                    if (!event.isAutoRepeat && resizeHandle.keyResizes(event)) {
-                        event.accepted = true
-                        root.finishColumnResize()
-                    }
-                }
-                onActiveFocusChanged: {
-                    if (!resizeHandle.activeFocus && !resizeMouseArea.pressed) {
-                        root.finishColumnResize()
-                    }
-                }
             }
         }
     }

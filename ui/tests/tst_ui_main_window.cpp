@@ -1230,6 +1230,7 @@ private slots:
     void rowStatesShareOneRightEdge();
     void transportIsWindowChromeInTheHeaderColours();
     void listsRingARowAsTheKeyboardComesIn();
+    void tabIntoTheQueueFocusesItsCurrentRow();
     void listsRingTheCurrentRowOnlyForTheKeyboard();
     void unreadableTracksAreMarkedFromTheIssueHistory();
     void aTrackThatFailsToPlayShowsTheWarningWhileCurrent();
@@ -1256,7 +1257,7 @@ private slots:
     void visualizationTakesNearlyHalfTheRightColumn();
     void firstRunShowsOneMessage();
     void nothingSaysFirstRunBeforeTheLibraryLoads();
-    void tabGoesFromTheLibraryToTheQueueRowsBeforeItsHandles();
+    void tabGoesThroughTheQueueHeadersHandlesBeforeItsRows();
     void focusedColumnHandleHasAFrameAndSaysItsKeys_data();
     void focusedColumnHandleHasAFrameAndSaysItsKeys();
     void columnHandlesShowAQuietMarkAtRest_data();
@@ -6221,6 +6222,80 @@ void UiMainWindowTest::transportIsWindowChromeInTheHeaderColours() {
     QTRY_VERIFY2(bandProblem().isEmpty(), qPrintable(bandProblem()));
 }
 
+// Tab into the queue gives the focus to the row the keyboard is on, the
+// one with the ring, so a screen reader reads its number, title, artist and
+// state, and the keys go on from it. The bare list had the focus when the
+// queue's rows came after the window opened, and a screen reader read only
+// "Queue, list"; otherwise its first row did, wherever the ring was.
+void UiMainWindowTest::tabIntoTheQueueFocusesItsCurrentRow() {
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    const bool accessibilityWasActive = QAccessible::isActive();
+    QAccessible::setActive(true);
+    const auto restoreAccessibility = qScopeGuard([accessibilityWasActive] {
+        QAccessible::setActive(accessibilityWasActive);
+    });
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *queueView = named(window, "playlistView");
+    QObject *queue = window->findChild<QObject *>(QStringLiteral("queueController"));
+    QVERIFY(queueView && queue);
+    // What the focus is on, as a screen reader is told: the item with the
+    // keyboard's focus, or the nearest item above it with a role.
+    const auto focused = [window]() -> QAccessibleInterface * {
+        for (QQuickItem *item = window->activeFocusItem(); item != nullptr; item = item->parentItem()) {
+            QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(item);
+            if (accessible != nullptr && accessible->role() != QAccessible::NoRole
+                && accessible->role() != QAccessible::Client) {
+                return accessible;
+            }
+        }
+        return nullptr;
+    };
+    const auto focusedName = [&focused]() {
+        QAccessibleInterface *accessible = focused();
+        return accessible != nullptr ? accessible->text(QAccessible::Name) : QString();
+    };
+
+    // The rows come after the window has opened; the fourth plays.
+    setQueue(bridge, sampleQueueRows(20));
+    bridge->setProperty("currentTrackPath", QStringLiteral("/music/3.flac"));
+    bridge->setProperty("playingQueueIndex", 3);
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QTRY_COMPARE(queueView->property("count").toInt(), 20);
+    tabInto(window, queueView);
+    QTRY_COMPARE(ringedRowsOf(queueView), QList<int>{3});
+    QTRY_COMPARE(window->activeFocusItem(), viewRowAt(queueView, 3));
+    QVERIFY(focused() != nullptr);
+    QCOMPARE(focused()->role(), QAccessible::ListItem);
+    QCOMPARE(focusedName(), QStringLiteral("4., Track 3, Artist 3, Album, 1:00, playing"));
+    QVERIFY(focused()->state().focused);
+
+    // Down goes on from it, and the focus with the ring.
+    QTest::keyClick(window, Qt::Key_Down);
+    QTRY_COMPARE(queue->property("selectedIndices").toList(), QVariantList{4});
+    QTRY_COMPARE(ringedRowsOf(queueView), QList<int>{4});
+    QTRY_COMPARE(window->activeFocusItem(), viewRowAt(queueView, 4));
+    QCOMPARE(focusedName(), QStringLiteral("5., Track 4, Artist 4, Album, 1:00"));
+
+    // Emptied, the list itself; filled again, stopped, the first row.
+    bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    bridge->setProperty("playingQueueIndex", -1);
+    setQueue(bridge, QVariantList{});
+    QVERIFY(QMetaObject::invokeMethod(queue, "clearSelection"));
+    queue->setProperty("focusRowIndex", -1);
+    QTRY_COMPARE(queueView->property("count").toInt(), 0);
+    QTRY_VERIFY(queueView->hasActiveFocus());
+    QCOMPARE(window->activeFocusItem(), queueView);
+    QCOMPARE(focused()->role(), QAccessible::List);
+    setQueue(bridge, sampleQueueRows(5));
+    QTRY_COMPARE(queueView->property("count").toInt(), 5);
+    tabInto(window, queueView);
+    QTRY_COMPARE(ringedRowsOf(queueView), QList<int>{0});
+    QTRY_COMPARE(window->activeFocusItem(), viewRowAt(queueView, 0));
+    QCOMPARE(focusedName(), QStringLiteral("1., Track 0, Artist 0, Album, 1:00"));
+}
+
 // Tab into the library or the queue with no row selected: a row it shows
 // becomes the current one and has the 1 px ring, so the keyboard's place
 // shows. Nothing is selected and the view stays where it is.
@@ -7909,12 +7984,12 @@ void UiMainWindowTest::firstRunShowsOneMessage() {
     QVERIFY(!shown(named(window, "plotAnalysingText")));
     QVERIFY(named(window, "nowPlayingPanel")->property("idle").toBool());
     QTRY_VERIFY2(compactRowProblem(window).isEmpty(), qPrintable(compactRowProblem(window)));
-    // The empty queue's header shows only its name, and Tab skips its
-    // resize handles.
+    // The empty queue's header keeps its column labels and handles, with
+    // only its count left out (theEmptyQueuesHeaderKeepsItsColumns).
     for (const char *column : {"queueHeader_artist", "queueHeader_album", "queueHeader_length"}) {
-        QCOMPARE(named(window, column)->opacity(), 0.0);
+        QCOMPARE(named(window, column)->opacity(), 1.0);
     }
-    QVERIFY(!named(window, "queueColumnHandle_artist")->activeFocusOnTab());
+    QVERIFY(named(window, "queueColumnHandle_artist")->activeFocusOnTab());
 
     // With a library folder, the first run is over: the library's quiet
     // line, and the queue's two-line hint, centred as the first-run
@@ -7951,17 +8026,19 @@ void UiMainWindowTest::firstRunShowsOneMessage() {
                                       Q_ARG(QVariant, QByteArray())));
     QTRY_COMPARE(libraryEmpty->property("text").toString(),
                  QStringLiteral("No music found in the library folders"));
-    // Queued tracks replace the line, and the columns get their labels.
+    // Queued tracks replace the line; the columns keep their labels.
     setQueue(bridge, sampleQueueRows(1));
     QTRY_VERIFY(!queueEmpty->isVisible());
     QCOMPARE(named(window, "queueHeader_artist")->opacity(), 1.0);
     QVERIFY(named(window, "queueColumnHandle_artist")->activeFocusOnTab());
 }
 
-// Tab goes from the library to the queue's rows: the column handles over
-// the queue's header come after them in the Tab chain, not before, and
-// still take the keyboard there.
-void UiMainWindowTest::tabGoesFromTheLibraryToTheQueueRowsBeforeItsHandles() {
+// Tab goes through the queue in reading order: from the library to the
+// column handles of the queue's header, in the columns' order, then to its
+// rows, and on to the visualization. The handles came after the rows, so
+// the focus went down to the rows and back up to the header, and three
+// stops stood between the rows and the plot.
+void UiMainWindowTest::tabGoesThroughTheQueueHeadersHandlesBeforeItsRows() {
     MainWindowFixture fixture(sized());
     QQuickWindow *window = fixture.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
@@ -7975,25 +8052,41 @@ void UiMainWindowTest::tabGoesFromTheLibraryToTheQueueRowsBeforeItsHandles() {
     QQuickItem *artistHandle = named(window, "queueColumnHandle_artist");
     QVERIFY(library && queue && artistHandle);
     QTRY_VERIFY(artistHandle->activeFocusOnTab());
+    const auto focusName = [window]() {
+        return window->activeFocusItem() != nullptr ? window->activeFocusItem()->objectName() : QStringLiteral("nothing");
+    };
 
     library->forceActiveFocus(Qt::TabFocusReason);
     QTRY_VERIFY(library->hasActiveFocus());
-    QTest::keyClick(window, Qt::Key_Tab);
-    QTRY_VERIFY2(queue->hasActiveFocus(),
-                 qPrintable(QStringLiteral("Tab went to %1")
-                                .arg(window->activeFocusItem() ? window->activeFocusItem()->objectName()
-                                                               : QStringLiteral("nothing"))));
-    // Then the handles, in the columns' order, which Left and Right still
-    // move.
+    // The handles, in the columns' order, which Left and Right still move.
     for (const char *column : {"queueColumnHandle_artist", "queueColumnHandle_album", "queueColumnHandle_length"}) {
         QTest::keyClick(window, Qt::Key_Tab);
-        QTRY_VERIFY2(named(window, column)->hasActiveFocus(), column);
+        QTRY_VERIFY2(named(window, column)->hasActiveFocus(),
+                     qPrintable(QStringLiteral("%1: Tab went to %2").arg(QLatin1String(column), focusName())));
     }
-    // And Shift+Tab goes back from the rows to the library.
+    const qreal lengthWidth = named(window, "queueHeader_length")->width();
+    QTest::keyClick(window, Qt::Key_Left);
+    QTRY_VERIFY(named(window, "queueHeader_length")->width() > lengthWidth);
+    QTest::keyClick(window, Qt::Key_Home);
+    QTRY_COMPARE(named(window, "queueHeader_length")->width(), lengthWidth);
+    // Then the rows,
+    QTest::keyClick(window, Qt::Key_Tab);
+    QTRY_VERIFY2(queue->hasActiveFocus(), qPrintable(QStringLiteral("Tab went to %1").arg(focusName())));
+    // and on to the visualization, past the queue.
+    QTest::keyClick(window, Qt::Key_Tab);
+    QTRY_VERIFY2(!queue->hasActiveFocus() && !named(window, "queueColumnHandles")->isAncestorOf(window->activeFocusItem())
+                     && !library->hasActiveFocus(),
+                 qPrintable(QStringLiteral("Tab went to %1").arg(focusName())));
+    // Shift+Tab goes back from the rows to the last handle, and from the
+    // first handle to the library.
     queue->forceActiveFocus(Qt::TabFocusReason);
     QTRY_VERIFY(queue->hasActiveFocus());
     QTest::keyClick(window, Qt::Key_Backtab, Qt::ShiftModifier);
-    QTRY_VERIFY(library->hasActiveFocus());
+    QTRY_VERIFY(named(window, "queueColumnHandle_length")->hasActiveFocus());
+    artistHandle->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(artistHandle->hasActiveFocus());
+    QTest::keyClick(window, Qt::Key_Backtab, Qt::ShiftModifier);
+    QTRY_VERIFY2(library->hasActiveFocus(), qPrintable(QStringLiteral("Shift+Tab went to %1").arg(focusName())));
 }
 
 void UiMainWindowTest::columnHandlesShowAQuietMarkAtRest_data() {
@@ -8006,8 +8099,8 @@ void UiMainWindowTest::columnHandlesShowAQuietMarkAtRest_data() {
 // rest, so a pointer user can see where to resize (it showed nothing until
 // hovered): a 1 px stroke in the seam colour, 10 px at 10 pt and growing with
 // the font, centred on the labels, where the divider is. It gives way to the
-// divider under the pointer and with focus; an empty queue's header, with
-// nothing to resize, shows none.
+// divider under the pointer and with focus. An empty queue's header, with
+// its labels, shows it too.
 void UiMainWindowTest::columnHandlesShowAQuietMarkAtRest() {
     QFETCH(qreal, pointSize);
     const ScopedApplicationFont font(pointSize);
@@ -8021,7 +8114,7 @@ void UiMainWindowTest::columnHandlesShowAQuietMarkAtRest() {
                          QStringLiteral("queueColumnHandleRest"));
     };
     QVERIFY(restOf("length") != nullptr);
-    QVERIFY(!restOf("length")->isVisible());
+    QVERIFY(restOf("length")->isVisible());
 
     setQueue(bridgeOf(window), sampleQueueRows(3));
     for (const char *column : {"artist", "album", "length"}) {
@@ -8073,11 +8166,11 @@ void UiMainWindowTest::columnHandlesShowAQuietMarkAtRest() {
     QTRY_VERIFY(line->isVisible());
     QVERIFY(!restOf("length")->isVisible());
 
-    // Emptied, nothing to resize.
+    // Emptied, the header keeps its marks.
     named(window, "playlistView")->forceActiveFocus(Qt::TabFocusReason);
     setQueue(bridgeOf(window), QVariantList{});
-    QTRY_VERIFY(!restOf("length")->isVisible());
-    QVERIFY(!restOf("artist")->isVisible());
+    QTRY_VERIFY(restOf("length")->isVisible());
+    QVERIFY(restOf("artist")->isVisible());
 }
 
 void UiMainWindowTest::focusedColumnHandleHasAFrameAndSaysItsKeys_data() {
