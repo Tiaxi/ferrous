@@ -1172,6 +1172,11 @@ Rectangle {
                     id: playlistContextMenu
                     objectName: "playlistContextMenu"
                     property int rowIndex: -1
+                    // The rows Remove acts on: every selected row, when the
+                    // menu's row is one of several selected; else its own.
+                    readonly property bool actsOnSelection: playlistContextMenu.rowIndex >= 0
+                        && root.controller.isIndexSelected(playlistContextMenu.rowIndex)
+                        && root.controller.selectedIndices.length > 1
 
                     Components.KeyHintMenuItem {
                         objectName: "queuePlayItem"
@@ -1244,7 +1249,12 @@ Rectangle {
 
                     Components.KeyHintMenuItem {
                         objectName: "queueRemoveItem"
-                        text: I18n.i18nc("@action:inmenu", "Remove from Queue")
+                        // Names how many rows it removes, when it is several.
+                        text: playlistContextMenu.actsOnSelection
+                            ? I18n.i18ncp("@action:inmenu", "Remove %1 Track from Queue",
+                                          "Remove %1 Tracks from Queue",
+                                          root.controller.selectedIndices.length)
+                            : I18n.i18nc("@action:inmenu", "Remove from Queue")
                         icon.name: "list-remove"
                         keyHint: I18n.i18nc("@info:shortcut key name", "Del")
                         enabled: playlistContextMenu.rowIndex >= 0
@@ -1252,8 +1262,7 @@ Rectangle {
                             if (playlistContextMenu.rowIndex < 0) {
                                 return
                             }
-                            if (root.controller.isIndexSelected(playlistContextMenu.rowIndex)
-                                    && root.controller.selectedIndices.length > 1) {
+                            if (playlistContextMenu.actsOnSelection) {
                                 root.controller.removeSelectedTrack()
                             } else {
                                 root.uiBridge.removeAt(playlistContextMenu.rowIndex)

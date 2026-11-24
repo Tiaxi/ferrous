@@ -601,6 +601,10 @@ private slots:
     void menuItemGlyphsGrowWithTheFont_data();
     void menuItemGlyphsGrowWithTheFont();
     void everyMenuItemIsAnAppMenuItem();
+    void marksShareTheGlyphColumn_data();
+    void marksShareTheGlyphColumn();
+    void markedGlyphsKeepTwoColumns();
+    void queueMenuNamesHowManyRowsItRemoves();
     void showInLibraryShowsTheLibraryTree();
     void clearQueueShowsALineGlyph();
     void menusReadInKdesWordsAndOrder();
@@ -1348,17 +1352,21 @@ void UiMenusTest::menuBarTellsHoverFromOpen() {
 void UiMenusTest::menuItemGlyphsGrowWithTheFont_data() {
     QTest::addColumn<qreal>("pointSize");
     QTest::addColumn<int>("glyph");
-    QTest::newRow("10 pt") << 10.0 << 16;
-    QTest::newRow("24 pt") << 24.0 << 32;
-    QTest::newRow("40 pt") << 40.0 << 32;
+    QTest::addColumn<int>("gap");
+    QTest::newRow("10 pt") << 10.0 << 16 << 5;
+    QTest::newRow("24 pt") << 24.0 << 32 << 8;
+    QTest::newRow("40 pt") << 40.0 << 32 << 8;
 }
 
 // A menu item's glyph grows with the font as its words do, from 16 px at
 // the default font to 32 px and no larger, in the menu bar's menus and the
-// context menus, with the gap to the words as at the default font.
+// context menus, and the gap to the words grows with it: the row's
+// spacing at the default font, a quarter of the glyph at 32 px. At the
+// row's spacing, Previous and Next crowded their words at 24 pt.
 void UiMenusTest::menuItemGlyphsGrowWithTheFont() {
     QFETCH(qreal, pointSize);
     QFETCH(int, glyph);
+    QFETCH(int, gap);
     ScopedApplicationFont font(pointSize);
     MainWindowFixture main(wideWindow());
     QQuickWindow *window = main.window;
@@ -1393,9 +1401,8 @@ void UiMenusTest::menuItemGlyphsGrowWithTheFont() {
             QVERIFY2(icon->isVisible(), qPrintable(name));
             QCOMPARE(icon->width(), qreal(glyph));
             QCOMPARE(icon->height(), qreal(glyph));
-            const qreal gap = label->x() - (icon->x() + icon->width());
-            QCOMPARE(gap, row->property("spacing").toReal());
-            QVERIFY2(gap >= 4.0, qPrintable(QStringLiteral("%1: %2").arg(name).arg(gap)));
+            const qreal drawnGap = label->x() - icon->mapToItem(row, QPointF(icon->width(), 0)).x();
+            QVERIFY2(qFuzzyCompare(drawnGap, qreal(gap)), qPrintable(QStringLiteral("%1: %2").arg(name).arg(drawnGap)));
             // The row holds the glyph.
             QVERIFY2(item->height() >= glyph + item->property("topPadding").toReal()
                                            + item->property("bottomPadding").toReal(),
@@ -1511,6 +1518,236 @@ ApplicationWindow {
     QTRY_VERIFY(!menu->property("visible").toBool());
 }
 
+void UiMenusTest::marksShareTheGlyphColumn_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// In View's and Playback's menus, where no item has both a check mark and
+// a glyph, marks and glyphs share one column, as in Breeze's widget menus:
+// as wide as the wider, each centred in it, with every item's words on
+// one edge a spacing after it. Each had a column of its own, which left a
+// mark a glyph's width and two spacings from its words. The menus without
+// marks keep their column where it was.
+void UiMenusTest::marksShareTheGlyphColumn() {
+    QFETCH(qreal, pointSize);
+    ScopedApplicationFont font(pointSize);
+    MainWindowFixture main(wideWindow());
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *menuBar = menuBarOf(window);
+
+    // Where an item's words begin, in the item.
+    const auto labelX = [](QQuickItem *item) {
+        QQuickItem *label = childNamed(item, "appMenuItemLabel");
+        return label != nullptr ? label->mapToItem(item, QPointF()).x() : -1.0;
+    };
+    // The words' left edge in a menu without marks: Edit's.
+    QObject *edit = menuNamed(window, "editMenu");
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRect(menuBarItemAt(menuBar, 1)).center().toPoint());
+    QTRY_VERIFY(edit->property("opened").toBool());
+    QQuickItem *undo = menuItemWithText(edit, QStringLiteral("Undo"));
+    QVERIFY(undo != nullptr);
+    QQuickItem *undoGlyph = childNamed(undo, "appMenuItemIcon");
+    QVERIFY(undoGlyph != nullptr);
+    const qreal glyphColumnLeft = undoGlyph->mapToItem(undo, QPointF()).x();
+    const qreal glyph = undoGlyph->width();
+    const qreal plainWordsX = labelX(undo);
+    QMetaObject::invokeMethod(edit, "close");
+    QTRY_VERIFY(!edit->property("visible").toBool());
+
+    const QList<std::pair<int, const char *>> menus{{2, "viewMenu"}, {3, "playbackMenu"}};
+    for (const auto &[index, name] : menus) {
+        QObject *menu = menuNamed(window, name);
+        QVERIFY(menu != nullptr);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          sceneRect(menuBarItemAt(menuBar, index)).center().toPoint());
+        QTRY_VERIFY(menu->property("opened").toBool());
+        QVERIFY(!menu->property("hasMarkedGlyphs").toBool());
+
+        qreal wordsX = -1.0;
+        qreal columnCentre = -1.0;
+        qreal markWidth = 0.0;
+        int marks = 0;
+        int glyphs = 0;
+        QList<QQuickItem *> columns;
+        for (QQuickItem *item : menuItems(menu)) {
+            if (item == nullptr || !item->isVisible() || item->inherits("QQuickMenuSeparator")) {
+                continue;
+            }
+            const QString text = QStringLiteral("%1: %2").arg(QLatin1String(name), item->property("text").toString());
+            // Every item's words, the heading's too, on one edge.
+            if (wordsX < 0) {
+                wordsX = labelX(item);
+            }
+            QCOMPARE(labelX(item), wordsX);
+            QQuickItem *column = childNamed(item, "appMenuItemGlyphColumn");
+            QVERIFY2(column != nullptr && column->isVisible(), qPrintable(text));
+            const qreal centre = column->mapToItem(item, QPointF(column->width() / 2, 0)).x();
+            if (columnCentre < 0) {
+                columnCentre = centre;
+            }
+            QCOMPARE(centre, columnCentre);
+            if (item->property("checkable").toBool()) {
+                auto *indicator = qvariant_cast<QQuickItem *>(item->property("indicator"));
+                QVERIFY2(indicator != nullptr && indicator->isVisible(), qPrintable(text));
+                markWidth = indicator->width();
+                // The mark, centred in the column, its words a spacing on.
+                QVERIFY2(std::abs(indicator->x() + indicator->width() / 2 - columnCentre) <= 0.5, qPrintable(text));
+                const qreal gap = wordsX - (indicator->x() + indicator->width());
+                // Closer than a glyph's width: with a column each, a glyph
+                // and two spacings.
+                QVERIFY2(gap > 0 && gap < glyph, qPrintable(QStringLiteral("%1: %2").arg(text).arg(gap)));
+                ++marks;
+            }
+            if (!iconOf(item).isEmpty()) {
+                QQuickItem *icon = childNamed(item, "appMenuItemIcon");
+                QVERIFY2(icon != nullptr && icon->isVisible(), qPrintable(text));
+                QCOMPARE(icon->width(), glyph);
+                const qreal iconCentre = icon->mapToItem(item, QPointF(icon->width() / 2, 0)).x();
+                QVERIFY2(std::abs(iconCentre - columnCentre) <= 0.5, qPrintable(text));
+                ++glyphs;
+            }
+            // Where the glyphs of a menu without marks begin.
+            QCOMPARE(column->mapToItem(item, QPointF()).x(), glyphColumnLeft);
+            columns << column;
+        }
+        QVERIFY2(marks >= 3 && glyphs >= 1, name);
+        // The column: the wider of mark and glyph.
+        for (QQuickItem *column : std::as_const(columns)) {
+            QCOMPARE(column->width(), std::max(markWidth, glyph));
+        }
+        QVERIFY(wordsX <= plainWordsX + std::max(0.0, markWidth - glyph));
+        QMetaObject::invokeMethod(menu, "close");
+        QTRY_VERIFY(!menu->property("visible").toBool());
+    }
+}
+
+// A menu with an item that has both a check mark and a glyph gives each a
+// column of its own, the mark first, as Breeze's item does.
+void UiMenusTest::markedGlyphsKeepTwoColumns() {
+    QQmlEngine engine;
+    QQmlComponent component(&engine);
+    component.setData(QByteArrayLiteral(R"QML(
+import QtQuick
+import QtQuick.Controls
+import "components" as Components
+
+ApplicationWindow {
+    width: 300
+    height: 200
+    visible: true
+    property alias menu: menu
+    Components.AppMenu {
+        id: menu
+        Components.AppMenuItem { objectName: "both"; text: "&Both"; checkable: true; icon.name: "media-playlist-shuffle" }
+        Components.AppMenuItem { objectName: "mark"; text: "&Mark"; checkable: true }
+        Components.AppMenuItem { objectName: "glyph"; text: "&Glyph"; icon.name: "document-open" }
+    }
+}
+)QML"),
+                      QUrl::fromLocalFile(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/MarkedGlyphsHarness.qml")));
+    std::unique_ptr<QObject> root(component.create());
+    QVERIFY2(root != nullptr, qPrintable(component.errorString()));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
+    QObject *menu = qvariant_cast<QObject *>(root->property("menu"));
+    QMetaObject::invokeMethod(menu, "open");
+    QTRY_VERIFY(menu->property("opened").toBool());
+    QTRY_VERIFY(menu->property("hasMarkedGlyphs").toBool());
+    const QList<QQuickItem *> items = menuItems(menu);
+    QCOMPARE(items.size(), 3);
+    qreal wordsX = -1.0;
+    for (QQuickItem *item : items) {
+        QQuickItem *label = childNamed(item, "appMenuItemLabel");
+        QQuickItem *column = childNamed(item, "appMenuItemGlyphColumn");
+        QVERIFY(label != nullptr && column != nullptr);
+        if (wordsX < 0) {
+            wordsX = label->mapToItem(item, QPointF()).x();
+        }
+        QCOMPARE(label->mapToItem(item, QPointF()).x(), wordsX);
+        // The glyph's column, a glyph wide, after the mark's.
+        QCOMPARE(column->width(), QQmlProperty::read(item, QStringLiteral("icon.width")).toReal());
+        if (item->property("checkable").toBool()) {
+            auto *indicator = qvariant_cast<QQuickItem *>(item->property("indicator"));
+            QVERIFY(indicator != nullptr);
+            QVERIFY2(indicator->x() + indicator->width() <= column->mapToItem(item, QPointF()).x(),
+                     qPrintable(item->objectName()));
+        }
+    }
+    QMetaObject::invokeMethod(menu, "close");
+    QTRY_VERIFY(!menu->property("visible").toBool());
+}
+
+// On one of several selected rows, the queue's Remove acts on them all and
+// says how many; on a row alone it keeps its words. Play plays the row
+// the menu was opened on alone, and keeps its words either way.
+void UiMenusTest::queueMenuNamesHowManyRowsItRemoves() {
+    MainWindowFixture main(wideWindow());
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    bridge->setProperty("queueRows", sampleQueueRows(3));
+    bridge->setProperty("queueLength", 3);
+    QTRY_VERIFY(viewRow(window, "playlistView", 2) != nullptr);
+
+    const auto openOn = [&](int index) -> QObject * {
+        rightClick(window, viewRow(window, "playlistView", index));
+        QObject *menu = nullptr;
+        if (!QTest::qWaitFor([&]() {
+                menu = visibleMenu(window, QStringLiteral("playlistContextMenu"));
+                return menu != nullptr && menu->property("opened").toBool();
+            })) {
+            return nullptr;
+        }
+        return menu;
+    };
+    const auto itemText = [](QObject *menu, const char *name) {
+        QObject *item = menu->findChild<QObject *>(QLatin1String(name));
+        return item != nullptr ? item->property("text").toString() : QString();
+    };
+    const auto close = [&](QObject *menu) {
+        QMetaObject::invokeMethod(menu, "close");
+        return QTest::qWaitFor([&]() { return !menu->property("visible").toBool(); });
+    };
+
+    // One row: as before.
+    QObject *menu = openOn(1);
+    QVERIFY(menu != nullptr);
+    QCOMPARE(itemText(menu, "queueRemoveItem"), QStringLiteral("Remove from Queue"));
+    QCOMPARE(itemText(menu, "queuePlayItem"), QStringLiteral("Play"));
+    QVERIFY(close(menu));
+
+    // Two of the three selected.
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRect(viewRow(window, "playlistView", 0)).center().toPoint());
+    QTest::mouseClick(window, Qt::LeftButton, Qt::ControlModifier,
+                      sceneRect(viewRow(window, "playlistView", 1)).center().toPoint());
+    menu = openOn(1);
+    QVERIFY(menu != nullptr);
+    QCOMPARE(itemText(menu, "queueRemoveItem"), QStringLiteral("Remove 2 Tracks from Queue"));
+    QCOMPARE(itemText(menu, "queuePlayItem"), QStringLiteral("Play"));
+    QVERIFY(close(menu));
+
+    // A row outside the selection, which the press selects alone.
+    menu = openOn(2);
+    QVERIFY(menu != nullptr);
+    QCOMPARE(itemText(menu, "queueRemoveItem"), QStringLiteral("Remove from Queue"));
+    QVERIFY(close(menu));
+
+    // It removes what it names.
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRect(viewRow(window, "playlistView", 0)).center().toPoint());
+    QTest::mouseClick(window, Qt::LeftButton, Qt::ControlModifier,
+                      sceneRect(viewRow(window, "playlistView", 1)).center().toPoint());
+    bridge->setProperty("queueCommands", QStringList());
+    menu = openOn(0);
+    QVERIFY(menu != nullptr);
+    QCOMPARE(itemText(menu, "queueRemoveItem"), QStringLiteral("Remove 2 Tracks from Queue"));
+    QMetaObject::invokeMethod(menu->findChild<QObject *>(QStringLiteral("queueRemoveItem")), "triggered");
+    QTRY_COMPARE(bridge->property("queueCommands").toStringList(), QStringList{QStringLiteral("remove 1,0")});
+    QTRY_VERIFY(!menu->property("visible").toBool());
+}
+
 // Show in Library shows the library's tree, not a jump arrow, in the
 // queue's menu and the search result's (tst_search_palette), from Breeze
 // and Breeze Dark alike.
@@ -1566,7 +1803,10 @@ void UiMenusTest::checkMenusListTheirItemsInOrder(QQuickWindow *window) {
                  QStringLiteral("item|Add Files to Queue…||media-playlist-append"),
                  QStringLiteral("item|Add Folder to Queue…||folder-add"),
                  QStringLiteral("sep"),
+                 // Adding a folder changes the library; it is not one of
+                 // the two that play it.
                  QStringLiteral("item|Add Library Folder…||folder-music-symbolic"),
+                 QStringLiteral("sep"),
                  QStringLiteral("item|Play Whole Library||media-playback-start"),
                  QStringLiteral("item|Add Whole Library to Queue||media-playlist-append"),
                  QStringLiteral("sep"),
@@ -2733,6 +2973,7 @@ void UiMenusTest::everyMenuHeadingStartsItsGroup() {
     }
     QCOMPARE(headings, 2);
 }
+
 
 int main(int argc, char **argv) {
     useOffscreenPlatformByDefault(argc, argv);
