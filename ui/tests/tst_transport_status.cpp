@@ -1061,6 +1061,11 @@ void TransportStatusTest::transportToolTipsClearTheFocusRings() {
     QTRY_VERIFY(!tip->property("visible").toBool());
     QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(next));
     QTRY_VERIFY(tip->property("opened").toBool());
+    // The pointer off the transport, whose lane holds the box of the
+    // control under it before one the keyboard's focus shows.
+    const QRectF transportRect = sceneRect(harness.item(QStringLiteral("transportBar")));
+    QTest::mouseMove(harness.window, QPointF(transportRect.center().x(), transportRect.bottom() + 20).toPoint());
+    QTRY_VERIFY(!next->property("hovered").toBool());
 
     // The seek bar's box, at the playhead while a key is held, clear of the
     // bar's ring.
@@ -1881,11 +1886,12 @@ void TransportStatusTest::seekFocusDrawsOneRingAroundTheBar() {
     QVERIFY(!ring->isVisible());
     seek->forceActiveFocus(Qt::TabFocusReason);
     QTRY_VERIFY(ring->isVisible());
-    // A 2 px ring whose inside is 3 px clear of the bar.
+    // A 2 px ring whose inside is 2 px clear of the bar: of the playhead,
+    // which spans the bar's height.
     QCOMPARE(evaluateOn(ring, QStringLiteral("border.width")).toInt(), 2);
     const QRectF bar = sceneRect(seek);
     const QRectF outer = sceneRect(ring);
-    QCOMPARE(outer, bar.adjusted(-5, -5, 5, 5));
+    QCOMPARE(outer, bar.adjusted(-4, -4, 4, 4));
     const QColor ringColor = evaluateOn(ring, QStringLiteral("border.color")).value<QColor>();
     QVERIFY(sameColor(ringColor, harness.token("focusRing")));
     QVERIFY2(contrastRatio(ringColor, harness.transportChrome()) >= 3.0,
@@ -5874,13 +5880,16 @@ void TransportStatusTest::transportAndStatusBarGrowWithALargeFont() {
         QVERIFY2(rect.left() >= previousRight, qPrintable(names[i]));
         previousRight = rect.right();
     }
-    // The row holds the buttons and 8 px above and below them, and the
-    // seek bar's focus ring and 5 px above and below it, so the ring stays
-    // clear of the seam: 82 px. Without a menu bar's row to borrow, the
-    // band grows by the lane alone, with no room under the row.
+    // The row is the buttons' and 8 px above and below them, 76 px, and
+    // holds the seek bar's focus ring 3 px clear of the seam (with a 5 px
+    // ring and 5 px under it, it was 82 px). Without a menu bar's row to
+    // borrow, the band grows by the lane alone, with no room under the row.
     QCOMPARE(buttonSize, 60.0);
-    QCOMPARE(transport->property("rowHeight").toReal(), 82.0);
-    QCOMPARE(band.height(), 82.0 + transport->property("laneGrowth").toReal());
+    QCOMPARE(transport->property("rowHeight").toReal(), 76.0);
+    QCOMPARE(band.height(), 76.0 + transport->property("laneGrowth").toReal());
+    QQuickItem *seekBar = harness.item(QStringLiteral("seekSlider"));
+    QVERIFY(seekBar != nullptr);
+    QCOMPARE(band.bottom() - (sceneRect(seekBar).bottom() + seekBar->property("focusRingOutset").toReal()), 3.0);
     for (const QString &name : {QStringLiteral("seekSlider"), QStringLiteral("transportTimePosition"),
                                 QStringLiteral("transportTimeLength"), QStringLiteral("muteButton"),
                                 QStringLiteral("volumeSlider")}) {

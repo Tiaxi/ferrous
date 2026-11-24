@@ -230,10 +230,12 @@ ToolBar {
 
     implicitWidth: contentItem.implicitWidth + leftPadding + rightPadding
     // The row of controls: 48 px, or the buttons and 8 px above and below
-    // them, or the seek bar's focus ring and 5 px above and below it, so
-    // that at a large font the ring never comes within 2 px of the seam.
+    // them, or the seek bar's focus ring and 3 px above and below it, so
+    // that at a large font the ring stays 3 px clear of the seam and the
+    // row is the buttons' (76 px at 24 pt; a 5 px ring with 5 px under it
+    // made it 82 px).
     readonly property real rowHeight: Math.max(48, root.buttonSize + 16,
-        seekSlider.boxHeight + 2 * seekSlider.focusRingOutset + 10)
+        seekSlider.boxHeight + 2 * seekSlider.focusRingOutset + 6)
     // The transport's popups have one place: a lane over the row, in the
     // menu bar's row, borrowed while a transport popup is open. The seek
     // bar's time box, the buttons' tooltips, Mute's and the volume's open
@@ -265,18 +267,39 @@ ToolBar {
     readonly property var windowMenuBar: ApplicationWindow.menuBar
     readonly property real popupHeadroomAbove: root.windowMenuBar && root.windowMenuBar.visible
         ? root.windowMenuBar.height : 0
-    // Whether a menu of the menu bar is open: the lane then gives the row
-    // back, as a box there would stand over the open menu's title (with
-    // the pointer resting on the seek bar, Alt+P left the time box over
-    // "Playback").
-    readonly property bool windowMenuOpen: {
-        const menus = root.windowMenuBar && root.windowMenuBar.visible ? root.windowMenuBar.menus : []
-        for (let i = 0; i < menus.length; ++i) {
-            if (menus[i].visible) {
+    // Whether the menu bar is in use: a menu of it open, a title under the
+    // pointer or pressed, or the keyboard in it. The lane then gives the
+    // row back, as a box there would stand over the title the user is
+    // reaching for (with the pointer resting on the seek bar, Alt+P left
+    // the time box over "Playback").
+    readonly property bool windowMenuActive: {
+        const bar = root.windowMenuBar
+        if (!bar || !bar.visible) {
+            return false
+        }
+        if (bar.activeFocus) {
+            return true
+        }
+        for (let i = 0; i < bar.count; ++i) {
+            const title = bar.itemAt(i)
+            if (title && (title.hovered || title.down || title.activeFocus
+                    || (title.menu && title.menu.visible))) {
                 return true
             }
         }
         return false
+    }
+    // The lane holds one box at a time. The seek bar's time goes first,
+    // then the tooltip of the control the pointer is on or holds; a
+    // tooltip the keyboard's focus shows gives way to either (with the
+    // pointer resting on the bar and Next focused, Next's box stood over
+    // the time's, and its backdrop over the time).
+    readonly property Item lanePointerControl: [previousButton, playPauseButton, stopButton, nextButton,
+        muteButton, volumeSlider].find(control => control.hovered || control.pressed) || null
+    // Whether the lane is free for the tooltip of `control`.
+    function laneFreeFor(control) {
+        return !root.windowMenuActive && !seekTimeBox.shown
+            && (root.lanePointerControl === null || root.lanePointerControl === control)
     }
     // What the band grows by, above the row, in whole pixels: nothing
     // under the menu bar, whose row holds the lane; without one, as much
@@ -465,11 +488,67 @@ ToolBar {
         Kirigami.Theme.inherit: false
     }
     component LaneBox: Rectangle {
+        id: laneBox
         objectName: "transportLaneBox"
         radius: Kirigami.Units.cornerRadius
         color: root.laneBoxFill
         border.width: root.devicePixelLine
         border.color: root.laneBoxEdge
+
+        // Over the menu bar's row, the titles the box covers or comes near
+        // go under a backdrop in the menu bar's colour, whole: part of a
+        // title beside the box read as a fragment of a word joined to it
+        // ("Edit[Next · Ctrl+Right]k", "Pla[0:04]k"). It is the box's, so
+        // it fades and goes with it and follows it along the bar; over
+        // empty chrome there is none. It takes no input.
+        Rectangle {
+            objectName: "transportLaneBackdrop"
+            z: -1
+            readonly property rect span: root.laneBackdropSpan(laneBox)
+            visible: span.width > 0
+            x: span.x
+            y: span.y
+            width: span.width
+            height: span.height
+            color: root.menuBarFill
+        }
+    }
+    // How near the box a title goes under the backdrop.
+    readonly property int laneBackdropReach: 4
+    // What the menu bar paints under its titles: its background's colour,
+    // or the chrome.
+    readonly property color menuBarFill: root.windowMenuBar && root.windowMenuBar.background
+        && root.windowMenuBar.background.color !== undefined
+        ? root.windowMenuBar.background.color : root.chromeColor
+    // The backdrop of `box`, a lane box, in its coordinates: the menu bar's
+    // height, across the titles within laneBackdropReach of it, or nothing.
+    // Mapped from the places of the box in its popup, of the popup and of
+    // the titles, which a binding of it then follows.
+    function laneBackdropSpan(box) {
+        const bar = root.windowMenuBar
+        const popupItem = box.parent
+        if (!bar || !bar.visible || !box.visible || !popupItem || !popupItem.parent) {
+            return Qt.rect(0, 0, 0, 0)
+        }
+        const origin = popupItem.parent.mapToItem(bar, popupItem.x + box.x, popupItem.y + box.y)
+        const reach = root.laneBackdropReach
+        let left = Infinity
+        let right = -Infinity
+        for (let i = 0; i < bar.count; ++i) {
+            const title = bar.itemAt(i)
+            if (!title || !title.parent || !title.visible || title.width <= 0) {
+                continue
+            }
+            const at = title.parent.mapToItem(bar, title.x, title.y)
+            if (at.x < origin.x + box.width + reach && at.x + title.width > origin.x - reach
+                    && at.y < origin.y + box.height + reach && at.y + title.height > origin.y - reach) {
+                left = Math.min(left, at.x)
+                right = Math.max(right, at.x + title.width)
+            }
+        }
+        return right > left
+            ? Qt.rect(left - origin.x, -origin.y, right - left, bar.height)
+            : Qt.rect(0, 0, 0, 0)
     }
 
     // A tooltip in the lane over the row, the menu bar's row, borrowed
@@ -563,7 +642,7 @@ ToolBar {
             objectName: "transportButtonToolTip"
             rowItem: transportButton
             visible: (transportButton.hovered || transportButton.visualFocus) && !transportButton.down
-                && !root.windowMenuOpen
+                && root.laneFreeFor(transportButton)
             delay: Kirigami.Units.toolTipDelay
             message: transportButton.toolTipText
         }
@@ -604,6 +683,7 @@ ToolBar {
             spacing: Kirigami.Units.smallSpacing
 
             TransportButton {
+                id: previousButton
                 name: "previous"
                 canAct: root.previousCanAct
                 glyphSource: Qt.resolvedUrl("../assets/transport-previous.svg")
@@ -695,6 +775,7 @@ ToolBar {
             }
 
             TransportButton {
+                id: stopButton
                 name: "stop"
                 canAct: root.stopCanAct
                 glyphSource: Qt.resolvedUrl("../assets/transport-stop.svg")
@@ -702,6 +783,7 @@ ToolBar {
             }
 
             TransportButton {
+                id: nextButton
                 name: "next"
                 canAct: root.nextCanAct
                 glyphSource: Qt.resolvedUrl("../assets/transport-next.svg")
@@ -807,8 +889,11 @@ ToolBar {
             // handle's centre, which a press or drag moves under the
             // pointer, on the line's centre at every position.
             readonly property real grabTargetWidth: 10
-            // How far its focus ring reaches outside the bar.
-            readonly property int focusRingOutset: 5
+            // How far its focus ring reaches outside the bar: 2 px clear of
+            // the playhead, whose line spans the bar's height. At the
+            // buttons' 3 px, the line's ends were 1 px from the ring, and at
+            // the bar's start the line doubled the ring's side.
+            readonly property int focusRingOutset: 4
             leftPadding: (playheadLineWidth - grabTargetWidth) / 2
             rightPadding: (playheadLineWidth - grabTargetWidth) / 2
 
@@ -1189,7 +1274,7 @@ ToolBar {
                     }
                 }
 
-                // Keyboard focus: one 2 px ring 3 px around the bar.
+                // Keyboard focus: one 2 px ring 2 px clear of the bar.
                 Rectangle {
                     objectName: "seekFocusRing"
                     visible: seekSlider.visualFocus
@@ -1285,7 +1370,7 @@ ToolBar {
                 // It follows the pointer and the gesture, not clicks or keys.
                 closePolicy: Popup.NoAutoClose
                 readonly property bool shown: (seekSlider.adjusting || seekSlider.hoverTimeShown)
-                    && seekSlider.seekAllowed && !root.windowMenuOpen
+                    && seekSlider.seekAllowed && !root.windowMenuActive
                 // Whether the time it shows, or last showed, is the hover's
                 // rather than a gesture's: the hover line then shows, and
                 // fades out, with it.
@@ -1517,7 +1602,7 @@ ToolBar {
                 objectName: "transportButtonToolTip"
                 rowItem: muteButton
                 visible: (muteButton.hovered || muteButton.visualFocus) && !muteButton.down
-                    && !root.windowMenuOpen
+                    && root.laneFreeFor(muteButton)
                 delay: Kirigami.Units.toolTipDelay
                 message: muteButton.toolTipText
             }
@@ -1601,7 +1686,7 @@ ToolBar {
                 objectName: "volumeToolTip"
                 rowItem: volumeSlider
                 readonly property bool wanted: (volumeSlider.hovered || volumeSlider.visualFocus
-                    || volumeSlider.pressed) && !root.windowMenuOpen
+                    || volumeSlider.pressed) && root.laneFreeFor(volumeSlider)
                 // Set together with the delay, which the tooltip reads as it
                 // is made visible: a binding of each could see the other
                 // still unchanged, and a press within the hover's delay then
