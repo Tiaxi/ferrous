@@ -37,7 +37,7 @@ To run Ferrous, also install the KDE `qqc2-desktop-style` QML module (`kf6-qqc2-
 
 CMake refuses a Qt older than 6.8. See [UI CI](../.github/workflows/ci.yml) for the reference distribution and Rust toolchain.
 
-For Fedora, the build prerequisites are below. To run the tests, add the GStreamer test plugins listed above; CI also installs RPM Fusion's full FFmpeg, so that the AC-3 tests have a decoder (see [CI](../.github/workflows/ci.yml)):
+For Fedora, the build prerequisites are below. To run the tests, add the GStreamer test plugins listed above, as the RPM spec's `%check` does; Fedora's own libav plugin has the AC-3 and DTS decoders. CI also installs RPM Fusion's full FFmpeg in place of Fedora's `ffmpeg-free` (see [CI](../.github/workflows/ci.yml)):
 
 ```bash
 sudo dnf install git rust cargo cmake ninja-build gcc-c++ \
