@@ -1197,6 +1197,8 @@ private slots:
     void libraryCollapseAllIsEnabledOnlyWithAnExpandedRow();
     void libraryCollapseAllLeavesNoRowDrawn();
     void regionHeadersNameTheRegionAndItsTotals();
+    void libraryHeaderSaysItHasNoFolders_data();
+    void libraryHeaderSaysItHasNoFolders();
     void selectedRowsDrawTheirMarksForTheSelection();
     void libraryTreeHasOneIndentStep();
     void libraryAlbumWithoutACoverShowsAPlaceholderTile();
@@ -4918,6 +4920,56 @@ void UiMainWindowTest::regionHeadersNameTheRegionAndItsTotals() {
     QVERIFY(!libraryTitle->property("truncated").toBool());
 }
 
+void UiMainWindowTest::libraryHeaderSaysItHasNoFolders_data() {
+    QTest::addColumn<qreal>("points");
+    QTest::addColumn<bool>("narrow");
+    QTest::newRow("10 pt") << 10.0 << false;
+    QTest::newRow("10 pt, narrow") << 10.0 << true;
+    QTest::newRow("24 pt") << 24.0 << false;
+}
+
+// Without a library folder the library's header says so where its totals
+// go, in their quiet colour, and nothing else: no line under it and no
+// button (the empty header read as a library that had not loaded); the
+// queue's first-run message stays the one call to action. With a folder,
+// the totals as ever, none while it has no tracks.
+void UiMainWindowTest::libraryHeaderSaysItHasNoFolders() {
+    QFETCH(qreal, points);
+    QFETCH(bool, narrow);
+    const ScopedApplicationFont font(points);
+    MainWindowFixture fixture(narrow ? sized(1000, 720) : sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QCOMPARE(bridge->property("libraryRootCount").toInt(), 0);
+    QQuickItem *header = named(window, "libraryHeader");
+    QVERIFY(header != nullptr);
+    QQuickItem *title = itemNamed(header, QStringLiteral("regionHeaderTitle"));
+    QQuickItem *totals = itemNamed(header, QStringLiteral("regionHeaderTotals"));
+    QVERIFY(title && totals);
+    QTRY_VERIFY(shown(totals));
+    QCOMPARE(totals->property("text").toString(), QStringLiteral("No folders"));
+    QVERIFY(!totals->property("truncated").toBool());
+    QVERIFY(!title->property("truncated").toBool());
+    QCOMPARE(colorOf(totals), tokenHex(window, "textTertiary"));
+    QVERIFY(!named(window, "libraryEmptyStateLabel")->isVisible());
+    QVERIFY(shown(named(window, "queueFirstRunMessage")));
+
+    // A folder, scanning: no totals until it has tracks.
+    bridge->setProperty("libraryRootCount", 1);
+    QTRY_COMPARE(totals->property("text").toString(), QString());
+    bridge->setProperty("libraryArtistCount", 1);
+    bridge->setProperty("libraryAlbumCount", 2);
+    bridge->setProperty("libraryTrackCount", 9);
+    // (At 24 pt the header shows as many of them as fit.)
+    QTRY_COMPARE(header->property("totals").toString(),
+                 narrow ? QStringLiteral("9 tracks") : QStringLiteral("1 artist · 2 albums · 9 tracks"));
+    // The folder removed again.
+    bridge->setProperty("libraryRootCount", 0);
+    bridge->setProperty("libraryTrackCount", 0);
+    QTRY_COMPARE(totals->property("text").toString(), QStringLiteral("No folders"));
+}
+
 // A selected row of the queue draws its length in the selected row's
 // secondary colour and its artist and album in its column colour, which
 // stay over its number's contrast on the selection, under the pointer as
@@ -7595,15 +7647,16 @@ void UiMainWindowTest::firstRunShowsOneMessage() {
     // Centred in the queue.
     QQuickItem *queue = named(window, "playlistView");
     QVERIFY(std::abs(sceneRect(message).center().x() - sceneRect(queue).center().x()) <= 1);
-    // No other message: the library shows its header with nothing under it,
-    // and the queue no empty line; the pane, before any audio, is its
-    // mode's floor, the spectrogram's black.
+    // No other message: the library shows its header, whose totals say
+    // it has no folders (libraryHeaderSaysItHasNoFolders), with nothing
+    // under it, and the queue no empty line; the pane, before any audio, is
+    // its mode's floor, the spectrogram's black.
     QVERIFY(!named(window, "libraryEmptyStateLabel")->isVisible());
     QVERIFY(!named(window, "queueEmptyLabel")->isVisible());
     QVERIFY(shown(named(window, "libraryHeader")));
     QCOMPARE(itemNamed(named(window, "libraryHeader"), QStringLiteral("regionHeaderTotals"))
                  ->property("text").toString(),
-             QString());
+             QStringLiteral("No folders"));
     QCOMPARE(itemNamed(named(window, "queueHeader"), QStringLiteral("regionHeaderTotals"))
                  ->property("text").toString(),
              QString());

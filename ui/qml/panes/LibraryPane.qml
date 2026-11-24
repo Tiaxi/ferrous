@@ -150,6 +150,11 @@ Rectangle {
     Component.onCompleted: root.followNowTrack()
 
     readonly property string totalsText: {
+        // Without a library folder, the totals' place says so; the queue
+        // has the first steps (QueuePane's firstRun).
+        if (root.uiBridge.libraryRootCount === 0) {
+            return I18n.i18nc("@info:status library totals, no library folder added", "No folders")
+        }
         const tracks = root.uiBridge.libraryTrackCount
         const parts = []
         if (tracks > 0) {
