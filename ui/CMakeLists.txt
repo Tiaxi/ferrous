@@ -800,9 +800,12 @@ if(BUILD_TESTING)
     # each shard's seconds when run alone, as ferrous_add_sharded_test takes
     # it: in one process, transport_input took most of its timeout in the
     # Debug CI job, and the longest of the run; in two shards each took
-    # 89-103 s of its 120 s on a busy machine, so it runs in three.
+    # 89-103 s of its 120 s on a busy machine. Its tests have grown since:
+    # 158 cases, 202 s in all, so three shards took 66-70 s each alone and
+    # one ran out its 120 s beside another build. It runs in five (about
+    # 40 s each).
     set(FERROUS_QML_SMOKE_SHARDED_AREAS
-        transport_input 3 22
+        transport_input 5 40
     )
     set(ferrous_smoke_area_names "")
     list(LENGTH FERROUS_QML_SMOKE_AREAS ferrous_smoke_area_values)
