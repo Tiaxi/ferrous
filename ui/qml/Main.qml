@@ -922,7 +922,10 @@ ApplicationWindow {
         shortcutId: "clear_queue"
         overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "&Clear Queue")
-        icon.name: "edit-clear-list"
+        // Breeze's broom, a line glyph as Undo's, Redo's and Find's beside
+        // it, not edit-clear-list's filled badge, the one solid shape in
+        // the menu.
+        icon.name: "edit-clear-all"
         enabled: uiBridge.queueLength > 0 && !root.viewerOpen
         onTriggered: uiBridge.clearQueue()
     }

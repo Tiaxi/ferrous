@@ -602,6 +602,7 @@ private slots:
     void menuItemGlyphsGrowWithTheFont();
     void everyMenuItemIsAnAppMenuItem();
     void showInLibraryShowsTheLibraryTree();
+    void clearQueueShowsALineGlyph();
     void menusReadInKdesWordsAndOrder();
     void libraryFolderMenuNamesTheFolder();
     void menusAnswerThePointerAndTheKeyboard();
@@ -1538,6 +1539,25 @@ void UiMenusTest::showInLibraryShowsTheLibraryTree() {
     QCOMPARE(iconsNamed("dialogs/GlobalSearchDialog.qml"), QStringList{icon});
 }
 
+// Clear Queue shows Breeze's broom, a line glyph of the weight of Undo's,
+// Redo's and Find's beside it (checkMenusListTheirItemsInOrder), which
+// Breeze and Breeze Dark both have at 16 px.
+void UiMenusTest::clearQueueShowsALineGlyph() {
+    for (const QString &theme : {QStringLiteral("breeze"), QStringLiteral("breeze-dark")}) {
+        const QString file = QStringLiteral("icons/%1/actions/16/edit-clear-all.svg").arg(theme);
+        QVERIFY2(!QStandardPaths::locate(QStandardPaths::GenericDataLocation, file).isEmpty(), qPrintable(file));
+    }
+    QFile main(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/Main.qml"));
+    QVERIFY(main.open(QIODevice::ReadOnly));
+    const QString text = QString::fromUtf8(main.readAll());
+    const qsizetype action = text.indexOf(QStringLiteral("id: clearQueueAction"));
+    QVERIFY(action >= 0);
+    const qsizetype icon = text.indexOf(QStringLiteral("icon.name:"), action);
+    QVERIFY(icon >= 0);
+    QCOMPARE(text.mid(icon, text.indexOf(QLatin1Char('\n'), icon) - icon),
+             QStringLiteral("icon.name: \"edit-clear-all\""));
+}
+
 void UiMenusTest::checkMenusListTheirItemsInOrder(QQuickWindow *window) {
 
     QCOMPARE(rowsOf(menuNamed(window, "fileMenu")),
@@ -1559,7 +1579,9 @@ void UiMenusTest::checkMenusListTheirItemsInOrder(QQuickWindow *window) {
                  QStringLiteral("sep"),
                  QStringLiteral("item|Find…|%1|edit-find").arg(standardKey(QKeySequence::Find)),
                  QStringLiteral("sep"),
-                 QStringLiteral("item|Clear Queue||edit-clear-list"),
+                 // A line glyph, as the others' (edit-clear-list's is a
+                 // filled badge); Breeze and Breeze Dark both have it.
+                 QStringLiteral("item|Clear Queue||edit-clear-all"),
              }));
     QCOMPARE(rowsOf(menuNamed(window, "viewMenu")),
              (QStringList{
