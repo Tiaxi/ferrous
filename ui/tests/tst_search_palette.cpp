@@ -555,6 +555,8 @@ private slots:
     void shortWindowPaletteShowsFiveResults();
     void glyphsTargetsAndThumbnailsFollowTheFont_data();
     void glyphsTargetsAndThumbnailsFollowTheFont();
+    void glyphsDrawAtTheirOwnSize_data();
+    void glyphsDrawAtTheirOwnSize();
     void rowColumnsNeverMeet_data();
     void rowColumnsNeverMeet();
     void headingsStartTheirSections_data();
@@ -3115,7 +3117,9 @@ void SearchPaletteTest::glyphsTargetsAndThumbnailsFollowTheFont() {
             if (QQuickItem *leadGlyph = visibleChildNamed(row, name)) {
                 ++glyphs;
                 // The no-cover tile is as large as a cover.
-                QCOMPARE(leadGlyph->width(), name == QStringLiteral("globalSearchArtistGlyph") ? glyph : lead);
+                QCOMPARE(leadGlyph->width(), name == QStringLiteral("globalSearchArtistGlyph")
+                                                 ? std::min(glyph, 2 * std::round(lead * 0.75 / 2))
+                                                 : lead);
                 QCOMPARE(sceneRect(leadGlyph).center().x() - frame.left(), 16.0 + lead / 2);
             }
         }
@@ -3656,6 +3660,88 @@ int main(int argc, char **argv) {
     FerrousLocalization::registerQmlTypes();
     SearchPaletteTest test;
     return QTest::qExec(&test, argc, argv);
+}
+
+void SearchPaletteTest::glyphsDrawAtTheirOwnSize_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The field's glyph, the lead column's glyphs (an artist's, a recent
+// search's) and the playing glyph draw at the size the font gives them, not
+// rounded down to an icon size: at 24 pt the field's 38 px glyph drew at
+// 32 px, smaller than the text beside it. The lead column's glyphs are
+// about 3/4 of the lead at a large font, and 16 px at the default one.
+void SearchPaletteTest::glyphsDrawAtTheirOwnSize() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    harness.bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/line.flac"));
+    harness.bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+
+    const qreal glyph = harness.dialog->property("glyphSize").toReal();
+    const qreal lead = harness.dialog->property("leadSize").toReal();
+    const qreal leadGlyph = harness.dialog->property("leadGlyphSize").toReal();
+    if (pointSize > 0) {
+        QCOMPARE(glyph, 38.0);
+        QVERIFY2(std::abs(leadGlyph - lead * 0.75) <= 1, qPrintable(QStringLiteral("%1 in %2").arg(leadGlyph).arg(lead)));
+    } else {
+        QCOMPARE(glyph, 16.0);
+        QCOMPARE(leadGlyph, 16.0);
+    }
+
+    QQuickItem *field = harness.item(QStringLiteral("globalSearchFieldIcon"));
+    QQuickItem *artist = harness.drawn(QStringLiteral("globalSearchArtistGlyph"));
+    QQuickItem *now = harness.drawn(QStringLiteral("globalSearchNowGlyph"));
+    QVERIFY(field != nullptr && artist != nullptr && now != nullptr);
+    QCOMPARE(artist->width(), leadGlyph);
+    for (QQuickItem *icon : {field, artist, now}) {
+        QVERIFY2(!icon->property("roundToIconSize").toBool(), qPrintable(icon->objectName()));
+    }
+    // As drawn: Breeze's magnifier fills 3/4 of its box; rounded down to
+    // 32 px at 24 pt it filled 5/8 of it.
+    const auto inkHeight = [&](QQuickItem *icon) {
+        const QImage image = harness.window->grabWindow();
+        const qreal scale = static_cast<qreal>(image.width()) / harness.window->width();
+        const QRect box = QRectF(sceneRect(icon).topLeft() * scale, sceneRect(icon).size() * scale).toAlignedRect();
+        const QColor background = harness.token("view");
+        int top = box.bottom();
+        int bottom = box.top() - 1;
+        for (int y = box.top(); y <= box.bottom(); ++y) {
+            for (int x = box.left(); x <= box.right(); ++x) {
+                const QColor pixel = image.pixelColor(x, y);
+                if (std::abs(pixel.red() - background.red()) + std::abs(pixel.green() - background.green())
+                        + std::abs(pixel.blue() - background.blue())
+                    > 60) {
+                    top = std::min(top, y);
+                    bottom = std::max(bottom, y);
+                }
+            }
+        }
+        return (bottom - top + 1) / scale;
+    };
+    const qreal fieldInk = inkHeight(field);
+    QVERIFY2(fieldInk >= 0.72 * glyph, qPrintable(QStringLiteral("%1 of %2").arg(fieldInk).arg(glyph)));
+
+    // The recent searches' glyphs.
+    harness.field()->setProperty("text", QString());
+    harness.controller->setProperty("recentQueries", QStringList{QStringLiteral("meridian")});
+    QTRY_VERIFY(harness.drawn(QStringLiteral("globalSearchAuxGlyph")) != nullptr);
+    QQuickItem *recent = harness.drawn(QStringLiteral("globalSearchAuxGlyph"));
+    QCOMPARE(recent->width(), leadGlyph);
+    QVERIFY(!recent->property("roundToIconSize").toBool());
 }
 
 #include "tst_search_palette.moc"

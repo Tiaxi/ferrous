@@ -109,6 +109,12 @@ Dialog {
     // buttons 8 px of the field's. All are even, so a glyph centres on
     // whole pixels in its button and over a cover.
     readonly property int glyphSize: 2 * Math.round(root.uiPalette.toolIconSize / 2)
+    // The glyphs in the lead column (an artist's, a recent search's, the
+    // suggestion's): about 3/4 of the lead at a large font, so they fill
+    // it as a cover does, and the field's 16 px at the default font. They
+    // and the field's glyph draw at their own size (roundToIconSize:
+    // false): rounded down to an icon size, they were 32 px at 24 pt.
+    readonly property int leadGlyphSize: Math.min(root.glyphSize, 2 * Math.round(root.leadSize * 0.75 / 2))
     readonly property int nowGlyphSize: 2 * Math.round(root.uiPalette.scaledSize(12) / 2)
     readonly property int leadSize: 2 * Math.floor(Math.min(root.uiPalette.scaledSize(24), root.resultHeight - 8) / 2)
     readonly property int fieldButtonSize: 2 * Math.floor(Math.min(root.uiPalette.scaledSize(28), root.fieldHeight - 16) / 2)
@@ -595,6 +601,7 @@ Dialog {
                 height: root.glyphSize
                 source: "search"
                 isMask: true
+                roundToIconSize: false
                 color: root.uiPalette.textSecondary
             }
             TextField {
@@ -939,8 +946,8 @@ Dialog {
                     // changes, which recycled rows would do on every query.
                     Loader {
                         id: artistGlyphLoader
-                        x: root.sideInset + (root.leadSize - root.glyphSize) / 2
-                        y: Math.round((parent.height - root.glyphSize) / 2)
+                        x: root.sideInset + (root.leadSize - root.leadGlyphSize) / 2
+                        y: Math.round((parent.height - root.leadGlyphSize) / 2)
                         active: resultRow.isResult && resultRow.rowType === "artist"
                         sourceComponent: artistGlyph
                     }
@@ -996,6 +1003,7 @@ Dialog {
                             source: (root.controller.uiBridge.playbackState || "") === "Paused"
                                 ? "media-playback-pause" : "media-playback-start"
                             isMask: true
+                            roundToIconSize: false
                             // Over the dark scrim on the cover or the tile,
                             // the colour map's bright amber in both themes
                             // (fixed, like the plot's colours): the light
@@ -1275,12 +1283,14 @@ Dialog {
                             scrollbarLane: 0
                         }
                         Kirigami.Icon {
+                            objectName: "globalSearchAuxGlyph"
                             x: root.sideInset + (root.leadSize - width) / 2
                             y: Math.round((parent.height - height) / 2)
-                            width: root.glyphSize
-                            height: root.glyphSize
+                            width: root.leadGlyphSize
+                            height: root.leadGlyphSize
                             source: auxRow.modelData.kind === "recent" ? "view-history" : "search"
                             isMask: true
+                            roundToIconSize: false
                             color: root.uiPalette.textSecondary
                         }
                         Text {
@@ -1558,10 +1568,11 @@ Dialog {
         id: artistGlyph
         Kirigami.Icon {
             objectName: "globalSearchArtistGlyph"
-            width: root.glyphSize
-            height: root.glyphSize
+            width: root.leadGlyphSize
+            height: root.leadGlyphSize
             source: "view-media-artist"
             isMask: true
+            roundToIconSize: false
             color: root.uiPalette.textSecondary
         }
     }
