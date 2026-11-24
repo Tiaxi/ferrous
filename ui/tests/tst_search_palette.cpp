@@ -599,7 +599,8 @@ void SearchPaletteTest::paletteSitsUnderTheTransportOverADim_data() {
 
 // 800 px wide (less in a narrow window), centred, 32 px under the
 // transport and its seam, on the view colour with a 6 px radius; the field
-// 44 px with the glyph at 16 px and the text at 52; the footer 28 px under
+// 44 px with the glyph at 20 px, centred on the 24 px lead column, and the
+// text at 52; the footer 28 px under
 // a hairline; and the dim over the whole window.
 void SearchPaletteTest::paletteSitsUnderTheTransportOverADim() {
     QFETCH(bool, dark);
@@ -630,7 +631,7 @@ void SearchPaletteTest::paletteSitsUnderTheTransportOverADim() {
     QCOMPARE(hex(outline), hex(harness.token("seam")));
 
     QQuickItem *icon = harness.item(QStringLiteral("globalSearchFieldIcon"));
-    QCOMPARE(sceneRect(icon).left() - frame.left(), 16.0);
+    QCOMPARE(sceneRect(icon).left() - frame.left(), 20.0);
     QCOMPARE(icon->width(), 16.0);
     QCOMPARE(icon->property("source").toString(), QStringLiteral("search"));
     QCOMPARE(sceneRect(harness.field()).left() - frame.left(), 52.0);
@@ -2906,7 +2907,10 @@ void SearchPaletteTest::glyphsTargetsAndThumbnailsFollowTheFont() {
     QQuickItem *icon = harness.item(QStringLiteral("globalSearchFieldIcon"));
     QCOMPARE(icon->width(), glyph);
     QCOMPARE(icon->height(), glyph);
-    QCOMPARE(sceneRect(icon).left() - frame.left(), 16.0);
+    // The field's glyph centres on the results' lead column, on one axis
+    // with the artists' glyphs and the covers below it (at 16 px from the
+    // edge it stood left of them, 4 px at the default font and 5 at 24 pt).
+    QCOMPARE(sceneRect(icon).center().x() - frame.left(), 16.0 + lead / 2);
     QVERIFY(std::abs(sceneRect(icon).center().y() - sceneRect(harness.field()).center().y()) <= 0.5);
     QCOMPARE(sceneRect(harness.field()).left() - frame.left(), 16.0 + lead + 12.0);
     QQuickItem *clear = harness.item(QStringLiteral("globalSearchClearButton"));

@@ -556,9 +556,11 @@ Dialog {
             width: parent.width
             height: root.fieldHeight
 
+            // Centred on the results' lead column, on one axis with the
+            // artists' glyphs and the covers.
             Kirigami.Icon {
                 objectName: "globalSearchFieldIcon"
-                x: root.sideInset
+                x: root.sideInset + (root.leadSize - width) / 2
                 y: Math.round((parent.height - height) / 2)
                 width: root.glyphSize
                 height: root.glyphSize
