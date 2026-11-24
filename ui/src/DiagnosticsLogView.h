@@ -52,8 +52,8 @@ public:
 
     QString text() const { return m_layout.text(); }
     void setText(const QString &text);
-    // Adds `text` as records after the last, on lines of their own, and
-    // drops the first `drop` records. Unlike setText, it keeps the place in
+    // Adds `text` after the last line, on lines of its own, and drops the
+    // first `drop` lines (see DiagnosticsLogLayout::dropLines). Unlike setText, it keeps the place in
     // the log and the selection with their text, and a place at the end of
     // a log that scrolls at its end; it lays out and shapes nothing that was
     // there.

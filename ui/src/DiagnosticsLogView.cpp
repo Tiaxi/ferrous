@@ -131,14 +131,11 @@ void DiagnosticsLogView::appendRecords(const QString &text, int drop) {
         QAccessible::updateAccessibility(&inserted);
     }
     DiagnosticsLogLayout::Dropped dropped;
-    // A log line with another kind of line break in it is more than one
-    // record, of which one may stay: never one of a line the log still has.
     if (drop > 0) {
-        const int first = std::min(drop, m_layout.recordCount() - 1);
-        const QString removed = announces ? m_layout.text().left(m_layout.recordStart(first)) : QString();
-        dropped = m_layout.dropRecordsBefore(first);
-        if (announces) {
-            QAccessibleTextRemoveEvent removal(this, 0, removed);
+        const QString shown = announces ? m_layout.text() : QString();
+        dropped = m_layout.dropLines(drop);
+        if (announces && dropped.characters > 0) {
+            QAccessibleTextRemoveEvent removal(this, 0, shown.left(dropped.characters));
             QAccessible::updateAccessibility(&removal);
         }
     }

@@ -56,14 +56,15 @@ public:
     // them, taken as setText takes it. Laid out, it places the new records'
     // rows at the width it has, and the rows before stay as they are.
     void append(const QString &text);
-    // Drops the records before `record`, and their rows; what comes after
-    // moves up by the characters and the rows dropped. It keeps the last
-    // record at least.
+    // Drops the text's first `lines` lines, the records of each, from one
+    // newline of the text it was given to the next, and their rows; what
+    // comes after moves up by the characters and the rows dropped. It keeps
+    // the last line at least.
     struct Dropped {
         int characters = 0;
         int rows = 0;
     };
-    Dropped dropRecordsBefore(int record);
+    Dropped dropLines(int lines);
     int recordCount() const { return static_cast<int>(m_records.size()); }
 
     // `designMetrics` as the text's render type draws it.
@@ -97,11 +98,18 @@ private:
         int length;
         // Printable ASCII alone, each character a cell wide.
         bool cells;
+        // After another kind of line break, inside a line of the text.
+        bool continues;
     };
 
-    // The records of `text`, its first at `base`; false, with none, for
+    // The records of `text`, its first at `base`, where the newlines at
+    // `continuations` stand for other line breaks; false, with none, for
     // text that a plain text edit would take otherwise.
-    static bool findRecords(const QString &text, int base, std::vector<Record> &records);
+    static bool findRecords(const QString &text, int base, const std::vector<int> &continuations,
+                            std::vector<Record> &records);
+    // Adds the records of `text` as a plain text edit takes it, its first at
+    // `base`, and returns the text as taken.
+    static QString takeRecords(const QString &text, int base, std::vector<Record> &records);
     void placeRows(std::size_t fromRecord);
     qreal measure(const QString &text) const;
     qreal advance(char32_t character) const;

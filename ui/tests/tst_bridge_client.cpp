@@ -6367,6 +6367,19 @@ ApplicationWindow {
     QTRY_VERIFY(view->text().endsWith(QStringLiteral("[playback] info: logged before Copy Without Paths")));
     QCOMPARE(view->text(), asShown());
 
+    // At its 2000 lines, the log drops its first ones, and the view each of
+    // them whole, the line it breaks in two too.
+    for (const int count : {1900, 200}) {
+        for (int n = 0; n < count; ++n) {
+            client.logInfo(QStringLiteral("app"), QStringLiteral("more %1").arg(n));
+        }
+        QCOMPARE(client.m_diagnosticsLines.size(), qsizetype(2000));
+        QVERIFY(QMetaObject::invokeMethod(copyAll, "click"));
+        QCOMPARE(view->text(), asShown());
+        QCOMPARE(QGuiApplication::clipboard()->text(), asShown());
+    }
+    QVERIFY(!view->text().contains(QStringLiteral("b.flac")));
+
     QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
     QTRY_VERIFY(!dialog->isVisible());
     QVERIFY(!client.diagnosticsShown());

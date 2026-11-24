@@ -35,7 +35,9 @@ bool isOtherBreak(char16_t c) {
         || c == 0xfdd1;
 }
 
-QString asPlainTextEditHasIt(const QString &text) {
+// With the newlines that stand for another line break, inside a line of
+// the text, in `continuations`.
+QString asPlainTextEditHasIt(const QString &text, std::vector<int> &continuations) {
     QString out;
     out.reserve(text.size());
     for (qsizetype i = 0; i < text.size(); ++i) {
@@ -43,6 +45,8 @@ QString asPlainTextEditHasIt(const QString &text) {
         if (isOtherBreak(c)) {
             if (c == u'\r' && i + 1 < text.size() && text.at(i + 1) == QLatin1Char('\n')) {
                 ++i;
+            } else {
+                continuations.push_back(static_cast<int>(out.size()));
             }
             out += QLatin1Char('\n');
         } else if (c == QChar::Nbsp) {
@@ -128,9 +132,12 @@ DiagnosticsLogLayout::DiagnosticsLogLayout() {
 
 DiagnosticsLogLayout::~DiagnosticsLogLayout() = default;
 
-bool DiagnosticsLogLayout::findRecords(const QString &text, int base, std::vector<Record> &records) {
+bool DiagnosticsLogLayout::findRecords(const QString &text, int base, const std::vector<int> &continuations,
+                                       std::vector<Record> &records) {
     const std::size_t before = records.size();
     bool cells = true;
+    bool continues = false;
+    auto continuation = continuations.begin();
     int start = 0;
     const char16_t *units = QStringView(text).utf16();
     const int size = static_cast<int>(text.size());
@@ -140,9 +147,13 @@ bool DiagnosticsLogLayout::findRecords(const QString &text, int base, std::vecto
             continue;
         }
         if (c == u'\n') {
-            records.push_back({base + start, i - start, cells});
+            records.push_back({base + start, i - start, cells, continues});
             start = i + 1;
             cells = true;
+            continues = continuation != continuations.end() && *continuation == i;
+            if (continues) {
+                ++continuation;
+            }
         } else if (isOtherBreak(c) || c == QChar::Nbsp) {
             records.resize(before);
             return false;
@@ -150,8 +161,18 @@ bool DiagnosticsLogLayout::findRecords(const QString &text, int base, std::vecto
             cells = false;
         }
     }
-    records.push_back({base + start, size - start, cells});
+    records.push_back({base + start, size - start, cells, continues});
     return true;
+}
+
+QString DiagnosticsLogLayout::takeRecords(const QString &text, int base, std::vector<Record> &records) {
+    if (findRecords(text, base, {}, records)) {
+        return text;
+    }
+    std::vector<int> continuations;
+    QString taken = asPlainTextEditHasIt(text, continuations);
+    findRecords(taken, base, continuations, records);
+    return taken;
 }
 
 void DiagnosticsLogLayout::setText(const QString &text) {
@@ -159,17 +180,12 @@ void DiagnosticsLogLayout::setText(const QString &text) {
     // A closed Diagnostics keeps nothing of the log's.
     if (text.isEmpty()) {
         m_text = QString();
-        m_records = std::vector<Record>{Record{0, 0, true}};
+        m_records = std::vector<Record>{Record{0, 0, true, false}};
         m_rows = std::vector<Row>{Row{0, 0, false}};
         return;
     }
     m_records.clear();
-    QString taken = text;
-    if (!findRecords(taken, 0, m_records)) {
-        taken = asPlainTextEditHasIt(taken);
-        findRecords(taken, 0, m_records);
-    }
-    m_text = std::move(taken);
+    m_text = takeRecords(text, 0, m_records);
 }
 
 void DiagnosticsLogLayout::append(const QString &text) {
@@ -182,12 +198,7 @@ void DiagnosticsLogLayout::append(const QString &text) {
         return;
     }
     const std::size_t first = m_records.size();
-    const int base = length() + 1;
-    QString taken = text;
-    if (!findRecords(taken, base, m_records)) {
-        taken = asPlainTextEditHasIt(taken);
-        findRecords(taken, base, m_records);
-    }
+    const QString taken = takeRecords(text, length() + 1, m_records);
     m_text += QLatin1Char('\n');
     m_text += taken;
     if (m_laidOut) {
@@ -195,9 +206,16 @@ void DiagnosticsLogLayout::append(const QString &text) {
     }
 }
 
-DiagnosticsLogLayout::Dropped DiagnosticsLogLayout::dropRecordsBefore(int record) {
-    record = std::min(record, recordCount() - 1);
-    if (record <= 0) {
+DiagnosticsLogLayout::Dropped DiagnosticsLogLayout::dropLines(int lines) {
+    // The first record of the line that stays.
+    int record = 0;
+    for (int index = 1, seen = 0; index < recordCount() && seen < lines; ++index) {
+        if (!m_records[static_cast<std::size_t>(index)].continues) {
+            record = index;
+            ++seen;
+        }
+    }
+    if (record == 0) {
         return {};
     }
     Dropped dropped;
