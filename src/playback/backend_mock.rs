@@ -252,26 +252,7 @@ impl MockPlaybackRuntime {
                 self.snapshot.position = Duration::ZERO;
                 self.snapshot.current_queue_index = None;
             }
-            PlaybackCommand::Seek(pos) => {
-                self.snapshot.seek_serial += 1;
-                // Like the GStreamer backend, a stopped track is not
-                // seekable.
-                if self.snapshot.current.is_none() || self.snapshot.state == PlaybackState::Stopped
-                {
-                    return;
-                }
-                // Like the GStreamer backend, keep the seek away from a
-                // successor the pipeline was given.
-                self.queue.hold_handoffs();
-                let _ = self.queue.cancel_pending();
-                self.queue.release_handoffs();
-                self.about_to_finish_fired = false;
-                self.snapshot.position = pos.min(self.snapshot.duration);
-                self.snapshot.seek_landed_serial = self.snapshot.seek_serial;
-                let _ = self.event_tx.send(PlaybackEvent::Seeked {
-                    position: self.snapshot.position,
-                });
-            }
+            PlaybackCommand::Seek(pos) => self.seek(pos),
             PlaybackCommand::Cue { position, expected } => self.cue(position, expected),
             PlaybackCommand::SetVolume(vol) => {
                 self.snapshot.volume = vol.clamp(0.0, 1.0);
@@ -290,6 +271,24 @@ impl MockPlaybackRuntime {
             PlaybackCommand::SoloChannel(ch) => self.solo_channel(ch),
             PlaybackCommand::Poll => self.poll(),
         }
+    }
+    fn seek(&mut self, pos: Duration) {
+        self.snapshot.seek_serial += 1;
+        // Like the GStreamer backend, a stopped track is not seekable.
+        if self.snapshot.current.is_none() || self.snapshot.state == PlaybackState::Stopped {
+            return;
+        }
+        // Like the GStreamer backend, keep the seek away from a successor
+        // the pipeline was given.
+        self.queue.hold_handoffs();
+        let _ = self.queue.cancel_pending();
+        self.queue.release_handoffs();
+        self.about_to_finish_fired = false;
+        self.snapshot.position = pos.min(self.snapshot.duration);
+        self.snapshot.seek_landed_serial = self.snapshot.seek_serial;
+        let _ = self.event_tx.send(PlaybackEvent::Seeked {
+            position: self.snapshot.position,
+        });
     }
     /// The `GStreamer` backend restarts the current track when it drops a
     /// successor the pipeline was given, which asks for a successor again.
