@@ -827,6 +827,13 @@ Dialog {
                     id: resultRow
                     required property int index
                     required property var model
+                    // The cover as a property of its own, not read through
+                    // `model`: rows the results took away wait in the reuse
+                    // pool, culled but not hidden, where `model` reads
+                    // undefined, and showing the palette again had their
+                    // thumbnails read it (#772). A pooled row keeps its last
+                    // value here until it is reused.
+                    required property string coverUrl
                     readonly property string kind: model.kind || ""
                     readonly property string rowType: model.rowType || "track"
                     readonly property bool isResult: kind === "item"
@@ -967,7 +974,7 @@ Dialog {
                         x: root.sideInset
                         y: Math.round((parent.height - root.leadSize) / 2)
                         active: resultRow.isResult && resultRow.rowType !== "artist"
-                            && ((model.coverUrl || "").length === 0 || thumbnail.failed)
+                            && (resultRow.coverUrl.length === 0 || thumbnail.failed)
                         sourceComponent: noCoverTile
                     }
                     // A cover that has not loaded yet has the library's
@@ -979,7 +986,7 @@ Dialog {
                         id: thumbnail
                         objectName: "globalSearchThumbnail"
                         readonly property bool failed: status === Image.Error
-                        visible: resultRow.isResult && resultRow.rowType !== "artist" && (model.coverUrl || "").length > 0
+                        visible: resultRow.isResult && resultRow.rowType !== "artist" && resultRow.coverUrl.length > 0
                         x: root.sideInset
                         y: Math.round((parent.height - height) / 2)
                         width: root.leadSize
@@ -991,7 +998,7 @@ Dialog {
                         // library's thumbnails).
                         color: status === Image.Loading || status === Image.Null
                             ? root.uiPalette.hover : ColorUtils.withAlpha(root.uiPalette.hover, 0)
-                        source: visible ? model.coverUrl : ""
+                        source: visible ? resultRow.coverUrl : ""
                         fillMode: Image.PreserveAspectCrop
                         asynchronous: true
                         sourceSize.width: Math.ceil(root.leadSize * Screen.devicePixelRatio)

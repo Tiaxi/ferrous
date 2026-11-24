@@ -359,7 +359,10 @@ ApplicationWindow {
         property int globalSearchAlbumCount: 0
         property int globalSearchTrackCount: 0
         property int globalSearchSeq: 0
-        property var globalSearchModel: globalSearchModelFallback
+        // No results: the search's functions come from
+        // globalSearchModelFallback, and the results view, which took that
+        // object for a model of one row, has none.
+        property var globalSearchModel: null
         property var itunesArtworkResults: []
         property var itunesArtworkTarget: ({})
         property bool itunesArtworkLoading: false

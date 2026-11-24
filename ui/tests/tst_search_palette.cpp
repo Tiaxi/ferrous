@@ -546,6 +546,7 @@ private slots:
     void typingKeepsTheResultsInPlaceAsTheyAre();
     void onlyASlowSearchDimsTheResults();
     void reopeningWithKeptTextShowsNoEmptySearch();
+    void reopeningAfterTheResultsChangedReadsOnlyLiveRows();
     void paletteAndDimFadeTogether();
     void clearUsesTheBreezeIconAndNoTextGlyphs();
     void textMeetsItsContrastAsDrawn_data();
@@ -2703,6 +2704,60 @@ void SearchPaletteTest::reopeningWithKeptTextShowsNoEmptySearch() {
     QTRY_VERIFY(harness.view()->isVisible());
     QVERIFY(harness.model.rowCount() > 0);
     QVERIFY(!noResultsShown);
+}
+
+// Closed and opened again after its results changed, the palette shows the
+// covers of its rows as before. The rows the change took away wait in the
+// view's reuse pool, still drawn as far as visibility goes, and showing the
+// palette again read their gone rows' covers: "Unable to assign
+// [undefined] to QUrl", one for each (#772).
+void SearchPaletteTest::reopeningAfterTheResultsChangedReadsOnlyLiveRows() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    harness.search(QStringLiteral("mer"), merRows(harness.coverUrl));
+    QTRY_VERIFY(harness.view()->isVisible());
+    const auto thumbnails = [&harness] {
+        QList<QQuickItem *> items;
+        for (int i = 0; i < harness.model.rowCount(); ++i) {
+            if (QQuickItem *row = harness.row(i)) items += visibleNamed(row, QStringLiteral("globalSearchThumbnail"));
+        }
+        return items;
+    };
+    harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 4});
+    const int shown = static_cast<int>(thumbnails().size());
+    QVERIFY(shown >= 2);
+
+    QTest::keyClick(harness.window, Qt::Key_Escape);
+    QTRY_VERIFY(!harness.dialog->property("visible").toBool());
+    QVERIFY(harness.open());
+    QTRY_VERIFY(harness.view()->isVisible());
+    QCOMPARE(static_cast<int>(thumbnails().size()), shown);
+    for (QQuickItem *thumbnail : thumbnails()) {
+        QCOMPARE(thumbnail->property("source").toUrl(), QUrl(harness.coverUrl));
+        QTRY_COMPARE(thumbnail->property("status").toInt(), 1); // Image.Ready
+    }
+
+    // The pooled rows, taken again for more results, show their new rows'
+    // covers.
+    QImage other(48, 48, QImage::Format_RGB32);
+    other.fill(QColor(QStringLiteral("#5a7ab0")));
+    const QString otherPath = harness.covers.filePath(QStringLiteral("other.png"));
+    QVERIFY(other.save(otherPath));
+    const QString otherUrl = QUrl::fromLocalFile(otherPath).toString();
+    harness.search(QStringLiteral("mer"), merRows(otherUrl));
+    QVERIFY(static_cast<int>(thumbnails().size()) > shown);
+    for (int i = 0; i < harness.model.rowCount(); ++i) {
+        QQuickItem *row = harness.row(i);
+        if (row == nullptr) continue;
+        const bool cover = !harness.model.rowDataAt(i).value(QStringLiteral("coverUrl")).toString().isEmpty();
+        QQuickItem *thumbnail = visibleChildNamed(row, QStringLiteral("globalSearchThumbnail"));
+        QCOMPARE(thumbnail != nullptr, cover);
+        if (thumbnail == nullptr) continue;
+        QCOMPARE(thumbnail->property("source").toUrl(), QUrl(otherUrl));
+        QTRY_COMPARE(thumbnail->property("status").toInt(), 1); // Image.Ready
+    }
 }
 
 // The palette and the dim fade in and out together over the short
