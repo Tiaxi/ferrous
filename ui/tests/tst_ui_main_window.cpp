@@ -663,6 +663,62 @@ auto useDarkPalette(bool dark) {
     return qScopeGuard([before]() { QGuiApplication::setPalette(before); });
 }
 
+// Breeze Dark as Plasma gives it, the Kirigami theme's colour sets too,
+// while it lasts: the desktop style's Kirigami theme takes its colours from
+// KDE's colour scheme, the one the application's KDE_COLOR_SCHEME_PATH
+// names, and not from the palette, so with useDarkPalette() alone the
+// Header and Tooltip sets stay Breeze Light's. From a scheme file of its
+// own, with Breeze Dark's Window, View, Button, Header and Tooltip sets,
+// the Tooltip set's text `toolTipText` ("r,g,b").
+class BreezeDarkScheme {
+public:
+    explicit BreezeDarkScheme(const QByteArray &toolTipText = QByteArrayLiteral("252,252,252"))
+        : m_before(qApp->property(kSchemePath)), m_palette(QGuiApplication::palette()) {
+        const QString path = m_dir.filePath(QStringLiteral("BreezeDark.colors"));
+        QFile file(path);
+        if (!m_dir.isValid() || !file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            return;
+        }
+        const auto group = [&](const char *name, const char *background, const char *alternate,
+                               const QByteArray &text = QByteArrayLiteral("252,252,252")) {
+            file.write(QByteArrayLiteral("[Colors:") + name + QByteArrayLiteral("]\nBackgroundNormal=") + background
+                       + QByteArrayLiteral("\nBackgroundAlternate=") + alternate
+                       + QByteArrayLiteral("\nForegroundNormal=") + text
+                       + QByteArrayLiteral("\nForegroundInactive=161,169,177\n"
+                                           "DecorationFocus=61,174,233\nDecorationHover=61,174,233\n\n"));
+        };
+        group("Window", "32,35,38", "41,44,48");
+        group("View", "20,22,24", "29,31,34");
+        group("Button", "41,44,48", "32,35,38");
+        group("Header", "41,44,48", "32,35,38");
+        group("Tooltip", "41,44,48", "32,35,38", toolTipText);
+        file.write("[Colors:Selection]\nBackgroundNormal=61,174,233\nForegroundNormal=252,252,252\n");
+        file.close();
+        qApp->setProperty(kSchemePath, path);
+        // The theme follows the scheme at a change of the palette.
+        QPalette palette = m_palette;
+        palette.setColor(QPalette::Window, QColor(QStringLiteral("#202326")));
+        palette.setColor(QPalette::Base, QColor(QStringLiteral("#141618")));
+        palette.setColor(QPalette::Text, QColor(QStringLiteral("#fcfcfc")));
+        palette.setColor(QPalette::WindowText, QColor(QStringLiteral("#fcfcfc")));
+        QGuiApplication::setPalette(palette);
+        m_set = true;
+    }
+    ~BreezeDarkScheme() {
+        qApp->setProperty(kSchemePath, m_before);
+        QGuiApplication::setPalette(m_palette);
+    }
+    Q_DISABLE_COPY_MOVE(BreezeDarkScheme)
+    bool isSet() const { return m_set; }
+
+private:
+    static constexpr const char *kSchemePath = "KDE_COLOR_SCHEME_PATH";
+    QTemporaryDir m_dir;
+    QVariant m_before;
+    QPalette m_palette;
+    bool m_set = false;
+};
+
 // Why the wide now-playing block is not on the queue's row grid, or "":
 // with the cover it is a whole number of the list's rows high, so that the
 // seam at its foot is on a line of the queue's rows; its lines start 8 px
@@ -1157,6 +1213,10 @@ private slots:
     void seekTimeStaysOverItsLine();
     void seekTimeBoxIsCrispWithoutAShadow_data();
     void seekTimeBoxIsCrispWithoutAShadow();
+    void seekTimeBoxGivesWayToAnOpenMenu_data();
+    void seekTimeBoxGivesWayToAnOpenMenu();
+    void menuTitlesStayHiddenFromOneLaneBoxToTheNext_data();
+    void menuTitlesStayHiddenFromOneLaneBoxToTheNext();
     void transportRowSitsBalancedInItsBand_data();
     void transportRowSitsBalancedInItsBand();
     void contentIsOneSheetWithFourSeams();
@@ -1364,28 +1424,36 @@ void UiMainWindowTest::seekTimeStaysOverItsLine_data() {
     QTest::addColumn<int>("windowWidth");
     QTest::addColumn<int>("windowHeight");
     QTest::addColumn<bool>("dark");
+    QTest::addColumn<qreal>("bandHeight");
     // The default window and the narrow one, at 10 pt and at 24 pt, whose
     // time's box is widest on the narrow window's shortest bar, and whose
-    // titles run past the sidebar in the wide window.
-    QTest::newRow("10 pt, 1600 by 1000, dark") << 10.0 << 1600 << 1000 << true;
-    QTest::newRow("10 pt, 1000 by 720, light") << 10.0 << 1000 << 720 << false;
-    QTest::newRow("24 pt, 1600 by 1000, light") << 24.0 << 1600 << 1000 << false;
-    QTest::newRow("24 pt, 1000 by 720, dark") << 24.0 << 1000 << 720 << true;
+    // titles run past the sidebar in the wide window; 1000 by 720 at 24 pt
+    // is the least window. The band is its row in each: 48 px, and at 24 pt
+    // the buttons and 8 px above and below them, 76 px.
+    QTest::newRow("10 pt, 1600 by 1000, dark") << 10.0 << 1600 << 1000 << true << 48.0;
+    QTest::newRow("10 pt, 1000 by 720, light") << 10.0 << 1000 << 720 << false << 48.0;
+    QTest::newRow("24 pt, 1600 by 1000, light") << 24.0 << 1600 << 1000 << false << 76.0;
+    QTest::newRow("24 pt, 1000 by 720, dark") << 24.0 << 1000 << 720 << true << 76.0;
 }
 
-// The seek bar's time has one place: a lane above the bar, in the
-// transport's band, centred on the line it reads, wherever the pointer is
-// on the bar, and within the bar at either end. It covers none of the
-// waveform, no menu title, nothing of the now-playing card or the queue's
-// header (it flipped under the bar near the start, ~54 px down and over
-// the now-playing title at 24 pt), and stays 3 px clear of the bar's and
-// the buttons' focus rings. The band grows by no more than the lane needs,
-// and the buttons, the bar, the time and the volume keep one centre line.
+// The seek bar's time has one place: a lane over the bar, in the menu
+// bar's row, borrowed while the box is open, centred on the line it reads,
+// wherever the pointer is on the bar, and within the bar at either end. It
+// covers none of the waveform, nothing of the now-playing card or the
+// queue's header (it flipped under the bar near the start, ~54 px down and
+// over the now-playing title at 24 pt), is centred on the menu bar's row,
+// its text on the titles' line, 3 px clear of the bar's and the buttons'
+// focus rings and in the window, and, reaching a menu title, hides all of
+// them together, never one or a part of one; so do the transport's
+// tooltips, one at a time. The band is its row (a lane of its own, empty at
+// rest, made it 80 px for a 48 px row, and 158 px at 24 pt), and the
+// buttons, the bar, the time and the volume keep one centre line.
 void UiMainWindowTest::seekTimeStaysOverItsLine() {
     QFETCH(qreal, pointSize);
     QFETCH(int, windowWidth);
     QFETCH(int, windowHeight);
     QFETCH(bool, dark);
+    QFETCH(qreal, bandHeight);
     const auto restorePalette = useDarkPalette(dark);
     const ScopedApplicationFont font(pointSize);
     MainWindowFixture fixture(sized(windowWidth, windowHeight));
@@ -1397,6 +1465,8 @@ void UiMainWindowTest::seekTimeStaysOverItsLine() {
     QVERIFY(bridge != nullptr);
     bridge->setProperty("durationText", QStringLiteral("03:49"));
     bridge->setProperty("durationSeconds", 229.0);
+    // A queue, so Previous and Next can act and show their tooltips.
+    bridge->setProperty("queueLength", 3);
     playTrack(bridge);
     QQuickItem *transport = named(window, "transportBar");
     QQuickItem *seek = named(window, "seekSlider");
@@ -1427,20 +1497,92 @@ void UiMainWindowTest::seekTimeStaysOverItsLine() {
                  qPrintable(item->objectName() + QLatin1Char(' ') + describeRect(sceneRect(item))
                             + QStringLiteral(", the bar ") + describeRect(bar)));
     }
-    // The band ends at its seam, and holds the row with 8 px under the
-    // buttons, or more where the band's 48 px leave more.
+    // The band is its row, right under the menu bar, and ends at its seam;
+    // it holds the row with 8 px under the buttons, or more where the
+    // band's 48 px leave more.
+    QCOMPARE(band.height(), bandHeight);
+    QCOMPARE(band.top(), sceneRect(menuBar).bottom());
     QCOMPARE(sceneRect(seam).top(), band.bottom());
     QVERIFY(band.bottom() - sceneRect(playPause).bottom() >= 8 - 0.5);
 
+    // The titles, and the chrome the menu bar paints under them, as drawn
+    // at rest.
     QList<QRectF> titles;
+    QStringList titleNames;
+    const Drawn atRest(window);
+    const QRectF menuRow = sceneRect(menuBar);
+    const QColor menuChrome = atRest.at(menuRow.right() - 2, menuRow.top() + 2);
     for (int i = 0; i < menuBar->property("count").toInt(); ++i) {
         QQuickItem *title = nullptr;
         QVERIFY(QMetaObject::invokeMethod(menuBar, "itemAt", Q_RETURN_ARG(QQuickItem *, title), Q_ARG(int, i)));
         QVERIFY(title != nullptr);
         titles.append(sceneRect(title));
+        titleNames.append(title->property("text").toString().remove(QLatin1Char('&')));
     }
+    // A box over the menu bar's row that covers or comes within 4 px of a
+    // title hides all of the titles, together, under one backdrop of the
+    // menu bar's chrome, as tall as the menu bar, from the first title's
+    // left edge to the last one's right edge: with only the titles near the
+    // box hidden, the others stood beside it ("File [Next · Ctrl+Right]
+    // Settings Help"), and with part of one hidden, a fragment of a word
+    // joined the box ("Edit[Next · Ctrl+Right]k"). A box that reaches no
+    // title holds no backdrop. With `drawn`, the window as drawn with the
+    // box open, no title shows any of its text beside the box. What it
+    // returns is empty, or what is wrong.
+    QQuickItem *backdrop = window->findChild<QQuickItem *>(QStringLiteral("transportLaneBackdrop"));
+    QVERIFY(backdrop != nullptr);
+    QRectF allTitles;
+    const auto hidesTitlesTogether = [&](QQuickItem *box, const Drawn *drawn) -> QString {
+        const QRectF drawnBox = sceneRect(box);
+        const bool reached = std::any_of(titles.cbegin(), titles.cend(), [&](const QRectF &title) {
+            return title.adjusted(-4, -4, 4, 4).intersects(drawnBox);
+        });
+        const bool held = backdrop->property("held").toBool();
+        const QString where = QStringLiteral(", the backdrop ")
+            + (backdrop->isVisible() ? describeRect(sceneRect(backdrop)) : QStringLiteral("hidden"))
+            + (held ? QStringLiteral(", held") : QStringLiteral(", not held"));
+        if (held != reached) {
+            return where + (reached ? QStringLiteral(", titles reached") : QStringLiteral(", no title reached"));
+        }
+        if (!reached) {
+            return {};
+        }
+        const QRectF cover = sceneRect(backdrop);
+        const QRectF expected(allTitles.left(), menuRow.top(), allTitles.width(), menuRow.height());
+        if (!backdrop->isVisible() || std::abs(cover.left() - expected.left()) > 0.5
+            || std::abs(cover.right() - expected.right()) > 0.5 || std::abs(cover.top() - expected.top()) > 0.5
+            || std::abs(cover.bottom() - expected.bottom()) > 0.5) {
+            return where + QStringLiteral(", not the titles' span ") + describeRect(expected);
+        }
+        if (!near(backdrop->property("color").value<QColor>(), menuChrome)) {
+            return where + QStringLiteral(" in ") + backdrop->property("color").value<QColor>().name()
+                + QStringLiteral(", the menu bar's chrome ") + menuChrome.name();
+        }
+        if (drawn == nullptr) {
+            return {};
+        }
+        // None of their text beside the box: the chrome all over them.
+        for (int i = 0; i < titles.size(); ++i) {
+            const QRectF &title = titles[i];
+            for (qreal y = std::floor(title.top()) + 0.5; y < title.bottom(); ++y) {
+                for (qreal x = std::floor(title.left()) + 0.5; x < title.right(); ++x) {
+                    if (drawnBox.adjusted(-1, -1, 1, 1).contains(QPointF(x, y))) {
+                        continue;
+                    }
+                    if (channelDistance(drawn->at(x, y), menuChrome) > 6) {
+                        return where + QStringLiteral(", ") + titleNames[i] + QStringLiteral(" shows ")
+                            + drawn->at(x, y).name() + QStringLiteral(" at %1, %2").arg(x).arg(y);
+                    }
+                }
+            }
+        }
+        return {};
+    };
     QVERIFY(titles.size() >= 6);
     QVERIFY(bar.left() < titles.constLast().right());
+    for (const QRectF &title : titles) {
+        allTitles = allTitles.united(title);
+    }
     // Under the bar where it flipped before: the now-playing card and the
     // queue's header.
     const QRectF card = sceneRect(nowPlaying);
@@ -1466,17 +1608,23 @@ void UiMainWindowTest::seekTimeStaysOverItsLine() {
         const QRectF box = sceneRect(tipBox);
         const QString where =
             QStringLiteral("at %1: %2, the bar %3").arg(at.x()).arg(describeRect(box), describeRect(bar));
-        // In one place: every box at the same height, in the band, over the
-        // bar and its focus ring, and in the window.
+        // In one place: every box at the same height, in the menu bar's
+        // row, over the bar and its focus ring, and in the window.
         if (!boxTop) {
             boxTop = box.top();
         }
         QVERIFY2(std::abs(box.top() - *boxTop) <= 0.5, qPrintable(where));
-        QVERIFY2(box.top() >= band.top() - 0.5 && box.bottom() < bar.top(), qPrintable(where));
+        QVERIFY2(box.top() >= 0 && box.top() < band.top() && box.bottom() < bar.top(), qPrintable(where));
         QVERIFY2(!box.intersects(sceneRect(waveform)), qPrintable(where));
         QVERIFY2(box.left() >= 0.0 && box.right() <= windowWidth, qPrintable(where));
-        for (const QRectF &title : titles) {
-            QVERIFY2(!box.intersects(title), qPrintable(where + QStringLiteral(", a title ") + describeRect(title)));
+        if (backdrop->property("held").toBool()) {
+            QTRY_VERIFY2(backdrop->isVisible(), qPrintable(where));
+        }
+        const QString cut = hidesTitlesTogether(tipBox, nullptr);
+        QVERIFY2(cut.isEmpty(), qPrintable(where + cut));
+        // Past the titles, over empty chrome, the backdrop goes.
+        if (!backdrop->property("held").toBool()) {
+            QTRY_VERIFY2(!backdrop->isVisible(), qPrintable(where));
         }
         QVERIFY2(!box.intersects(card), qPrintable(where + QStringLiteral(", the card ") + describeRect(card)));
         QVERIFY2(!box.intersects(header), qPrintable(where));
@@ -1488,7 +1636,36 @@ void UiMainWindowTest::seekTimeStaysOverItsLine() {
         QVERIFY2(box.left() <= at.x() && box.right() >= at.x(), qPrintable(where));
     }
     QVERIFY(boxTop.has_value());
+    // As drawn, at the bar's start, under the titles, once the box has
+    // faded in: no title shows beside it.
+    {
+        QTest::mouseMove(window, QPointF(bar.left() + 2, bar.center().y()).toPoint());
+        QTRY_VERIFY(std::abs(tip->property("anchorX").toReal() - 2) < 1.0);
+        QTRY_COMPARE(tip->property("opacity").toReal(), 1.0);
+        QTRY_COMPARE(backdrop->opacity(), 1.0);
+        QVERIFY(backdrop->property("held").toBool());
+        const Drawn drawn(window);
+        const QString cut = hidesTitlesTogether(tipBox, &drawn);
+        QVERIFY2(cut.isEmpty(), qPrintable(QStringLiteral("at the bar's start ") + describeRect(sceneRect(tipBox)) + cut));
+    }
     const QRectF box = sceneRect(tipBox);
+    // Centred on the menu bar's row, its text on the titles' line (over
+    // the rings, it sat 4 px under it at 10 pt and 2 px at 24 pt, as if a
+    // row of its own).
+    {
+        QQuickItem *boxText = named(window, "seekDragTime");
+        QQuickItem *firstTitle = nullptr;
+        QVERIFY(QMetaObject::invokeMethod(menuBar, "itemAt", Q_RETURN_ARG(QQuickItem *, firstTitle), Q_ARG(int, 0)));
+        QVERIFY(boxText != nullptr && firstTitle != nullptr);
+        auto *titleText = firstTitle->property("contentItem").value<QQuickItem *>();
+        QVERIFY(titleText != nullptr);
+        const qreal boxLine = sceneRect(boxText).center().y();
+        const qreal titleLine = sceneRect(titleText).center().y();
+        QVERIFY2(std::abs(boxLine - titleLine) <= 1.0,
+                 qPrintable(QStringLiteral("the box's text %1 on %2, the titles' %3 on %4")
+                                .arg(describeRect(sceneRect(boxText))).arg(boxLine)
+                                .arg(describeRect(sceneRect(titleText))).arg(titleLine)));
+    }
     // 3 px clear of the bar's focus ring and of the buttons' (3 px outside
     // them), with the ring shown.
     QVERIFY(box.bottom() <= playPause->mapToScene(QPointF(0, 0)).y() - 3 - 3 + 0.5);
@@ -1497,15 +1674,12 @@ void UiMainWindowTest::seekTimeStaysOverItsLine() {
     QVERIFY2(sceneRect(tipBox).bottom() <= sceneRect(seekRing).top() - 3 + 0.5,
              qPrintable(describeRect(sceneRect(tipBox)) + QStringLiteral(" over ") + describeRect(sceneRect(seekRing))));
     QCOMPARE(sceneRect(tipBox).top(), box.top());
-    // The band grew by no more than the lane needs: the box is at its top
-    // where the room above the bar was too little for it.
-    QVERIFY2(box.top() - band.top() <= std::max(0.0, bar.top() - band.top() - box.height()) + 1.0,
-             qPrintable(describeRect(box) + QStringLiteral(" in ") + describeRect(band)));
 
     // Every tooltip of the transport shares the lane: one line on the time
-    // box's line, as tall as it, in the band and the window, none of the
-    // menu's titles covered (the buttons' opened under the band, over the
-    // cover and the queue's header, and Mute's did).
+    // box's line, as tall as it, in the window, a title's text covered
+    // whole or not at all, and nothing under the band covered (the
+    // buttons' opened under the band, over the cover and the queue's
+    // header).
     QList<std::pair<QQuickItem *, QObject *>> laneTips;
     for (const char *name : {"transportButton_previous", "transportButton_playPause", "transportButton_stop",
                              "transportButton_next", "muteButton"}) {
@@ -1513,15 +1687,38 @@ void UiMainWindowTest::seekTimeStaysOverItsLine() {
         QVERIFY2(button != nullptr, name);
         QObject *buttonTip = button->findChild<QObject *>(QStringLiteral("transportButtonToolTip"));
         QVERIFY2(buttonTip != nullptr, name);
-        // Those that can act: one that cannot takes no focus.
-        if (button->isEnabled()) {
-            laneTips.append({button, buttonTip});
-        }
+        QTRY_VERIFY2(button->isEnabled(), name);
+        laneTips.append({button, buttonTip});
     }
     QObject *volumeTip = window->findChild<QObject *>(QStringLiteral("volumeToolTip"));
     QVERIFY(volumeTip != nullptr);
     laneTips.append({volume, volumeTip});
-    QVERIFY(laneTips.size() >= 4);
+
+    // The lane holds one box: a tooltip the keyboard's focus shows gives
+    // way to the time box, and to the tooltip of the control under the
+    // pointer (Next's stood over the time box, its backdrop over the time).
+    QQuickItem *next = named(window, "transportButton_next");
+    QObject *nextTip = next->findChild<QObject *>(QStringLiteral("transportButtonToolTip"));
+    QVERIFY(tip->property("opened").toBool());
+    next->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(next->property("visualFocus").toBool());
+    QTest::qWait(2 * nextTip->property("delay").toInt() + 50);
+    QVERIFY(!nextTip->property("visible").toBool());
+    QVERIFY(tip->property("opened").toBool());
+    const QPoint away = QPointF(bar.center().x(), band.bottom() + 150).toPoint();
+    QTest::mouseMove(window, away);
+    QTRY_VERIFY(!tip->property("visible").toBool());
+    QTRY_VERIFY(nextTip->property("opened").toBool());
+    QObject *playPauseTip = playPause->findChild<QObject *>(QStringLiteral("transportButtonToolTip"));
+    QVERIFY(playPauseTip != nullptr);
+    // Hover as on the desktop, which the offscreen platform's hints leave off.
+    playPause->setProperty("hoverEnabled", true);
+    QTest::mouseMove(window, sceneRect(playPause).center().toPoint());
+    QTRY_VERIFY(playPauseTip->property("opened").toBool());
+    QTRY_VERIFY(!nextTip->property("visible").toBool());
+    QTest::mouseMove(window, away);
+    QTRY_VERIFY(!playPauseTip->property("visible").toBool());
+    QTRY_VERIFY(nextTip->property("opened").toBool());
     for (const auto &[control, laneTip] : laneTips) {
         control->forceActiveFocus(Qt::TabFocusReason);
         QTRY_VERIFY2(laneTip->property("opened").toBool(), qPrintable(control->objectName()));
@@ -1530,17 +1727,360 @@ void UiMainWindowTest::seekTimeStaysOverItsLine() {
             + QStringLiteral(", the time box ") + describeRect(box);
         QVERIFY2(std::abs(drawn.bottom() - box.bottom()) <= 0.5 && std::abs(drawn.height() - box.height()) <= 0.5,
                  qPrintable(where));
-        QVERIFY2(drawn.top() >= band.top() && drawn.left() >= 0 && drawn.right() <= windowWidth, qPrintable(where));
-        for (const QRectF &title : titles) {
-            QVERIFY2(!drawn.intersects(title), qPrintable(where + QStringLiteral(", a title ") + describeRect(title)));
+        QVERIFY2(drawn.top() >= 0 && drawn.left() >= 0 && drawn.right() <= windowWidth, qPrintable(where));
+        QVERIFY2(drawn.bottom() < bar.top() && !drawn.intersects(card) && !drawn.intersects(header), qPrintable(where));
+        QTRY_COMPARE(laneTip->property("opacity").toReal(), 1.0);
+        auto *laneBox = laneTip->property("background").value<QQuickItem *>();
+        QVERIFY(laneBox != nullptr);
+        if (backdrop->property("held").toBool()) {
+            QTRY_COMPARE(backdrop->opacity(), 1.0);
+        } else {
+            QTRY_VERIFY(!backdrop->isVisible());
+        }
+        const Drawn shown(window);
+        const QString tipCut = hidesTitlesTogether(laneBox, &shown);
+        QVERIFY2(tipCut.isEmpty(), qPrintable(where + tipCut));
+    }
+}
+
+void UiMainWindowTest::seekTimeBoxGivesWayToAnOpenMenu_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The transport's popups borrow the menu bar's row, so while the menu bar
+// is in use they give the row back: with the pointer resting on the seek
+// bar under the Playback title, a menu opened from the keyboard (Alt+P)
+// hides the time box, which stood over that title, and closed, the box
+// shows again; so does the keyboard in the menu bar. A button's tooltip
+// does the same, and gives way to the pointer on a title too.
+void UiMainWindowTest::seekTimeBoxGivesWayToAnOpenMenu() {
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    MainWindowFixture fixture(sized(1600, 1000));
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QTRY_COMPARE(paletteOf(window)->property("basePointSize").toReal(), pointSize);
+    QObject *bridge = bridgeOf(window);
+    QVERIFY(bridge != nullptr);
+    bridge->setProperty("durationText", QStringLiteral("03:49"));
+    bridge->setProperty("durationSeconds", 229.0);
+    // A queue, so Previous can act and take the focus.
+    bridge->setProperty("queueLength", 3);
+    playTrack(bridge);
+    QQuickItem *seek = named(window, "seekSlider");
+    QQuickItem *menuBar = named(window, "mainMenuBar");
+    QObject *playbackMenu = window->findChild<QObject *>(QStringLiteral("playbackMenu"));
+    QObject *tip = window->findChild<QObject *>(QStringLiteral("seekTimeBox"));
+    QVERIFY(seek && menuBar && playbackMenu && tip);
+    QTRY_VERIFY(seek->isEnabled());
+    auto *tipBox = tip->property("background").value<QQuickItem *>();
+    QVERIFY(tipBox != nullptr);
+    QQuickItem *playbackTitle = nullptr;
+    for (int i = 0; i < menuBar->property("count").toInt() && playbackTitle == nullptr; ++i) {
+        QQuickItem *title = nullptr;
+        QVERIFY(QMetaObject::invokeMethod(menuBar, "itemAt", Q_RETURN_ARG(QQuickItem *, title), Q_ARG(int, i)));
+        if (title && title->property("menu").value<QObject *>() == playbackMenu) {
+            playbackTitle = title;
         }
     }
+    QVERIFY(playbackTitle != nullptr);
+    const QRectF bar = sceneRect(seek);
+    const QRectF titleRect = sceneRect(playbackTitle);
+    const QPoint at = QPointF(std::max(bar.left() + 4, titleRect.center().x()), bar.center().y()).toPoint();
+    QTest::mouseMove(window, at);
+    QTRY_VERIFY(tip->property("opened").toBool());
+    QVERIFY2(sceneRect(tipBox).intersects(titleRect),
+             qPrintable(describeRect(sceneRect(tipBox)) + QStringLiteral(", the title ") + describeRect(titleRect)));
+
+    QTest::keyClick(window, Qt::Key_P, Qt::AltModifier);
+    QTRY_VERIFY(playbackMenu->property("opened").toBool());
+    QTRY_VERIFY2(!tip->property("visible").toBool(),
+                 qPrintable(QStringLiteral("the box ") + describeRect(sceneRect(tipBox)) + QStringLiteral(" over ")
+                            + describeRect(titleRect)));
+
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!playbackMenu->property("visible").toBool());
+    QTRY_VERIFY(tip->property("opened").toBool());
+
+    // And while the keyboard is in the menu bar with no menu open.
+    menuBar->forceActiveFocus(Qt::ShortcutFocusReason);
+    QTRY_VERIFY(menuBar->hasActiveFocus());
+    QTRY_VERIFY2(!tip->property("visible").toBool(),
+                 qPrintable(QStringLiteral("the box ") + describeRect(sceneRect(tipBox))));
+    seek->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(!menuBar->hasActiveFocus());
+    QTRY_VERIFY(tip->property("opened").toBool());
+
+    // The buttons' tooltips in the same row give way too: Previous's, under
+    // the File title, while the File menu is open.
+    QQuickItem *previous = named(window, "transportButton_previous");
+    QObject *fileMenu = window->findChild<QObject *>(QStringLiteral("fileMenu"));
+    QVERIFY(previous && fileMenu);
+    QObject *previousTip = previous->findChild<QObject *>(QStringLiteral("transportButtonToolTip"));
+    QVERIFY(previousTip != nullptr);
+    // Hover as on the desktop, which the offscreen platform's hints leave off.
+    previous->setProperty("hoverEnabled", true);
+    QTest::mouseMove(window, sceneRect(previous).center().toPoint());
+    QTRY_VERIFY(previousTip->property("opened").toBool());
+    QTest::keyClick(window, Qt::Key_F, Qt::AltModifier);
+    QTRY_VERIFY(fileMenu->property("opened").toBool());
+    QTRY_VERIFY(!previousTip->property("visible").toBool());
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!fileMenu->property("visible").toBool());
+    QTRY_VERIFY(previousTip->property("opened").toBool());
+
+    // And while the pointer is on a title, with no menu open: Previous's,
+    // shown for the keyboard, goes while the pointer rests on Playback,
+    // which the backdrop hid with every other title, and its backdrop goes
+    // at once, so the title shows as the pointer meets it; both come back
+    // as the pointer leaves the menu bar. The backdrop takes no input: a
+    // click there opens the menu under it, and a click on the last title,
+    // far from the box, opens its own.
+    const QPoint away(sceneRect(seek).center().x(), sceneRect(menuBar).bottom() + 200);
+    QTest::mouseMove(window, away);
+    previous->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(previousTip->property("opened").toBool());
+    auto *previousBox = previousTip->property("background").value<QQuickItem *>();
+    QVERIFY(previousBox != nullptr);
+    auto *backdrop = window->findChild<QQuickItem *>(QStringLiteral("transportLaneBackdrop"));
+    QVERIFY(backdrop != nullptr);
+    QTRY_VERIFY(backdrop->isVisible() && backdrop->opacity() == 1.0);
+    const QPoint besideBox(std::max(sceneRect(previousBox).right() + 4, titleRect.left() + 2), titleRect.center().y());
+    QVERIFY2(besideBox.x() < titleRect.right() - 2 && sceneRect(backdrop).contains(besideBox),
+             qPrintable(describeRect(sceneRect(previousBox)) + QStringLiteral(", Playback ") + describeRect(titleRect)));
+    QTest::mouseMove(window, besideBox);
+    QTRY_VERIFY(playbackTitle->property("hovered").toBool());
+    QVERIFY(!backdrop->isVisible());
+    QVERIFY(!playbackMenu->property("visible").toBool());
+    QTRY_VERIFY(!previousTip->property("visible").toBool());
+    QTest::mouseMove(window, away);
+    QTRY_VERIFY(!playbackTitle->property("hovered").toBool());
+    QTRY_VERIFY(previousTip->property("opened").toBool());
+    QTRY_COMPARE(previousTip->property("opacity").toReal(), 1.0);
+    QTRY_VERIFY(backdrop->isVisible() && backdrop->opacity() == 1.0);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, besideBox);
+    QTRY_VERIFY(playbackMenu->property("opened").toBool());
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!playbackMenu->property("visible").toBool());
+
+    QQuickItem *lastTitle = nullptr;
+    QVERIFY(QMetaObject::invokeMethod(menuBar, "itemAt", Q_RETURN_ARG(QQuickItem *, lastTitle),
+                                      Q_ARG(int, menuBar->property("count").toInt() - 1)));
+    QVERIFY(lastTitle != nullptr);
+    QObject *lastMenu = lastTitle->property("menu").value<QObject *>();
+    QVERIFY(lastMenu != nullptr);
+    QTest::mouseMove(window, away);
+    // The keyboard's focus back on Previous: the menu gave it back as a
+    // pointer's.
+    seek->forceActiveFocus(Qt::TabFocusReason);
+    previous->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(previousTip->property("opened").toBool());
+    QTRY_VERIFY(backdrop->isVisible() && backdrop->opacity() == 1.0);
+    const QPoint onLastTitle = sceneRect(lastTitle).center().toPoint();
+    QVERIFY2(!sceneRect(previousBox).adjusted(-4, -4, 4, 4).intersects(sceneRect(lastTitle))
+                 && sceneRect(backdrop).contains(onLastTitle),
+             qPrintable(describeRect(sceneRect(lastTitle)) + QStringLiteral(", the backdrop ")
+                        + describeRect(sceneRect(backdrop))));
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, onLastTitle);
+    QTRY_VERIFY(lastMenu->property("opened").toBool());
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!lastMenu->property("visible").toBool());
+
+    // From the pointer's tooltip on Previous, across the last title, onto
+    // the empty chrome past it: the backdrop gives way as the title is
+    // reached and stays gone, as no box is left in the lane (it went on
+    // fading out under the title and showed again past it).
+    QTest::mouseMove(window, away);
+    seek->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(!previousTip->property("visible").toBool());
+    QTest::mouseMove(window, sceneRect(previous).center().toPoint());
+    QTRY_COMPARE(previousTip->property("opacity").toReal(), 1.0);
+    QTRY_COMPARE(backdrop->opacity(), 1.0);
+    QTest::mouseMove(window, onLastTitle);
+    QTRY_VERIFY(lastTitle->property("hovered").toBool());
+    QVERIFY(!backdrop->isVisible());
+    QCOMPARE(backdrop->opacity(), 0.0);
+    QTest::mouseMove(window, QPointF(sceneRect(menuBar).right() - 20, sceneRect(menuBar).center().y()).toPoint());
+    QTRY_VERIFY(!lastTitle->property("hovered").toBool());
+    QVERIFY(!backdrop->isVisible());
+    QTest::qWait(50);
+    QVERIFY(!backdrop->isVisible());
+}
+
+void UiMainWindowTest::menuTitlesStayHiddenFromOneLaneBoxToTheNext_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("10 pt, dark") << 10.0 << true;
+    QTest::newRow("24 pt, light") << 24.0 << false;
+}
+
+// The menu's titles stay under the lane's backdrop from one box to the
+// next: with the pointer going along Previous, Play, Stop and Next, each
+// button's tooltip opens at once in place of the last one, which still
+// fades out, a frame in the gap between two buttons included, and so does
+// the seek bar's time box past Next; then along the bar's start, under the
+// titles, the backdrop stays, whole (each tooltip waited the style's delay
+// after the last one, and the titles showed between them; along the bar,
+// they dropped out one at a time). Off the transport, it goes with them.
+void UiMainWindowTest::menuTitlesStayHiddenFromOneLaneBoxToTheNext() {
+    QFETCH(qreal, pointSize);
+    QFETCH(bool, dark);
+    const auto restorePalette = useDarkPalette(dark);
+    const ScopedApplicationFont font(pointSize);
+    MainWindowFixture fixture(sized(1600, 1000));
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QTRY_COMPARE(paletteOf(window)->property("basePointSize").toReal(), pointSize);
+    QObject *bridge = bridgeOf(window);
+    QVERIFY(bridge != nullptr);
+    bridge->setProperty("durationText", QStringLiteral("03:49"));
+    bridge->setProperty("durationSeconds", 229.0);
+    // A queue, so Previous and Next can act and show their tooltips.
+    bridge->setProperty("queueLength", 3);
+    playTrack(bridge);
+    QQuickItem *seek = named(window, "seekSlider");
+    QQuickItem *menuBar = named(window, "mainMenuBar");
+    QObject *tip = window->findChild<QObject *>(QStringLiteral("seekTimeBox"));
+    auto *backdrop = window->findChild<QQuickItem *>(QStringLiteral("transportLaneBackdrop"));
+    QVERIFY(seek && menuBar && tip && backdrop);
+    QTRY_VERIFY(seek->isEnabled());
+    auto *tipBox = tip->property("background").value<QQuickItem *>();
+    QVERIFY(tipBox != nullptr);
+    QList<QQuickItem *> buttons;
+    for (const char *name : {"transportButton_previous", "transportButton_playPause", "transportButton_stop",
+                             "transportButton_next"}) {
+        QQuickItem *button = named(window, name);
+        QVERIFY2(button != nullptr, name);
+        QTRY_VERIFY2(button->isEnabled(), name);
+        // Hover as on the desktop, which the offscreen platform's hints leave off.
+        button->setProperty("hoverEnabled", true);
+        buttons.append(button);
+    }
+    const auto toolTipOf = [](QQuickItem *button) {
+        return button->findChild<QObject *>(QStringLiteral("transportButtonToolTip"));
+    };
+    QList<QRectF> titles;
+    for (int i = 0; i < menuBar->property("count").toInt(); ++i) {
+        QQuickItem *title = nullptr;
+        QVERIFY(QMetaObject::invokeMethod(menuBar, "itemAt", Q_RETURN_ARG(QQuickItem *, title), Q_ARG(int, i)));
+        QVERIFY(title != nullptr);
+        titles.append(sceneRect(title));
+    }
+    QVERIFY(titles.size() >= 6);
+    const QRectF menuRow = sceneRect(menuBar);
+    const QRectF span(titles.constFirst().left(), menuRow.top(), titles.constLast().right() - titles.constFirst().left(),
+                      menuRow.height());
+    const QColor menuChrome = Drawn(window).at(menuRow.right() - 2, menuRow.top() + 2);
+    // Whether the backdrop is whole over every title, and, as drawn, no
+    // title shows beside `box`.
+    const auto titlesHidden = [&](QQuickItem *box) -> QString {
+        const QRectF cover = sceneRect(backdrop);
+        if (!backdrop->isVisible() || std::abs(cover.left() - span.left()) > 0.5
+            || std::abs(cover.right() - span.right()) > 0.5 || std::abs(cover.top() - span.top()) > 0.5
+            || std::abs(cover.bottom() - span.bottom()) > 0.5) {
+            return QStringLiteral("the backdrop %1, the titles %2").arg(describeRect(cover), describeRect(span));
+        }
+        const Drawn drawn(window);
+        const QRectF drawnBox = sceneRect(box).adjusted(-1, -1, 1, 1);
+        for (qreal y = std::floor(span.top()) + 0.5; y < span.bottom(); ++y) {
+            for (qreal x = std::floor(span.left()) + 0.5; x < span.right(); ++x) {
+                if (!drawnBox.contains(QPointF(x, y)) && channelDistance(drawn.at(x, y), menuChrome) > 6) {
+                    return QStringLiteral("%1 at %2, %3").arg(drawn.at(x, y).name()).arg(x).arg(y);
+                }
+            }
+        }
+        return {};
+    };
+
+    // Previous's tooltip, after the style's delay.
+    QTest::mouseMove(window, sceneRect(buttons.constFirst()).center().toPoint());
+    QTRY_VERIFY(toolTipOf(buttons.constFirst())->property("opened").toBool());
+    QTRY_COMPARE(backdrop->opacity(), 1.0);
+    QVERIFY(backdrop->property("held").toBool());
+    // From here on, the backdrop's least opacity, and whether it went.
+    qreal least = 1.0;
+    bool went = false;
+    const QMetaObject::Connection opacityWatch = connect(backdrop, &QQuickItem::opacityChanged, backdrop, [&]() {
+        least = std::min(least, backdrop->opacity());
+    });
+    const QMetaObject::Connection visibleWatch = connect(backdrop, &QQuickItem::visibleChanged, backdrop, [&]() {
+        went = went || !backdrop->isVisible();
+    });
+    auto unwatch = qScopeGuard([&]() {
+        disconnect(opacityWatch);
+        disconnect(visibleWatch);
+    });
+    const auto across = [&](const QRectF &from, const QRectF &to) {
+        // A frame in the gap between them, as the pointer crosses it.
+        QTest::mouseMove(window, QPointF((from.right() + to.left()) / 2, to.center().y()).toPoint());
+        QTest::qWait(16);
+    };
+    for (int i = 1; i < buttons.size(); ++i) {
+        across(sceneRect(buttons.at(i - 1)), sceneRect(buttons.at(i)));
+        QTest::mouseMove(window, sceneRect(buttons.at(i)).center().toPoint());
+        QObject *buttonTip = toolTipOf(buttons.at(i));
+        QVERIFY2(buttonTip->property("visible").toBool(), qPrintable(buttons.at(i)->objectName()));
+        QTRY_COMPARE(buttonTip->property("opacity").toReal(), 1.0);
+        auto *box = buttonTip->property("background").value<QQuickItem *>();
+        QVERIFY(box != nullptr);
+        const QString problem = titlesHidden(box);
+        QVERIFY2(problem.isEmpty(), qPrintable(buttons.at(i)->objectName() + QStringLiteral(": ") + problem));
+    }
+    // Past Next, onto the bar's start: the time box at once.
+    const QRectF bar = sceneRect(seek);
+    across(sceneRect(buttons.constLast()), bar);
+    QTest::mouseMove(window, QPointF(bar.left() + 2, bar.center().y()).toPoint());
+    QVERIFY(tip->property("visible").toBool());
+    QTRY_COMPARE(tip->property("opacity").toReal(), 1.0);
+    // Along the bar's start, a frame at a time, as long as the box reaches
+    // a title.
+    int steps = 0;
+    QString scrubbed;
+    for (qreal x = bar.left() + 2;; x += 3) {
+        QTest::mouseMove(window, QPointF(x, bar.center().y()).toPoint());
+        QTRY_VERIFY(std::abs(tip->property("anchorX").toReal() - (std::round(x) - bar.left())) < 1.0);
+        if (sceneRect(tipBox).left() >= span.right() + 4) {
+            break;
+        }
+        QVERIFY2(backdrop->property("held").toBool(), qPrintable(describeRect(sceneRect(tipBox))));
+        if (steps == 20) {
+            scrubbed = titlesHidden(tipBox);
+        }
+        QTest::qWait(16);
+        ++steps;
+    }
+    QVERIFY(steps > 20);
+    disconnect(opacityWatch);
+    disconnect(visibleWatch);
+    unwatch.dismiss();
+    QVERIFY2(!went && least >= 0.9,
+             qPrintable(QStringLiteral("the backdrop went %1, at least %2").arg(went).arg(least)));
+    // Over empty chrome, past the titles, none.
+    QVERIFY(!backdrop->property("held").toBool());
+    QTRY_VERIFY(!backdrop->isVisible());
+    // Back at the bar's start, as drawn.
+    QTest::mouseMove(window, QPointF(bar.left() + 2, bar.center().y()).toPoint());
+    QTRY_COMPARE(backdrop->opacity(), 1.0);
+    QTRY_VERIFY(std::abs(tip->property("anchorX").toReal() - 2) < 1.0);
+    QTRY_COMPARE(tip->property("opacity").toReal(), 1.0);
+    const QString atStart = titlesHidden(tipBox);
+    QVERIFY2(atStart.isEmpty() && scrubbed.isEmpty(), qPrintable(atStart + scrubbed));
+    // Off the transport, the backdrop goes with the box.
+    QTest::mouseMove(window, QPointF(bar.center().x(), bar.bottom() + 200).toPoint());
+    QTRY_VERIFY(!tip->property("visible").toBool());
+    QVERIFY(!backdrop->property("held").toBool());
+    QTRY_VERIFY(!backdrop->isVisible());
 }
 
 void UiMainWindowTest::seekTimeBoxIsCrispWithoutAShadow_data() {
     QTest::addColumn<bool>("dark");
-    QTest::newRow("light") << false;
-    QTest::newRow("dark") << true;
+    QTest::addColumn<QByteArray>("toolTipText");
+    QTest::newRow("light") << false << QByteArray();
+    QTest::newRow("dark") << true << QByteArrayLiteral("252,252,252");
+    // A dimmer tooltip text, 4.5:1 on the fill before the lift.
+    QTest::newRow("dark, dim tooltip text") << true << QByteArrayLiteral("146,146,146");
 }
 
 // The seek bar's time box is one style in both themes: the tooltip's fill
@@ -1548,10 +2088,15 @@ void UiMainWindowTest::seekTimeBoxIsCrispWithoutAShadow_data() {
 // spread into the gap between the box and the waveform, and its edge was
 // lost on the Header chrome, so it read as a white card where the dark
 // box read as a framed readout). The edge stands out as much on the
-// chrome as on the fill.
+// chrome as on the fill, and the dark fill a step from the chrome.
 void UiMainWindowTest::seekTimeBoxIsCrispWithoutAShadow() {
     QFETCH(bool, dark);
-    const auto restorePalette = useDarkPalette(dark);
+    QFETCH(QByteArray, toolTipText);
+    std::optional<BreezeDarkScheme> breezeDark;
+    if (dark) {
+        breezeDark.emplace(toolTipText);
+        QVERIFY(breezeDark->isSet());
+    }
     MainWindowFixture fixture(sized(1600, 1000));
     QQuickWindow *window = fixture.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
@@ -1614,6 +2159,35 @@ void UiMainWindowTest::seekTimeBoxIsCrispWithoutAShadow() {
              qPrintable(QStringLiteral("the edge %1: %2:1 on the fill %3, %4:1 on the chrome %5")
                             .arg(top.name()).arg(onFill).arg(fill.name()).arg(onChrome).arg(chrome.name())));
 
+    // The fill: the style's tooltip fill in a light theme; in a dark one,
+    // where Breeze's tooltip fill is the chrome and the box over the menu
+    // bar's row read as a menu title, 8 % of the way to the text, lighter
+    // than the chrome. Its text the tooltip's, or, where the lift took that
+    // under 4.5:1 on it, lighter, to 4.5:1.
+    QQuickItem *text = named(window, "seekDragTime");
+    QVERIFY(text != nullptr);
+    const QColor textColor = text->property("color").value<QColor>();
+    const QColor toolTipFill = transport->property("toolTipFill").value<QColor>();
+    const QColor toolTipTextColor = transport->property("toolTipText").value<QColor>();
+    const QString fills = QStringLiteral("the fill %1, the tooltip's %2 and %3, the chrome %4, the text %5")
+        .arg(fill.name(), toolTipFill.name(), toolTipTextColor.name(), chrome.name(), textColor.name());
+    if (contrastRatio(toolTipTextColor, fill) >= 4.5) {
+        QVERIFY2(sameColor(textColor, toolTipTextColor), qPrintable(fills));
+    } else {
+        // The dim text alone, which the lift took under 4.5:1.
+        QVERIFY2(toolTipText == QByteArrayLiteral("146,146,146"), qPrintable(fills));
+    }
+    if (dark) {
+        QVERIFY2(near(fill, mixed(toolTipFill, toolTipTextColor, 0.08)), qPrintable(fills));
+        QVERIFY2(relativeLuminance(fill) > relativeLuminance(chrome), qPrintable(fills));
+        // Breeze Dark's: #3a3d40 on #292c30.
+        QVERIFY2(toolTipText != QByteArrayLiteral("252,252,252") || contrastRatio(fill, chrome) >= 1.2,
+                 qPrintable(fills));
+    } else {
+        QVERIFY2(sameColor(fill, toolTipFill), qPrintable(fills));
+    }
+    QVERIFY2(contrastRatio(textColor, fill) >= 4.5, qPrintable(describeContrast(QStringLiteral("the text"), textColor, fill)));
+
     // The buttons' tooltips in the same lane have the same box.
     QQuickItem *playPause = named(window, "transportButton_playPause");
     QVERIFY(playPause != nullptr);
@@ -1630,27 +2204,28 @@ void UiMainWindowTest::transportRowSitsBalancedInItsBand_data() {
     QTest::addColumn<int>("windowWidth");
     QTest::addColumn<int>("windowHeight");
     QTest::addColumn<bool>("dark");
-    QTest::newRow("10 pt, 1600 by 1000, dark") << 10.0 << 1600 << 1000 << true;
-    QTest::newRow("10 pt, 1000 by 720, light") << 10.0 << 1000 << 720 << false;
-    QTest::newRow("24 pt, 1600 by 1000, light") << 24.0 << 1600 << 1000 << false;
-    QTest::newRow("24 pt, 1000 by 720, dark") << 24.0 << 1000 << 720 << true;
+    QTest::addColumn<qreal>("bandHeight");
+    QTest::newRow("10 pt, 1600 by 1000, dark") << 10.0 << 1600 << 1000 << true << 48.0;
+    QTest::newRow("10 pt, 1000 by 720, light") << 10.0 << 1000 << 720 << false << 48.0;
+    QTest::newRow("24 pt, 1600 by 1000, light") << 24.0 << 1600 << 1000 << false << 76.0;
+    QTest::newRow("24 pt, 1000 by 720, dark") << 24.0 << 1000 << 720 << true << 76.0;
 }
 
-// The transport's row sits balanced in its band, the lane of its popups
-// above it, empty at rest, and room under it: from the menu's titles down
-// to the buttons' glyphs, as drawn, at most 3:2 of the band under the
-// glyphs (the lane over the row and 8 px under it sank the controls onto
-// the seam, 44 px against 17 px at 10 pt, 76 px against 21 px at 24 pt).
-// In the least window, at 24 pt in 1000 by 720, the room under the row
-// gives way to the panes' minimums, so the window still fits; the row
-// still sits higher than it did (76 px against 21). There the lane's
-// 3 px clear of the focus rings, 2 px more than it had, come out of the
-// room under the row: 74 px against 32.
+// The transport's band at rest is its row, in every window, the least
+// one, 1000 by 720 at 24 pt, included; its popups borrow the menu bar's
+// row. The row sits balanced under the menu's titles by itself: from the
+// titles' ink down to the buttons' glyphs, as drawn, no less than the band
+// under the glyphs and at most 3:2 of it (a lane of the band's own over
+// the row, empty at rest, and 8 px under it sank the controls onto the
+// seam, 44 px against 17 px at 10 pt, 76 px against 21 px at 24 pt; the
+// room under the row that balanced it made the band 80 px for a 48 px row,
+// 158 px at 24 pt).
 void UiMainWindowTest::transportRowSitsBalancedInItsBand() {
     QFETCH(qreal, pointSize);
     QFETCH(int, windowWidth);
     QFETCH(int, windowHeight);
     QFETCH(bool, dark);
+    QFETCH(qreal, bandHeight);
     const auto restorePalette = useDarkPalette(dark);
     const ScopedApplicationFont font(pointSize);
     MainWindowFixture fixture(sized(windowWidth, windowHeight));
@@ -1668,19 +2243,11 @@ void UiMainWindowTest::transportRowSitsBalancedInItsBand() {
     const QRectF band = sceneRect(transport);
     QCOMPARE(sceneRect(seam).top(), band.bottom());
 
-    // The room under the row: what balances the lane, or in the least
-    // window what it has beyond the panes' minimums.
-    const qreal wanted = transport->property("wantedBalanceRoom").toReal();
-    const qreal room = transport->property("balanceRoom").toReal();
-    QVERIFY(wanted > 0);
-    QCOMPARE(band.height(), transport->property("leastHeight").toReal() + room);
-    const bool least = pointSize > 10 && windowHeight == 720;
-    if (least) {
-        QVERIFY2(room < wanted && room >= 0, qPrintable(QStringLiteral("%1 of %2").arg(room).arg(wanted)));
-        QCOMPARE(room, qreal(windowHeight - window->minimumHeight()));
-    } else {
-        QCOMPARE(room, wanted);
-    }
+    // The band is its row, with nothing over or under it, right under the
+    // menu bar.
+    QCOMPARE(band.height(), bandHeight);
+    QCOMPARE(transport->property("rowHeight").toReal(), bandHeight);
+    QCOMPARE(band.top(), sceneRect(menuBar).bottom());
 
     // As drawn: the lowest ink of the titles, and the glyphs' ink, read
     // against the chrome at the band's right end.
@@ -1714,8 +2281,34 @@ void UiMainWindowTest::transportRowSitsBalancedInItsBand() {
     const qreal below = band.bottom() - *glyphBottom;
     const QString proportions = QStringLiteral("%1 px over the glyphs, %2 px under them, the band %3")
         .arg(above).arg(below).arg(describeRect(band));
-    QVERIFY2(below > 0 && above > 0, qPrintable(proportions));
-    QVERIFY2(above <= (least ? 2.35 : 1.5) * below, qPrintable(proportions));
+    QVERIFY2(below > 0 && above >= below, qPrintable(proportions));
+    QVERIFY2(above <= 1.5 * below, qPrintable(proportions));
+
+    // The seek bar's focus ring is 2 px clear of the bar, whose playhead
+    // spans its height, and at least 3 px clear of the seam and of the menu
+    // bar (5 px out, with 5 px under it, it made the row 82 px at 24 pt,
+    // 6 px past the buttons').
+    QObject *bridge = bridgeOf(window);
+    QVERIFY(bridge != nullptr);
+    bridge->setProperty("durationText", QStringLiteral("03:49"));
+    bridge->setProperty("durationSeconds", 229.0);
+    playTrack(bridge);
+    QQuickItem *seek = named(window, "seekSlider");
+    QQuickItem *seekRing = named(window, "seekFocusRing");
+    QVERIFY(seek && seekRing);
+    QTRY_VERIFY(seek->isEnabled());
+    seek->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(seekRing->isVisible());
+    const QRectF ring = sceneRect(seekRing);
+    QCOMPARE(ring, sceneRect(seek).adjusted(-4, -4, 4, 4));
+    QCOMPARE(seekRing->property("border").value<QObject *>()->property("width").toReal(), 2.0);
+    QQuickItem *playhead = named(window, "seekPlayheadLine");
+    QVERIFY(playhead != nullptr);
+    QVERIFY(sceneRect(playhead).top() - (ring.top() + 2) >= 2 - 0.5);
+    QVERIFY((ring.bottom() - 2) - sceneRect(playhead).bottom() >= 2 - 0.5);
+    const QString clearance = QStringLiteral("the ring %1 in the band %2").arg(describeRect(ring), describeRect(band));
+    QVERIFY2(sceneRect(seam).top() - ring.bottom() >= 3 - 0.5, qPrintable(clearance));
+    QVERIFY2(ring.top() - band.top() >= 3 - 0.5, qPrintable(clearance));
 }
 
 void UiMainWindowTest::sidebarWidthFollowsTheWindowAndTheFont_data() {

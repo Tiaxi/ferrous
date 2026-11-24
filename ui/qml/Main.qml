@@ -204,15 +204,14 @@ ApplicationWindow {
     readonly property int splitHandleAllowance: 1
     // The smallest window that shows every pane at its own minimum size,
     // with the level meter whether it is shown or not, so that the window's
-    // minimum does not change with a setting; the transport's band without
-    // the room under its row, which gives way in the least window.
+    // minimum does not change with a setting.
     readonly property int contentMinimumWidth: Math.ceil(Math.max(
         sidebarPane.SplitView.minimumWidth + rightSplit.SplitView.minimumWidth
             + root.splitHandleAllowance,
         transportBar.implicitWidth))
     readonly property int contentMinimumHeight: Math.ceil(
         (root.menuBar ? root.menuBar.implicitHeight : 0)
-        + transportBar.leastHeight
+        + transportBar.implicitHeight
         + queuePane.SplitView.minimumHeight
         + root.visualizationMinimumHeight
         + root.splitHandleAllowance + transportSeam.height
@@ -1724,9 +1723,6 @@ ApplicationWindow {
             stopCanAct: root.stopCanAct
             previousCanAct: root.skipCanAct
             nextCanAct: root.skipCanAct
-            // The room under its row comes out of what the window has
-            // beyond its least height.
-            balanceRoomLimit: Math.max(0, root.height - root.contentMinimumHeight)
             volumeMuted: playbackController.volumeMuted
             mutedVolume: playbackController.rememberedVolumeBeforeMute
             keyboardSeekStepSeconds: root.keyboardSeekStepSeconds

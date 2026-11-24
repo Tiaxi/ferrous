@@ -525,6 +525,7 @@ private slots:
     void transportToolTipsNameTheShortcut();
     void transportButtonsAreOffWhereTheyCannotAct();
     void transportToolTipsClearTheFocusRings();
+    void transportToolTipsPassAlongTheRowAtOnce();
     void seekWaveformMeetsItsContrastAsDrawn_data();
     void seekWaveformMeetsItsContrastAsDrawn();
     void seekViewBandMarksTheViewBehindTheWaveform_data();
@@ -651,9 +652,11 @@ void TransportStatusTest::drawsOffscreenUnlessAPlatformIsChosen() {
     verifyOffscreenPlatformByDefault();
 }
 
-// The sizes of the design at 1×: a 48 px row under the lane of the
-// transport's popups, which grows the band, and over the room that
-// balances it; 32 px buttons 4 px apart
+// The sizes of the design at 1×: a 48 px row, the band, which grows by
+// the lane of the transport's popups only where there is no menu bar's
+// row for them to borrow, as here, by what the lane needs beyond the room
+// over the row, and keeps the window's top 4 px clear of them, with no
+// room under the row; 32 px buttons 4 px apart
 // from 12 px, the content's inset; the seek bar 16 px after Next; then on
 // one rhythm, between what is drawn: the time 16 px after the seek bar, as
 // wide as "0:00 / 0:00", the volume glyph 24 px after it, and the 96 px
@@ -664,9 +667,14 @@ void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
     QVERIFY2(harness.load(), qPrintable(harness.error));
     QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
     QVERIFY(transport != nullptr);
+    QCOMPARE(transport->property("popupHeadroomAbove").toReal(), 0.0);
     const qreal lane = transport->property("laneGrowth").toReal();
+    // The lane's bottom 22 px over the row's centre line: 3 px over the
+    // bar's and the buttons' focus rings.
+    QCOMPARE(transport->property("laneClearance").toReal(), 22.0);
+    QCOMPARE(lane, std::ceil(transport->property("laneBoxHeight").toReal() + 22.0 + 4.0 - 24.0));
     QVERIFY(lane > 0);
-    QCOMPARE(transport->height(), 48.0 + lane + transport->property("balanceRoom").toReal());
+    QCOMPARE(transport->height(), 48.0 + lane);
     // The row's top.
     const qreal top = sceneRect(transport).top() + lane;
 
@@ -1054,6 +1062,11 @@ void TransportStatusTest::transportToolTipsClearTheFocusRings() {
     QTRY_VERIFY(!tip->property("visible").toBool());
     QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(next));
     QTRY_VERIFY(tip->property("opened").toBool());
+    // The pointer off the transport, whose lane holds the box of the
+    // control under it before one the keyboard's focus shows.
+    const QRectF transportRect = sceneRect(harness.item(QStringLiteral("transportBar")));
+    QTest::mouseMove(harness.window, QPointF(transportRect.center().x(), transportRect.bottom() + 20).toPoint());
+    QTRY_VERIFY(!next->property("hovered").toBool());
 
     // The seek bar's box, at the playhead while a key is held, clear of the
     // bar's ring.
@@ -1110,6 +1123,111 @@ void TransportStatusTest::transportToolTipsClearTheFocusRings() {
         harness.root->property("startButton").value<QQuickItem *>()->forceActiveFocus(Qt::TabFocusReason);
         QTRY_VERIFY2(!inLane.tip->property("visible").toBool(), qPrintable(name));
     }
+}
+
+// The transport's tooltips pass along the row: with one shown, the next
+// control's opens at once, in its place, as the pointer goes on to it,
+// the seek bar's time box's too, while the last one still fades out (each
+// waited the style's delay, and the lane stood empty between them, the
+// menu's titles back over it). Once the lane is empty, the next one waits
+// the delay again.
+void TransportStatusTest::transportToolTipsPassAlongTheRowAtOnce() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QObject *seekTip = harness.root->findChild<QObject *>(QStringLiteral("seekTimeBox"));
+    QVERIFY(transport && seek && seekTip);
+    Kirigami::Platform::Units *units = unitsOf(transport);
+    QVERIFY(units != nullptr);
+    units->setToolTipDelay(400);
+    units->setLongDuration(300);
+    QList<QQuickItem *> buttons;
+    for (const QString &name : {QStringLiteral("transportButton_previous"), QStringLiteral("transportButton_playPause"),
+                                QStringLiteral("transportButton_stop"), QStringLiteral("transportButton_next")}) {
+        QQuickItem *button = harness.item(name);
+        QVERIFY2(button != nullptr, qPrintable(name));
+        // Hover as on the desktop, which the offscreen platform's hints leave off.
+        button->setProperty("hoverEnabled", true);
+        buttons.append(button);
+    }
+    // The keyboard's focus off the transport, so the pointer alone shows
+    // the tooltips.
+    harness.root->property("startButton").value<QQuickItem *>()->forceActiveFocus(Qt::TabFocusReason);
+    QElapsedTimer timer;
+    timer.start();
+    QTest::mouseMove(harness.window, sceneCentre(buttons.constFirst()));
+    QTRY_VERIFY(buttonToolTip(buttons.constFirst())->property("opened").toBool());
+    QVERIFY2(timer.elapsed() >= 350, qPrintable(QString::number(timer.elapsed())));
+    for (int i = 1; i < buttons.size(); ++i) {
+        QObject *last = buttonToolTip(buttons.at(i - 1));
+        QTest::mouseMove(harness.window, sceneCentre(buttons.at(i)));
+        QVERIFY2(buttonToolTip(buttons.at(i))->property("visible").toBool(), qPrintable(buttons.at(i)->objectName()));
+        QVERIFY(!last->property("opened").toBool());
+        QVERIFY(last->property("background").value<QQuickItem *>()->isVisible());
+        QTRY_VERIFY(buttonToolTip(buttons.at(i))->property("opened").toBool());
+    }
+    const QRectF bar = sceneRect(seek);
+    QTest::mouseMove(harness.window, QPointF(bar.left() + 2, bar.center().y()).toPoint());
+    QVERIFY(seekTip->property("visible").toBool());
+
+    // Off the transport, the lane empties; then the next one waits.
+    QTest::mouseMove(harness.window, QPointF(bar.center().x(), sceneRect(transport).bottom() + 60).toPoint());
+    QTRY_VERIFY(!transport->property("laneWarm").toBool());
+    timer.restart();
+    QTest::mouseMove(harness.window, sceneCentre(buttons.at(2)));
+    QTest::qWait(150);
+    QVERIFY(!buttonToolTip(buttons.at(2))->property("visible").toBool());
+    QTRY_VERIFY(buttonToolTip(buttons.at(2))->property("opened").toBool());
+    QVERIFY2(timer.elapsed() >= 350, qPrintable(QString::number(timer.elapsed())));
+
+    // A tooltip the keyboard's focus shows waits the delay, also in the gap
+    // between two buttons while the last one fades out (the focused
+    // volume's opened there at once, for a moment, then went again).
+    QQuickItem *volume = harness.item(QStringLiteral("volumeSlider"));
+    QObject *volumeTip = harness.root->findChild<QObject *>(QStringLiteral("volumeToolTip"));
+    QVERIFY(volume && volumeTip);
+    volume->forceActiveFocus(Qt::TabFocusReason);
+    QTest::mouseMove(harness.window, sceneCentre(buttons.at(0)));
+    QTRY_VERIFY(buttonToolTip(buttons.at(0))->property("opened").toBool());
+    QTRY_VERIFY(volume->property("visualFocus").toBool());
+    QTest::mouseMove(harness.window, QPointF((sceneRect(buttons.at(0)).right() + sceneRect(buttons.at(1)).left()) / 2,
+                                             sceneRect(buttons.at(1)).center().y()).toPoint());
+    QVERIFY(!buttons.at(0)->property("hovered").toBool() && !buttons.at(1)->property("hovered").toBool());
+    QVERIFY(!volumeTip->property("visible").toBool());
+    QTest::mouseMove(harness.window, sceneCentre(buttons.at(1)));
+    QVERIFY(buttonToolTip(buttons.at(1))->property("visible").toBool());
+    QVERIFY(!volumeTip->property("visible").toBool());
+
+    // One that the keyboard's focus shows, still waiting as the pointer
+    // comes on to its control, opens at once then too: Play focused, from
+    // Previous, across the gap, on to Play (it waited the rest of the
+    // delay, the lane empty).
+    QObject *playTip = buttonToolTip(buttons.at(1));
+    QTest::mouseMove(harness.window, sceneCentre(buttons.at(0)));
+    buttons.at(1)->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(buttons.at(1)->property("visualFocus").toBool());
+    QTRY_VERIFY(buttonToolTip(buttons.at(0))->property("opened").toBool());
+    QTRY_VERIFY(!playTip->property("visible").toBool());
+    QTest::mouseMove(harness.window, QPointF((sceneRect(buttons.at(0)).right() + sceneRect(buttons.at(1)).left()) / 2,
+                                             sceneRect(buttons.at(1)).center().y()).toPoint());
+    QVERIFY(!playTip->property("visible").toBool());
+    QTest::mouseMove(harness.window, sceneCentre(buttons.at(1)));
+    QVERIFY(playTip->property("visible").toBool());
+
+    // A click within the delay shows none: a button's tooltip hides while
+    // it is held down (the press opened it at once, then sent it out).
+    harness.root->property("startButton").value<QQuickItem *>()->forceActiveFocus(Qt::TabFocusReason);
+    QTest::mouseMove(harness.window, QPointF(bar.center().x(), sceneRect(transport).bottom() + 60).toPoint());
+    QTRY_VERIFY(!transport->property("laneWarm").toBool());
+    QObject *stopTip = buttonToolTip(buttons.at(2));
+    QTest::mouseMove(harness.window, sceneCentre(buttons.at(2)));
+    QTest::mousePress(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(buttons.at(2)));
+    QVERIFY(buttons.at(2)->property("down").toBool());
+    QVERIFY(!stopTip->property("visible").toBool());
+    QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(buttons.at(2)));
+    QVERIFY(!stopTip->property("visible").toBool());
+    QTRY_VERIFY(stopTip->property("opened").toBool());
 }
 
 void TransportStatusTest::seekWaveformMeetsItsContrastAsDrawn_data() {
@@ -1874,11 +1992,12 @@ void TransportStatusTest::seekFocusDrawsOneRingAroundTheBar() {
     QVERIFY(!ring->isVisible());
     seek->forceActiveFocus(Qt::TabFocusReason);
     QTRY_VERIFY(ring->isVisible());
-    // A 2 px ring whose inside is 3 px clear of the bar.
+    // A 2 px ring whose inside is 2 px clear of the bar: of the playhead,
+    // which spans the bar's height.
     QCOMPARE(evaluateOn(ring, QStringLiteral("border.width")).toInt(), 2);
     const QRectF bar = sceneRect(seek);
     const QRectF outer = sceneRect(ring);
-    QCOMPARE(outer, bar.adjusted(-5, -5, 5, 5));
+    QCOMPARE(outer, bar.adjusted(-4, -4, 4, 4));
     const QColor ringColor = evaluateOn(ring, QStringLiteral("border.color")).value<QColor>();
     QVERIFY(sameColor(ringColor, harness.token("focusRing")));
     QVERIFY2(contrastRatio(ringColor, harness.transportChrome()) >= 3.0,
@@ -5867,8 +5986,16 @@ void TransportStatusTest::transportAndStatusBarGrowWithALargeFont() {
         QVERIFY2(rect.left() >= previousRight, qPrintable(names[i]));
         previousRight = rect.right();
     }
-    QCOMPARE(band.height(), std::max(48.0, buttonSize + 16.0) + transport->property("laneGrowth").toReal()
-                                + transport->property("balanceRoom").toReal());
+    // The row is the buttons' and 8 px above and below them, 76 px, and
+    // holds the seek bar's focus ring 3 px clear of the seam (with a 5 px
+    // ring and 5 px under it, it was 82 px). Without a menu bar's row to
+    // borrow, the band grows by the lane alone, with no room under the row.
+    QCOMPARE(buttonSize, 60.0);
+    QCOMPARE(transport->property("rowHeight").toReal(), 76.0);
+    QCOMPARE(band.height(), 76.0 + transport->property("laneGrowth").toReal());
+    QQuickItem *seekBar = harness.item(QStringLiteral("seekSlider"));
+    QVERIFY(seekBar != nullptr);
+    QCOMPARE(band.bottom() - (sceneRect(seekBar).bottom() + seekBar->property("focusRingOutset").toReal()), 3.0);
     for (const QString &name : {QStringLiteral("seekSlider"), QStringLiteral("transportTimePosition"),
                                 QStringLiteral("transportTimeLength"), QStringLiteral("muteButton"),
                                 QStringLiteral("volumeSlider")}) {
