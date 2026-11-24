@@ -18,8 +18,30 @@ import org.kde.kirigami as Kirigami
 // shortcut, with the style's spacing between them. The item keeps the
 // rest of the style's: its padding and background, its check and radio
 // marks, its submenu arrow, and its Alt mnemonics.
+//
+// In a menu of check marks and glyphs where no item has both, as View's
+// and Playback's, the marks and the glyphs share one column, as in
+// Breeze's widget menus: as wide as the wider of the two, each centred in
+// it, where the glyphs of a menu without marks are. Breeze's item gives
+// each a column of its own, which left the marks a glyph's width and two
+// spacings from their words. A menu with an item that has both keeps the
+// two columns.
 MenuItem {
     id: root
+
+    // Whether this item has a glyph of its own.
+    readonly property bool hasGlyph: root.icon.name !== "" || root.icon.source.toString() !== ""
+    // Whether the menu has check marks, and glyphs: Breeze's menu finds
+    // out as its items show.
+    readonly property bool menuHasMarks: (root.ListView.view !== null && root.ListView.view.hasCheckables)
+        || root.checkable
+    readonly property bool menuHasGlyphs: (root.ListView.view !== null && root.ListView.view.hasIcons)
+        || root.hasGlyph
+    // Whether the marks and the glyphs share the glyphs' column.
+    readonly property bool marksShareGlyphColumn: root.menuHasMarks && root.menuHasGlyphs
+        && !(root.checkable && root.hasGlyph)
+        && !(root.menu !== null && root.menu.hasMarkedGlyphs === true)
+    readonly property real markWidth: root.indicator !== null ? root.indicator.width : 0
 
     // A glyph beside a line of the menu's text: the largest icon size a
     // line of the font holds, at most a medium icon's 32 px.
@@ -61,23 +83,34 @@ MenuItem {
     contentItem: RowLayout {
         objectName: "appMenuItemRow"
 
-        // The check mark's column, in every item of a menu that has one.
+        // The check mark's own column, in every item of a menu that has
+        // marks that do not share the glyphs' column.
         Item {
-            Layout.preferredWidth: (root.ListView.view && root.ListView.view.hasCheckables) || root.checkable
-                ? root.indicator.width
+            Layout.preferredWidth: root.menuHasMarks && !root.marksShareGlyphColumn
+                ? root.markWidth
                 : Kirigami.Units.smallSpacing
         }
-        // The glyph's column, in every item of a menu that has glyphs.
-        Kirigami.Icon {
-            objectName: "appMenuItemIcon"
+        // The glyph's column, in every item of a menu that has glyphs, and
+        // the mark's too where they share it.
+        Item {
+            id: glyphColumn
+            objectName: "appMenuItemGlyphColumn"
             Layout.alignment: Qt.AlignVCenter
-            Layout.preferredWidth: root.icon.width
+            Layout.preferredWidth: root.marksShareGlyphColumn
+                ? Math.max(root.markWidth, root.icon.width)
+                : root.icon.width
             Layout.preferredHeight: root.icon.height
-            visible: (root.ListView.view && root.ListView.view.hasIcons)
-                || root.icon.name !== "" || root.icon.source.toString() !== ""
-            source: root.icon.name !== "" ? root.icon.name : root.icon.source
-            color: root.icon.color
-            selected: root.pressed
+            visible: root.menuHasGlyphs
+
+            Kirigami.Icon {
+                objectName: "appMenuItemIcon"
+                anchors.centerIn: parent
+                width: root.icon.width
+                height: root.icon.height
+                source: root.icon.name !== "" ? root.icon.name : root.icon.source
+                color: root.icon.color
+                selected: root.pressed
+            }
         }
         Label {
             id: label
@@ -117,5 +150,13 @@ MenuItem {
         Item {
             Layout.preferredWidth: Kirigami.Units.smallSpacing
         }
+    }
+
+    // The style's mark, centred in the column it shares with the glyphs.
+    Binding {
+        target: root.indicator
+        property: "x"
+        when: root.marksShareGlyphColumn && root.indicator !== null
+        value: root.contentItem.x + glyphColumn.x + (glyphColumn.width - root.markWidth) / 2
     }
 }

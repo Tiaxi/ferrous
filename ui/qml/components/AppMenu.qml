@@ -104,6 +104,29 @@ Menu {
         }
     }
 
+    // Whether an item of the menu has both a check mark and a glyph, found
+    // out as Breeze's menu finds out whether it has either, as its items
+    // show; such a menu gives marks and glyphs a column each
+    // (AppMenuItem). Kept once found, as Breeze keeps its, so a closed
+    // menu is as wide as it shows.
+    property bool hasMarkedGlyphs: false
+
+    Connections {
+        target: root.contentItem ? root.contentItem.contentItem : null
+
+        function onVisibleChildrenChanged() {
+            if (root.hasMarkedGlyphs)
+                return
+            for (const child of root.contentItem.contentItem.visibleChildren) {
+                if (child.checkable && child.icon
+                        && (child.icon.name !== "" || child.icon.source.toString() !== "")) {
+                    root.hasMarkedGlyphs = true
+                    return
+                }
+            }
+        }
+    }
+
     Binding {
         target: root.contentItem
         property: "keyNavigationEnabled"
