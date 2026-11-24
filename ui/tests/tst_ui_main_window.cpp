@@ -1205,6 +1205,7 @@ private slots:
     void libraryRowShowsItsCutTitleWholeInItsToolTip();
     void collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath();
     void libraryRowsShowHoverSelectionAndTheCurrentRow();
+    void librarySelectedRowStepsUpItsChevron();
     void queueFocusRingStopsAtTheScrollBarLane_data();
     void queueFocusRingStopsAtTheScrollBarLane();
     void queueRowHoverIsTheListsTint();
@@ -5372,6 +5373,31 @@ void UiMainWindowTest::libraryRowsShowHoverSelectionAndTheCurrentRow() {
     QTRY_COMPARE(QQmlProperty(trackTint, QStringLiteral("border.width")).read().toReal(), 1.0);
     QTRY_VERIFY(!tint->isVisible());
     QCOMPARE(colorOf(itemNamed(track, QStringLiteral("libraryRowNumber"))), tokenHex(window, "textTertiarySelected"));
+}
+
+// A selected row's chevron steps up with the row's other secondary marks,
+// to the selected row's secondary colour (it stayed the plain one on the
+// selection); an unselected row's keeps the plain one.
+void UiMainWindowTest::librarySelectedRowStepsUpItsChevron() {
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    showTree(fixture.libraryModel, kAllExpanded);
+    QQuickItem *artist = nullptr;
+    QQuickItem *album = nullptr;
+    QTRY_VERIFY((artist = libraryRow(window, QStringLiteral("artist"))) != nullptr
+                && (album = libraryRow(window, QStringLiteral("album"))) != nullptr);
+    QObject *controller = window->findChild<QObject *>(QStringLiteral("libraryController"));
+    QVERIFY(controller != nullptr);
+    QQuickItem *artistChevron = itemNamed(artist, QStringLiteral("libraryRowChevron"));
+    QQuickItem *albumChevron = itemNamed(album, QStringLiteral("libraryRowChevron"));
+    QVERIFY(shown(artistChevron) && shown(albumChevron));
+    QCOMPARE(colorOf(albumChevron), tokenHex(window, "textSecondary"));
+    QVERIFY(QMetaObject::invokeMethod(controller, "selectIndex", Q_ARG(QVariant, 1)));
+    QTRY_VERIFY(album->property("rowSelected").toBool());
+    QCOMPARE(colorOf(albumChevron), tokenHex(window, "textSecondarySelected"));
+    QCOMPARE(colorOf(artistChevron), tokenHex(window, "textSecondary"));
+    QVERIFY(tokenHex(window, "textSecondarySelected") != tokenHex(window, "textSecondary"));
 }
 
 void UiMainWindowTest::queueFocusRingStopsAtTheScrollBarLane_data() {

@@ -434,8 +434,9 @@ Rectangle {
                     // The model's role, so a row costs the same with any
                     // number of rows selected.
                     readonly property bool rowSelected: !!model.selected
-                    // A track's state mark and an unreadable name: stepped
-                    // up on a selected row, over its figures, as the queue's.
+                    // A track's state mark, an unreadable name and the
+                    // chevron: stepped up on a selected row, over its
+                    // figures, as the queue's.
                     readonly property color secondaryTextColor: rowSelected
                         ? root.uiPalette.textSecondarySelected
                         : root.uiPalette.textSecondary
@@ -641,7 +642,9 @@ Rectangle {
                                         : (Qt.application.layoutDirection === Qt.RightToLeft
                                             ? "arrow-left" : "arrow-right"))
                                 isMask: true
-                                color: root.uiPalette.textSecondary
+                                // Stepped up on a selected row, with its
+                                // other secondary marks.
+                                color: libraryRow.secondaryTextColor
                             }
 
                             // A track's state: playing, paused or stopped, or
