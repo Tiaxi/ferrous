@@ -1192,6 +1192,7 @@ private slots:
     void libraryFoldersAreFolderHeaders();
     void libraryFoldersAfterTheFirstHaveARuleOnTop();
     void libraryCollapseAllIsEnabledOnlyWithAnExpandedRow();
+    void libraryCollapseAllLeavesNoRowDrawn();
     void regionHeadersNameTheRegionAndItsTotals();
     void selectedRowsDrawTheirMarksForTheSelection();
     void libraryTreeHasOneIndentStep();
@@ -4749,6 +4750,115 @@ void UiMainWindowTest::libraryCollapseAllIsEnabledOnlyWithAnExpandedRow() {
     QVERIFY(QMetaObject::invokeMethod(controller, "collapseAll"));
     QTRY_COMPARE(model.rowCount(), 1);
     QVERIFY(!enabled());
+}
+
+// Where row `index` of a list view would be drawn, but no row is, the view
+// shows its own colour: empty when it does, else the first pixel that
+// does not.
+QString slotIsBlank(QQuickWindow *window, QQuickItem *view, int index) {
+    const qreal rowHeight = view->property("rowHeight").toReal();
+    const QRectF viewRect = sceneRect(view);
+    const qreal top = viewRect.top() + index * rowHeight - view->property("contentY").toReal();
+    const QColor background = tokenOf(window, "view");
+    const Drawn drawn(window);
+    for (qreal y = top + 0.5; y < top + rowHeight; y += 1.0) {
+        for (qreal x = viewRect.left() + 0.5; x < viewRect.right(); x += 1.0) {
+            if (!near(drawn.at(x, y), background)) {
+                return QStringLiteral("row slot %1 drawn at (%2, %3): %4")
+                    .arg(index)
+                    .arg(x)
+                    .arg(y)
+                    .arg(drawn.at(x, y).name());
+            }
+        }
+    }
+    return {};
+}
+
+// Collapse All takes out the rows of each library folder in a run of its
+// own. The rows it took out leave the view, also those of a later folder:
+// the view displaced them for the earlier run and then pooled them, and Qt
+// left a pooled row it had marked to move drawn where it was (it hides a
+// pooled row only when no transition is due, and the library's view has
+// transitions for its toggles). Collapsing one row with Left, and opening
+// the rows again from the pool, draw the rows where they are.
+void UiMainWindowTest::libraryCollapseAllLeavesNoRowDrawn() {
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    bridgeOf(window)->setProperty("libraryRoots", QStringList{QStringLiteral("/music"), QStringLiteral("/shelf")});
+    const QString first = QStringLiteral("/music/Artist A/Album A/01.flac");
+    const QString second = QStringLiteral("/shelf/Artist B/Album B/01.flac");
+    const QString artistB = QStringLiteral("artist|Artist B");
+    const QStringList allExpanded{kRootKey, QStringLiteral("root|/shelf"), kArtistKey, kAlbumKey, artistB,
+                                  QStringLiteral("album|Artist B|Album B")};
+    LibraryTreeModel &model = fixture.libraryModel;
+    model.setExpandedKeys(allExpanded);
+    model.setLibraryTreeFromBinary(treeOf({
+        {0, 0, 0, 1, 0, QStringLiteral("Music"), kRootKey, QString(), QStringLiteral("/music"), {}},
+        {1, 1, 0, 1, 0, QStringLiteral("Artist A (1)"), kArtistKey, QStringLiteral("Artist A"),
+         QStringLiteral("/music/Artist A"), {}},
+        {2, 2, 0, 1, 2005, QStringLiteral("Album A"), kAlbumKey, QStringLiteral("Artist A"),
+         QStringLiteral("/music/Artist A/Album A"), {}},
+        {4, 3, 1, 0, 0, QStringLiteral("First"), QStringLiteral("track|") + first, QStringLiteral("Artist A"), first,
+         first},
+        {0, 0, 0, 1, 0, QStringLiteral("Shelf"), QStringLiteral("root|/shelf"), QString(), QStringLiteral("/shelf"), {}},
+        {1, 1, 0, 1, 0, QStringLiteral("Artist B (1)"), artistB, QStringLiteral("Artist B"),
+         QStringLiteral("/shelf/Artist B"), {}},
+        {2, 2, 0, 1, 2010, QStringLiteral("Album B"), QStringLiteral("album|Artist B|Album B"),
+         QStringLiteral("Artist B"), QStringLiteral("/shelf/Artist B/Album B"), {}},
+        {4, 3, 1, 0, 0, QStringLiteral("Other"), QStringLiteral("track|") + second, QStringLiteral("Artist B"), second,
+         second},
+    }));
+    QQuickItem *view = named(window, "libraryView");
+    QObject *controller = window->findChild<QObject *>(QStringLiteral("libraryController"));
+    QObject *collapseAll = window->findChild<QObject *>(QStringLiteral("libraryCollapseAllItem"));
+    QVERIFY(view && controller && collapseAll);
+    const qreal rowHeight = view->property("rowHeight").toReal();
+    // Each row in its place, and nothing below the last.
+    const auto drawnAsTheRows = [&](int count) -> QString {
+        if (view->property("count").toInt() != count) {
+            return QStringLiteral("%1 rows").arg(view->property("count").toInt());
+        }
+        for (int index = 0; index < count; ++index) {
+            QQuickItem *row = viewRowAt(view, index);
+            if (row == nullptr || !shown(row) || row->y() != index * rowHeight) {
+                return QStringLiteral("row %1 out of place").arg(index);
+            }
+        }
+        for (int index = count; index < 8; ++index) {
+            const QString drawn = slotIsBlank(window, view, index);
+            if (!drawn.isEmpty()) {
+                return drawn;
+            }
+        }
+        return {};
+    };
+    QTRY_COMPARE(drawnAsTheRows(8), QString());
+
+    // From the library's menu: the two folders' rows alone.
+    QVERIFY(collapseAll->property("enabled").toBool());
+    QVERIFY(QMetaObject::invokeMethod(collapseAll, "click"));
+    QTRY_COMPARE(drawnAsTheRows(2), QString());
+    QCOMPARE(viewRowAt(view, 1)->property("rowTitle").toString(), QStringLiteral("Shelf"));
+
+    // Opened again, from the pool, and collapsed by the controller as the
+    // shortcut does.
+    model.setExpandedKeys(allExpanded);
+    QTRY_COMPARE(drawnAsTheRows(8), QString());
+    QVERIFY(QMetaObject::invokeMethod(controller, "collapseAll"));
+    QTRY_COMPARE(drawnAsTheRows(2), QString());
+
+    // Left on one artist: its album and track leave, the rows below close
+    // up over them.
+    model.setExpandedKeys(allExpanded);
+    QTRY_COMPARE(drawnAsTheRows(8), QString());
+    QVERIFY(QMetaObject::invokeMethod(controller, "selectIndex", Q_ARG(QVariant, 1)));
+    view->forceActiveFocus();
+    QTRY_VERIFY(view->hasActiveFocus());
+    QTest::keyClick(window, Qt::Key_Left);
+    QTRY_COMPARE(drawnAsTheRows(6), QString());
+    QCOMPARE(viewRowAt(view, 2)->property("rowTitle").toString(), QStringLiteral("Shelf"));
 }
 
 void UiMainWindowTest::regionHeadersNameTheRegionAndItsTotals() {
