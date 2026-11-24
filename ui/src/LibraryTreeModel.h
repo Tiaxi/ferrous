@@ -75,6 +75,9 @@ public:
     Q_INVOKABLE void toggleAlbum(const QString &albumKey);
     Q_INVOKABLE bool hasSelectionKey(const QString &selectionKey) const;
     Q_INVOKABLE int indexForSelectionKey(const QString &selectionKey) const;
+    // The selection keys of the shown row of `selectionKey` and of the rows
+    // that hold it, outermost first; empty when the row is not shown.
+    Q_INVOKABLE QStringList selectionKeyPath(const QString &selectionKey) const;
     Q_INVOKABLE int sourceIndexForRow(int row) const;
     Q_INVOKABLE QString selectionKeyForRow(int row) const;
     Q_INVOKABLE int findArtistRowByPrefix(const QString &prefix, int startRow) const;
