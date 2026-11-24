@@ -127,13 +127,33 @@ Dialog {
         return Math.max(0, Math.min(root.uiPalette.scaledSize(380), Math.max(least, spared)))
     }
     readonly property real contextX: root.titleX + root.titleWidth + root.columnGap
-    // Where the palette's top is: set when it opens, from where the
-    // transport is then.
+    // Where the palette's top is: set when it opens, and kept while it is
+    // open, so typing never moves the field. 32 px under the transport;
+    // higher where the window is too short to show five results there
+    // (at a large font in a small window it showed three), as far as the
+    // field, the results' footer, two headings and five results then fit
+    // above the window's 32 px bottom margin, but at least 8 px under the
+    // menu bar.
     property real paletteTop: 32
+    readonly property int leastResultRows: 5
     function updatePlacement() {
-        root.paletteTop = root.anchorItem && root.parent
-            ? Math.round(root.anchorItem.mapToItem(root.parent, 0, root.anchorItem.height).y) + 1 + 32
+        const windowItem = root.parent
+        if (!windowItem) {
+            root.paletteTop = 32
+            return
+        }
+        const underTransport = root.anchorItem
+            ? Math.round(root.anchorItem.mapToItem(windowItem, 0, root.anchorItem.height).y) + 1 + 32
             : 32
+        const resultsFooterHeight = Math.max.apply(null, ["artist", "album", "track"].map(function(kind) {
+            return root.footerHeightFor(root.hintsFor(kind))
+        }))
+        const leastHeight = root.fieldHeight + 1 + root.rowHeightAt("section", 0) + root.rowHeightAt("section", 1)
+            + root.leastResultRows * root.resultHeight + 1 + resultsFooterHeight
+        const menuBar = root.windowRoot && root.windowRoot.menuBar && root.windowRoot.menuBar.visible
+            ? root.windowRoot.menuBar : null
+        const highest = (menuBar ? Math.ceil(menuBar.mapToItem(windowItem, 0, menuBar.height).y) : 0) + 8
+        root.paletteTop = Math.max(highest, Math.min(underTransport, Math.floor(windowItem.height - 32 - leastHeight)))
     }
     // Counts the result rows' changes, for what depends on the selected
     // row's data rather than on its index.
@@ -420,10 +440,42 @@ Dialog {
         return root.selectedAuxRow ? root.selectedAuxRow.kind : "none"
     }
     // What Enter, Ctrl+Enter and Alt+Enter do for the selected row, as
-    // {key, action} pairs, with Esc last.
-    readonly property var keyHints: {
-        const kind = root.selectionKind
+    // {key, action} pairs, with Esc last. Esc is left out where the pairs
+    // would wrap with it and fit one line without it: the line it took at
+    // a large font was a result's room, and Esc closes every dialog.
+    readonly property var keyHints: root.hintsFor(root.selectionKind)
+    function hintsFor(kind) {
+        const pairs = root.actionHintsFor(kind)
         const close = { key: I18n.i18nc("@info:shortcut key name", "Esc"), action: I18n.i18nc("@info:shortcut action", "Close") }
+        const all = pairs.concat([close])
+        return pairs.length > 0 && root.hintLines(all) > 1 && root.hintLines(pairs) === 1 ? pairs : all
+    }
+    // The width of a pair in the footer's line, with the gap after it
+    // unless it is the last, as its Row is laid out.
+    function hintPairWidth(hint, last) {
+        return Math.ceil(smallMetrics.advanceWidth(hint.key)) + root.hintKeyGap
+            + Math.ceil(smallMetrics.advanceWidth(hint.action)) + (last ? 0 : root.hintPairGap)
+    }
+    // How many lines `hints` wrap to in the footer, as its Flow wraps them.
+    readonly property real footerHintsWidth: root.width - root.titleX - root.sideInset
+    function hintLines(hints) {
+        let lines = hints.length > 0 ? 1 : 0
+        let x = 0
+        for (let i = 0; i < hints.length; ++i) {
+            const width = root.hintPairWidth(hints[i], i === hints.length - 1)
+            if (x > 0 && x + width > root.footerHintsWidth) {
+                lines += 1
+                x = 0
+            }
+            x += width
+        }
+        return lines
+    }
+    function footerHeightFor(hints) {
+        return Math.max(28, root.hintLines(hints) * root.footerLineHeight + 8)
+    }
+    // The pairs for a row of `kind`, without Esc.
+    function actionHintsFor(kind) {
         const enter = I18n.i18nc("@info:shortcut key name", "Enter")
         if (kind === "artist" || kind === "album" || kind === "track") {
             return [
@@ -431,14 +483,13 @@ Dialog {
                     : (kind === "album" ? I18n.i18nc("@info:shortcut action", "Play Album")
                                         : I18n.i18nc("@info:shortcut action", "Play Track")) },
                 { key: I18n.i18nc("@info:shortcut key name", "Ctrl+Enter"), action: I18n.i18nc("@info:shortcut action", "Add to Queue") },
-                { key: I18n.i18nc("@info:shortcut key name", "Alt+Enter"), action: I18n.i18nc("@info:shortcut action", "Show in Library") },
-                close
+                { key: I18n.i18nc("@info:shortcut key name", "Alt+Enter"), action: I18n.i18nc("@info:shortcut action", "Show in Library") }
             ]
         }
-        if (kind === "more") return [{ key: enter, action: I18n.i18nc("@info:shortcut action", "Show All") }, close]
-        if (kind === "recent") return [{ key: enter, action: I18n.i18nc("@info:shortcut action", "Search") }, close]
-        if (kind === "suggestion") return [{ key: enter, action: I18n.i18nc("@info:shortcut action", "Search Instead") }, close]
-        return [close]
+        if (kind === "more") return [{ key: enter, action: I18n.i18nc("@info:shortcut action", "Show All") }]
+        if (kind === "recent") return [{ key: enter, action: I18n.i18nc("@info:shortcut action", "Search") }]
+        if (kind === "suggestion") return [{ key: enter, action: I18n.i18nc("@info:shortcut action", "Search Instead") }]
+        return []
     }
 
     function moveAuxSelection(step, wrap) {

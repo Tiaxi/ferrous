@@ -209,6 +209,34 @@ Row result(const QString &type, const QString &label, float score) {
     return row;
 }
 
+// Results for "mer", as the capture library's: the artist matches best,
+// then its four albums, then the tracks.
+QVector<Row> merRows(const QString &coverUrl) {
+    QVector<Row> rows;
+    Row artist = result(QStringLiteral("artist"), QStringLiteral("The Quiet Meridian"), 1.0f);
+    artist.count = 4;
+    rows << artist;
+    int year = 1998;
+    for (const QString &name : {QStringLiteral("Field Recordings Vol. 2"), QStringLiteral("Glass Orchard"),
+                                QStringLiteral("Low Tide Atlas"), QStringLiteral("Small Hours")}) {
+        Row album = result(QStringLiteral("album"), name, 2.0f);
+        album.artist = QStringLiteral("The Quiet Meridian");
+        album.year = year++;
+        album.coverUrl = coverUrl;
+        rows << album;
+    }
+    for (int i = 0; i < 8; ++i) {
+        Row track = result(QStringLiteral("track"), QStringLiteral("Meridian Study %1").arg(i + 1), 3.0f);
+        track.artist = QStringLiteral("The Quiet Meridian");
+        track.album = QStringLiteral("Glass Orchard");
+        track.coverUrl = coverUrl;
+        track.trackPath = QStringLiteral("/fixture/study%1.flac").arg(i + 1);
+        track.lengthText = QStringLiteral("4:%1").arg(10 + i);
+        rows << track;
+    }
+    return rows;
+}
+
 // Results for "meridian": the tracks match best, then the artist, then the
 // albums. `coverUrl` is the albums' and tracks' cover.
 QVector<Row> meridianRows(const QString &coverUrl) {
@@ -525,6 +553,8 @@ private slots:
     void textMeetsItsContrastAsDrawn();
     void largeFontRowsAndFooterHoldTheirText_data();
     void largeFontRowsAndFooterHoldTheirText();
+    void shortWindowPaletteShowsFiveResults_data();
+    void shortWindowPaletteShowsFiveResults();
     void glyphsTargetsAndThumbnailsFollowTheFont_data();
     void glyphsTargetsAndThumbnailsFollowTheFont();
     void rowColumnsNeverMeet_data();
@@ -2715,6 +2745,114 @@ void SearchPaletteTest::largeFontRowsAndFooterHoldTheirText() {
     QQuickItem *hairline = harness.item(QStringLiteral("globalSearchFooterHairline"));
     QCOMPARE(sceneRect(hairline).bottom(), footerRect.top());
     QVERIFY(frame.bottom() <= harness.window->height() - 32.0);
+}
+
+void SearchPaletteTest::shortWindowPaletteShowsFiveResults_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("windowWidth");
+    QTest::addColumn<int>("windowHeight");
+    QTest::addColumn<int>("transportHeight");
+    QTest::addColumn<QString>("place");
+    QTest::addColumn<int>("hintCount");
+    QTest::addColumn<int>("footerLines");
+    // The app's band at 24 pt: the transport ends 190 px down, so the
+    // palette's top was at 223 and showed three results.
+    QTest::newRow("24 pt, 1000x720") << 24.0 << 1000 << 720 << 138 << QStringLiteral("risen") << 4 << 2;
+    QTest::newRow("24 pt, 1000x560") << 24.0 << 1000 << 560 << 138 << QStringLiteral("menu bar") << 4 << 2;
+    QTest::newRow("24 pt, 1180x720") << 24.0 << 1180 << 720 << 138 << QStringLiteral("risen") << 3 << 1;
+    QTest::newRow("24 pt, 1600x1000") << 24.0 << 1600 << 1000 << 138 << QStringLiteral("transport") << 4 << 1;
+    QTest::newRow("default font, 1000x720") << 0.0 << 1000 << 720 << 48 << QStringLiteral("transport") << 4 << 1;
+    QTest::newRow("default font, 1600x1000") << 0.0 << 1600 << 1000 << 48 << QStringLiteral("transport") << 4 << 1;
+}
+
+// At a large font in a short window, the palette 32 px under the transport
+// showed three results. Its top, chosen as it opens, rises as far as the
+// field, the footer, two headings and five results need, but stays 8 px
+// under the menu bar, and with room for them it stays under the
+// transport; it doesn't move while typing. Where the footer's pairs would
+// wrap with Esc but fit one line without it, Esc is left out; it stays
+// where it fits, where the pairs wrap anyway, and with no result.
+void SearchPaletteTest::shortWindowPaletteShowsFiveResults() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, windowWidth);
+    QFETCH(int, windowHeight);
+    QFETCH(int, transportHeight);
+    QFETCH(QString, place);
+    QFETCH(int, hintCount);
+    QFETCH(int, footerLines);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText, windowWidth, windowHeight, true, transportHeight),
+             qPrintable(errorText));
+    QVERIFY(harness.open());
+    QQuickItem *menuBar = harness.item(QStringLiteral("harnessMenuBar"));
+    QVERIFY(menuBar != nullptr);
+    const qreal menuBarBottom = sceneRect(menuBar).bottom();
+    const qreal underTransport = sceneRect(harness.root->property("transport").value<QQuickItem *>()).bottom() + 1 + 32;
+    QCOMPARE(underTransport, menuBarBottom + transportHeight + 33);
+    const qreal top = sceneRect(harness.palette()).top();
+    if (place == QStringLiteral("transport")) {
+        QCOMPARE(top, underTransport);
+    } else if (place == QStringLiteral("menu bar")) {
+        QCOMPARE(top, std::ceil(menuBarBottom) + 8);
+    } else {
+        QVERIFY2(top > menuBarBottom + 8 && top < underTransport, qPrintable(QString::number(top)));
+    }
+
+    harness.search(QStringLiteral("mer"), merRows(harness.coverUrl), {1, 4, 8});
+    QTRY_VERIFY(harness.view()->isVisible());
+    QQuickItem *view = harness.view();
+    const QRectF frame = sceneRect(harness.palette());
+    QCOMPARE(frame.top(), top);
+    QVERIFY(frame.bottom() <= windowHeight - 32.0);
+    // The results in view, whole.
+    int results = 0;
+    for (int i = 0; i < harness.model.rowCount(); ++i) {
+        QQuickItem *row = harness.row(i);
+        if (row == nullptr || !row->isVisible() || row->height() <= 0) continue;
+        const QRectF rect = sceneRect(row);
+        if (harness.model.rowDataAt(i).value(QStringLiteral("kind")).toString() == QStringLiteral("item")
+            && rect.top() >= sceneRect(view).top() - 0.5 && rect.bottom() <= sceneRect(view).bottom() + 0.5) {
+            ++results;
+        }
+    }
+    if (place == QStringLiteral("menu bar")) {
+        QVERIFY2(results >= 1 && results < 5, qPrintable(QString::number(results)));
+    } else {
+        QVERIFY2(results >= 5, qPrintable(QStringLiteral("%1 results at %2").arg(results).arg(top)));
+    }
+    if (place == QStringLiteral("risen")) {
+        // No higher than five results need: one more line of them would
+        // fit only under the menu bar's margin.
+        QCOMPARE(frame.bottom(), windowHeight - 32.0);
+    }
+
+    // The footer: its pairs on as many lines as they need.
+    QQuickItem *footer = harness.item(QStringLiteral("globalSearchFooter"));
+    QCOMPARE(harness.hints().size(), hintCount);
+    QCOMPARE(harness.hints().contains(QStringLiteral("Esc Close")), hintCount == 4);
+    QList<qreal> lineTops;
+    for (QQuickItem *hint : visibleNamed(footer, QStringLiteral("globalSearchKeyHint"))) {
+        QVERIFY(within(sceneRect(hint), sceneRect(footer)));
+        if (!lineTops.contains(sceneRect(hint).top())) lineTops << sceneRect(hint).top();
+    }
+    QCOMPARE(int(lineTops.size()), footerLines);
+
+    // Typing on and clearing the field don't move it; with no query, Esc
+    // is the footer's one pair.
+    harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    QCOMPARE(sceneRect(harness.palette()).top(), top);
+    harness.search(QString(), {});
+    QTRY_COMPARE(harness.hints(), QStringList{QStringLiteral("Esc Close")});
+    QCOMPARE(sceneRect(harness.palette()).top(), top);
 }
 
 void SearchPaletteTest::glyphsTargetsAndThumbnailsFollowTheFont_data() {
