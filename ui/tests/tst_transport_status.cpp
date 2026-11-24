@@ -316,7 +316,8 @@ struct Harness {
     bool reportIssue(int category, int severity, const QString &message) const {
         const bool reported = QMetaObject::invokeMethod(errors, "report", Q_ARG(QVariant, category),
                                                         Q_ARG(QVariant, severity), Q_ARG(QVariant, QString()),
-                                                        Q_ARG(QVariant, message), Q_ARG(QVariant, QString()));
+                                                        Q_ARG(QVariant, message), Q_ARG(QVariant, QString()),
+                                                        Q_ARG(QVariant, false));
         takeCapturedMessages();
         return reported;
     }

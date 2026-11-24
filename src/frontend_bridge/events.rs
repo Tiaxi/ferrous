@@ -361,7 +361,10 @@ pub(super) fn file_ends_early(path: &std::path::Path, message: String) -> Bridge
 
 /// The error the user is shown for `error`, about its file, with why a
 /// track failed as its system text, which Recent Issues shows under it and
-/// the file's rows tell. A skipped file leaves playback going.
+/// the file's rows tell. A skipped file leaves playback going. The rows are
+/// marked for a track that failed to play, whether playback went on or
+/// stopped, and not for a file that played but stays open or one a resume
+/// did not find.
 fn playback_error(error: &crate::playback::PlaybackError) -> BridgeError {
     let severity = match error.outcome {
         PlaybackErrorOutcome::Skipped | PlaybackErrorOutcome::NotResumed => ErrorSeverity::Warning,
@@ -370,6 +373,13 @@ fn playback_error(error: &crate::playback::PlaybackError) -> BridgeError {
         | PlaybackErrorOutcome::EngineUnavailable
         | PlaybackErrorOutcome::NotReleased => ErrorSeverity::Error,
     };
+    let failed_to_play = error.path.is_some()
+        && matches!(
+            error.outcome,
+            PlaybackErrorOutcome::Skipped
+                | PlaybackErrorOutcome::Stopped
+                | PlaybackErrorOutcome::StoppedAfterFailures(_)
+        );
     BridgeError {
         category: ErrorCategory::Playback,
         severity,
@@ -380,6 +390,7 @@ fn playback_error(error: &crate::playback::PlaybackError) -> BridgeError {
             .unwrap_or_default(),
         message: error.message(),
         detail: error.reason().to_string(),
+        failed_to_play,
     }
 }
 
@@ -1406,6 +1417,49 @@ mod tests {
             error.message
         );
         assert_eq!(error.detail, "");
+    }
+
+    #[test]
+    fn a_track_that_failed_to_play_is_marked_whatever_its_severity() {
+        // Mirrored by UiMainWindowTest::rowsAreMarkedForATrackThatFailedNotForTheSeverity.
+        let error_for = |path: Option<&str>, outcome| {
+            playback_error(&crate::playback::PlaybackError {
+                path: path.map(PathBuf::from),
+                detail: "Resource not found".to_string(),
+                outcome,
+            })
+        };
+        let file = Some("/music/a.flac");
+        // The track failed: playback went on without it, or stopped.
+        for (outcome, severity) in [
+            (PlaybackErrorOutcome::Skipped, ErrorSeverity::Warning),
+            (PlaybackErrorOutcome::Stopped, ErrorSeverity::Error),
+            (
+                PlaybackErrorOutcome::StoppedAfterFailures(5),
+                ErrorSeverity::Error,
+            ),
+        ] {
+            let error = error_for(file, outcome);
+            assert!(error.failed_to_play, "{outcome:?}");
+            assert_eq!(error.severity, severity, "{outcome:?}");
+            assert_eq!(error.subject, "/music/a.flac");
+        }
+        // The file played but stays open, a resume found no file, or the
+        // engine is gone: about a file or not, no track failed to play.
+        for (outcome, severity) in [
+            (PlaybackErrorOutcome::NotReleased, ErrorSeverity::Error),
+            (PlaybackErrorOutcome::NotResumed, ErrorSeverity::Warning),
+            (
+                PlaybackErrorOutcome::EngineUnavailable,
+                ErrorSeverity::Error,
+            ),
+        ] {
+            let error = error_for(file, outcome);
+            assert!(!error.failed_to_play, "{outcome:?}");
+            assert_eq!(error.severity, severity, "{outcome:?}");
+        }
+        // A failure about no file marks none.
+        assert!(!error_for(None, PlaybackErrorOutcome::Stopped).failed_to_play);
     }
 
     #[test]

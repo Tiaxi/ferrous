@@ -5588,7 +5588,7 @@ bool BridgeClient::openUrlInFileBrowser(const QString &path, bool containingFold
 
 void BridgeClient::reportError(BinaryBridgeCodec::ErrorCategory category, const QString &message,
                                const QString &subject, BinaryBridgeCodec::ErrorSeverity severity,
-                               const QString &detail) {
+                               const QString &detail, bool failedToPlay) {
     // The log keeps every error Recent Issues shows, with the system's text
     // and what it concerns.
     QString line = QStringLiteral("%1: %2").arg(
@@ -5602,7 +5602,8 @@ void BridgeClient::reportError(BinaryBridgeCodec::ErrorCategory category, const 
         line += QStringLiteral(" (%1)").arg(subject);
     }
     logDiagnostic(errorCategoryLogName(category), line);
-    emit bridgeError(message, static_cast<int>(category), static_cast<int>(severity), subject, detail);
+    emit bridgeError(message, static_cast<int>(category), static_cast<int>(severity), subject, detail,
+                     failedToPlay);
 }
 
 void BridgeClient::reportUiError(int category, int severity, const QString &subject,
@@ -5731,7 +5732,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         reportError(static_cast<BinaryBridgeCodec::ErrorCategory>(snapshot.errorCategory),
                     snapshot.errorMessage, snapshot.errorSubject,
                     static_cast<BinaryBridgeCodec::ErrorSeverity>(snapshot.errorSeverity),
-                    snapshot.errorDetail);
+                    snapshot.errorDetail, snapshot.errorFailedToPlay);
         return false;
     }
 

@@ -657,9 +657,11 @@ signals:
     // An error for the user: the message, its BinaryBridgeCodec::ErrorCategory
     // and ErrorSeverity, and the file or folder it is about, or empty.
     // `detail` is the system's text for it, or empty: Recent Issues shows it
-    // under the message, in secondary ink.
+    // under the message, in secondary ink. `failedToPlay` tells that the
+    // subject is a track that failed to play, whatever the severity: the
+    // queue and the library mark its rows unreadable.
     void bridgeError(const QString &message, int category, int severity, const QString &subject,
-                     const QString &detail);
+                     const QString &detail, bool failedToPlay);
     void queueUndoChanged();
     // An undo brought back these rows, or a redo moved them here, and the
     // queue view selects them; they are rows of the queue as it is when
@@ -937,12 +939,13 @@ private:
     // the diagnostics log with its category and severity; see bridgeError.
     // What the user need not see goes to logDiagnostic only.
     // `detail` is the system's text, which Recent Issues shows apart and
-    // the log after the message.
+    // the log after the message. `failedToPlay` tells that `subject` is a
+    // track that failed to play, which the queue and the library mark.
     void reportError(BinaryBridgeCodec::ErrorCategory category, const QString &message,
                      const QString &subject = {},
                      BinaryBridgeCodec::ErrorSeverity severity =
                          BinaryBridgeCodec::ErrorSeverityError,
-                     const QString &detail = {});
+                     const QString &detail = {}, bool failedToPlay = false);
     void sendPathListCommand(quint16 cmdId, const QStringList &paths,
                              const KLocalizedString &tooLargeMessage);
     void sendLibraryItems(

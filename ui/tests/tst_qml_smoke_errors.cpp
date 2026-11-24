@@ -38,13 +38,15 @@ private slots:
 namespace {
 
 // Sends an error from the bridge as BridgeClient does, with the system's
-// text `detail`. The categories and severities are BinaryBridgeCodec's.
+// text `detail`, and whether `subject` is a track that failed to play. The
+// categories and severities are BinaryBridgeCodec's.
 bool sendBridgeError(QObject *bridge, const QString &message, int category = 1,
                      int severity = 1, const QString &subject = QString(),
-                     const QString &detail = QString()) {
+                     const QString &detail = QString(), bool failedToPlay = false) {
     return QMetaObject::invokeMethod(bridge, "bridgeError", Q_ARG(QString, message),
                                      Q_ARG(int, category), Q_ARG(int, severity),
-                                     Q_ARG(QString, subject), Q_ARG(QString, detail));
+                                     Q_ARG(QString, subject), Q_ARG(QString, detail),
+                                     Q_ARG(bool, failedToPlay));
 }
 
 // The content of the popup `popup`, which the error dialog's rows are under.
@@ -138,7 +140,7 @@ void ErrorsSmokeTest::consecutiveErrorsAreBothVisible() {
         "Couldn't play “bad.flac” (Resource not found); skipped it.");
     const QString scan = QStringLiteral("could not read 1 folder or file in '/music'");
     clearCapturedMessages();
-    QVERIFY(sendBridgeError(ui.bridge, skipped, 1, 0, QStringLiteral("/music/bad.flac")));
+    QVERIFY(sendBridgeError(ui.bridge, skipped, 1, 0, QStringLiteral("/music/bad.flac"), {}, true));
     QVERIFY(sendBridgeError(ui.bridge, scan, 2, 1));
 
     // The status bar stands out and counts both; nothing else in the window
@@ -238,10 +240,10 @@ void ErrorsSmokeTest::errorHistoryCountsRepeatsAndKeepsTheLatest() {
     const QString message = QStringLiteral("Couldn't play “bad.flac”; skipped it.");
     const QString subject = QStringLiteral("/music/bad.flac");
 
-    QVERIFY(sendBridgeError(ui.bridge, message, 1, 0, subject));
+    QVERIFY(sendBridgeError(ui.bridge, message, 1, 0, subject, {}, true));
     QVERIFY(sendBridgeError(ui.bridge, QStringLiteral("other"), 2, 1));
-    QVERIFY(sendBridgeError(ui.bridge, message, 1, 0, subject));
-    QVERIFY(sendBridgeError(ui.bridge, message, 1, 0, subject));
+    QVERIFY(sendBridgeError(ui.bridge, message, 1, 0, subject, {}, true));
+    QVERIFY(sendBridgeError(ui.bridge, message, 1, 0, subject, {}, true));
 
     // One entry, counted, and moved to the front as the newest.
     QCOMPARE(errorHistoryMessages(ui.errors), (QStringList{message, QStringLiteral("other")}));
@@ -887,7 +889,7 @@ void ErrorsSmokeTest::escapeClosesFullscreenViewersWhileTheirControlsHaveFocus()
         QVERIFY(fullscreen != nullptr);
         QVERIFY(QTest::qWaitForWindowActive(fullscreen));
         QVERIFY(sendBridgeError(bridge, QStringLiteral("Couldn't play \u201cbad.flac\u201d; skipped it."),
-                                1, 0, QStringLiteral("/music/bad.flac")));
+                                1, 0, QStringLiteral("/music/bad.flac"), {}, true));
         QTRY_VERIFY(visibleItemNamed(fullscreen, QStringLiteral("viewerIssuesButton")) != nullptr);
         QQuickItem *issues = visibleItemNamed(fullscreen, QStringLiteral("viewerIssuesButton"));
 
@@ -1183,7 +1185,7 @@ void ErrorsSmokeTest::viewerIssuesButtonsOpenRecentErrorsAboveTheViewer() {
         QVERIFY(QTest::qWaitForWindowActive(host));
 
         QVERIFY(sendBridgeError(bridge, QStringLiteral("Couldn't play \u201cbad.flac\u201d; skipped it."),
-                                1, 0, QStringLiteral("/music/bad.flac")));
+                                1, 0, QStringLiteral("/music/bad.flac"), {}, true));
         settle();
         QTRY_VERIFY2(visibleItemNamed(host, QStringLiteral("viewerIssuesButton")) != nullptr,
                      name.constData());

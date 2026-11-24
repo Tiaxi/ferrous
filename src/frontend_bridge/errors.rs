@@ -72,6 +72,11 @@ pub struct BridgeError {
     /// UI reads it for nothing else but a failed track's reason, which the
     /// file's rows in the queue and the library tell.
     pub detail: String,
+    /// Whether `subject` is a track that failed to play, which the queue and
+    /// the library mark unreadable, whatever the severity: a failed track
+    /// that playback skipped is a warning, and a file that played but was
+    /// not closed is an error that marks nothing.
+    pub failed_to_play: bool,
 }
 
 impl BridgeError {
@@ -83,6 +88,7 @@ impl BridgeError {
             subject: String::new(),
             message: message.into(),
             detail: String::new(),
+            failed_to_play: false,
         }
     }
 
