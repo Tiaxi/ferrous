@@ -20,6 +20,8 @@ import time
 from driver import ICONPROBE
 from shotlib import FIND, KEY, LIB, LIB2, album_paths
 from colours import unique_colours
+from make_showcase_fixtures import ALBUM as SC_ALBUM, ALBUM_DIR as SC_ALBUM_DIR, ARTIST as SC_ARTIST, \
+    ITUNES as SC_ITUNES, TRACKS as SC_TRACKS
 
 KEY_TAB, KEY_ESC, KEY_SPACE = KEY["Tab"], KEY["Escape"], KEY["Space"]
 
@@ -54,6 +56,10 @@ SESSIONS = {
     "icon-noart24": dict(font_pt=24, suffix_extra="_font24"),  # (the 24 pt compact no-art mark, 152 px)
     # zoom, the seek bar's view band, middle-drag pan, middle-click autoscroll and the way back to the playhead
     "viz-interaction": dict(),
+    # the README's and AppStream's screenshots (the `showcase` scope): the showcase library scanned as the one root
+    "showcase": dict(db=False),
+    # the fullscreen viewer at 1600x1000: KWin's output is the main window's size plus 400 px (kwin_output_size)
+    "showcase-fs": dict(db=False, size=(1200, 600)),
 }
 
 
@@ -120,17 +126,19 @@ def m_lastfm(r, arg):
     time.sleep(0.15)
 
 
-def itunes_rows():
-    jpgs = sorted(glob.glob(f"{LIB}/*/*/cover.jpg"))[:5]
+def itunes_rows(jpgs=None, titles=None, artist="The Quiet Meridian", loading=4):
+    """The stand-in results: five rows, row `loading` marked as downloading its full-size image (None: no row).
+    By default the fixture library's first covers as Small Hours' editions; the showcase gives its own."""
+    jpgs = sorted(glob.glob(f"{LIB}/*/*/cover.jpg"))[:5] if jpgs is None else jpgs
     if len(jpgs) < 5:  # loudly: never a results list shorter than its caption says
-        raise FileNotFoundError(f"itunes: {len(jpgs)} fixture covers in {LIB}, need 5")
-    titles = ["Small Hours", "Small Hours (Deluxe Edition)", "Small Hours – Live", "Hours, Small",
-              "The Small Hours Sessions"]
+        raise FileNotFoundError(f"itunes: {len(jpgs)} fixture covers, need 5")
+    titles = titles or ["Small Hours", "Small Hours (Deluxe Edition)", "Small Hours – Live", "Hours, Small",
+                        "The Small Hours Sessions"]
     res = ["1200 × 1200", "3000 × 3000", "600 × 600", "1400 × 1400", "1000 × 1000"]
     sizes = ["412 KiB", "2.1 MiB", "88 KiB", "530 KiB", "301 KiB"]
-    return [dict(albumTitle=titles[k], artistName="The Quiet Meridian", resolutionText=res[k], fileType="JPEG",
+    return [dict(albumTitle=titles[k], artistName=artist, resolutionText=res[k], fileType="JPEG",
                  fileSizeText=sizes[k], mimeType="image/jpeg", previewSource="file://" + j, normalizedPath=j,
-                 normalizedUrl="file://" + j, assetLoading=(k == 4), assetError="") for k, j in enumerate(jpgs)]
+                 normalizedUrl="file://" + j, assetLoading=(k == loading), assetError="") for k, j in enumerate(jpgs)]
 
 
 def itunes_status(kind, n=5):
@@ -159,6 +167,13 @@ def m_itunes(r, arg):
         r.s.ev(f"{FAKE_ITUNES}([], true, {json.dumps(itunes_status('searching'))})")
     elif arg == "error":
         r.s.ev(f"{FAKE_ITUNES}([], false, {json.dumps(itunes_status('failed'))})")
+    elif arg == "showcase":  # the showcase album's editions, every row ready
+        rows = itunes_rows([os.path.join(SHOWCASE_ITUNES, f"{k}.jpg") for k in range(5)],
+                           [SC_ALBUM] + SC_ITUNES[1:], SC_ARTIST, loading=None)
+        missing = [p for p in (x["normalizedPath"] for x in rows) if not os.path.exists(p)]
+        if missing:
+            raise FileNotFoundError(f"itunes showcase: no {missing[0]} (make_showcase_fixtures.py)")
+        r.s.ev(f"{FAKE_ITUNES}({json.dumps(rows)}, false, {json.dumps(itunes_status('found', len(rows)))})")
     elif arg in ("results", "loading"):
         rows = itunes_rows()
         if arg == "loading":  # as the app marks a row while its full-size image downloads (assetLoading)
@@ -5711,6 +5726,32 @@ SI_FILES = [("long-album", os.path.join(SI_DIR, "01 - Long Album.flac"), "an alb
             ("untagged", os.path.join(LIB, "Unsorted", "track07.flac"), "an untagged file (title from its name)")]
 
 
+# The showcase (make_showcase_fixtures.py): the fixture library and one album of synthesized music, the sessions'
+# one library root; the iTunes stand-ins' covers beside it
+SHOWCASE_LIB = os.path.join(os.path.dirname(LIB), "showcase-library")
+SHOWCASE_ALBUM = os.path.join(SHOWCASE_LIB, SC_ARTIST, SC_ALBUM_DIR)
+SHOWCASE_ITUNES = os.path.join(os.path.dirname(LIB), "showcase-itunes")
+
+
+def m_showcase(r, arg):
+    """showcase: the showcase library as the app's one library root (a db=False session starts with none), scanned,
+    and its album in the queue. Fails loudly on a missing or partial album: the shots would show something else."""
+    paths = sorted(glob.glob(os.path.join(SHOWCASE_ALBUM, "*.flac")))
+    if len(paths) != len(SC_TRACKS):
+        raise FileNotFoundError(f"showcase: {len(paths)} tracks in {SHOWCASE_ALBUM}, not {len(SC_TRACKS)} "
+                                "(make_showcase_fixtures.py)")
+    r.s.ev(f"root.uiBridge.addLibraryRoot({json.dumps(SHOWCASE_LIB)}, 'Music')")
+    if not r.s.a.wait_for("root.uiBridge.libraryTrackCount > 180 && !root.uiBridge.libraryScanInProgress",
+                          timeout=60, interval=0.1):
+        raise RuntimeError("showcase: the library scan did not finish within 60 s")
+    r.s.ev(f"root.uiBridge.replaceWithPaths({json.dumps(paths)})")
+    if not r.s.a.wait_for(f"root.uiBridge.queueLength === {len(paths)}", timeout=20, interval=0.05):
+        raise RuntimeError(f"showcase: the queue does not hold the album's {len(paths)} tracks")
+    time.sleep(0.3)
+
+
+MACROS["showcase"] = m_showcase
+
 # a 192 kHz track (its analysis takes a moment)
 _DUST_MOTES = sorted(glob.glob(os.path.join(LIB, "Lumen Drift", "2013 - Dust Motes", "*.flac")) or ["dust motes missing.flac"])[0]
 # a short tagged track with art (the queue-end recording)
@@ -7168,6 +7209,8 @@ _DIALOG_EXPECT = {
     "confirm-replace-cover": ("Replace Album Art", "Replace the album art of"),  # (its heading, set by applySuggestion)
     "tag-editor-editing": ("Edit Tags", None),
     "itunes-error": ("Replace", "search iTunes"),  # (the app's failed state, "Couldn’t search iTunes")
+    "showcase-edit-tags": ("Edit Tags", "files selected"),
+    "showcase-itunes": ("Replace from iTunes", SC_ALBUM + " (Deluxe Edition)"),
 }
 DIALOG_EXPECT = dict(_DIALOG_EXPECT, **{k + "-default-focus": v for k, v in _DIALOG_EXPECT.items()})
 # The core set, in order: about 20 images every reviewer views (their context holds no more). ("sheet", group,
@@ -7819,6 +7862,32 @@ STATES += [
      "Follow Playhead (F) after a middle-drag of the centred spectrogram: back on the playhead"),
     ("viz-interaction", "main", "vi-rolling-zoomed", "wait 0.4 | until !followPlayheadAction.enabled | js root.uiBridge.setSpectrogramDisplayMode(0) | wait 2 | away",
      "The rolling spectrogram, still zoomed: its band on the seek bar"),
+]
+
+# The showcase: the README's and AppStream's screenshots (the `showcase` focus scope; docs/assets/screenshots). Whole
+# windows, both themes: a track of the synthesized album playing near a phrase's break (its riser, then the drop
+# in the plot's right half), the library open at it, no hover, focus ring, tooltip or notice.
+_SC_PLAY = ("macro showcase | play Paper_Satellites 111 8 | js libraryController.showTrackInLibrary(root.uiBridge.currentTrackPath) | "
+            "wait 0.6 | js queueController.clearSelection() | unfocus | away | ready 4")
+STATES += [
+    ("showcase", "_", "_play", _SC_PLAY, ""),
+    ("showcase", "main", "showcase", "unfocus | away | wait 0.6",
+     "Showcase: the main window playing, the library open at the album, the queue, the cover, the spectrogram"),
+    ("showcase", "main", "showcase-waveform",
+     "js viewerController.setVisualizationMode(1) | ready 3 | wheel mainWaveformSurface@0.5,0.5 120 5 | wait 1.2 | "
+     "away | wait 0.6", "Showcase: the waveform, zoomed in 5 notches"),
+    ("showcase", "_", "_waveform-off", "js resetZoomAction.trigger() | js viewerController.setVisualizationMode(0) | ready 3", ""),
+    ("showcase", "dialog", "showcase-edit-tags", "macro tagedit 6 | js root.tagEditorApi.selectAllRows() | wait 0.5",
+     "Showcase: Edit Tags with six tracks selected (the fields they differ in show Mixed)"),
+    ("showcase", "dialog", "showcase-itunes",
+     "esc | macro itunes showcase | js root.openItunesArtworkDialog() | settle 1 | macro itunes showcase | wait 0.6 | away",
+     "Showcase: Replace from iTunes with five results (stand-ins: no network)"),
+    ("showcase", "_", "_close", "esc", ""),
+    ("showcase-fs", "_", "_play", _SC_PLAY, ""),
+    ("showcase-fs", "viewer", "showcase-spectrogram-fullscreen",
+     "js root.uiBridge.setViewerFullscreenMode(1) | js root.uiBridge.setShowFullscreenTitleStrip(true) | "
+     "js viewerController.openSpectrogramViewer() | settle 1 | ready 3 | window spectrogramFullscreenWindow | wait 0.6",
+     "Showcase: the spectrogram's fullscreen viewer (1600x1000) with its title strip"),
 ]
 
 DLG_FACTS = {("dialogs", st) for st in (

@@ -27,7 +27,7 @@ SCRIPT = os.path.join(HERE, "shoot_round.sh")
 # pack.py records its arguments
 NOOP_PY = ["motion_inventory.py", "contrast.py", "layout.py",
            "make_extra_fixtures.py", "make_cover_art.py", "make_broadband_fixtures.py",
-           "make_standin_fixtures.py", "make_large_library.py", "make_library2.py"]
+           "make_standin_fixtures.py", "make_large_library.py", "make_library2.py", "make_showcase_fixtures.py"]
 MAKE_DIR_PY = "import os, sys\nos.makedirs(sys.argv[1], exist_ok=True)\n"
 SETUP_DB_PY = "import os\nos.makedirs(os.path.join(os.environ['SHOT_WORK'], 'run', 'template'), exist_ok=True)\n"
 # rsync -a ... SRC/ DEST/: a plain copy of the stand-in tree; bc: a fixed elapsed time

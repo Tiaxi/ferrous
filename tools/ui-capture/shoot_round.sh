@@ -215,6 +215,7 @@ fi
 [ -f "$(dirname "$LIB")/standin/03 - Same Name.flac" ] || python3 "$H/make_standin_fixtures.py" "$(dirname "$LIB")/standin"
 [ -f "$(dirname "$LIB")/library-large/.count" ] || python3 "$H/make_large_library.py" "$(dirname "$LIB")/library-large"
 [ -d "$WORK/fixtures/library2/Pale Harbor" ] || python3 "$H/make_library2.py" "$WORK/fixtures/library2"
+[ -f "$WORK/fixtures/showcase-library/.done" ] || python3 "$H/make_showcase_fixtures.py" "$WORK/fixtures"
 phase probe+fixtures
 # The app runs in a private mount namespace where the work folder is at /mnt/ferrous (neutral_ns.sh), so the
 # paths it shows name no home folder; SHOT_NEUTRAL=0 runs it at the real paths (the pack then paints them over).
