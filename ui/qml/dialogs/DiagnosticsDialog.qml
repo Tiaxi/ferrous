@@ -83,9 +83,9 @@ Components.DialogWindow {
         }
 
         // A batch of the lines logged while it shows, after the rest.
-        function onDiagnosticsLinesAdded(lines, lineCount) {
+        function onDiagnosticsLinesAdded(lines, droppedLines) {
             if (root.visible) {
-                diagnosticsLogView.appendRecords(lines, lineCount)
+                diagnosticsLogView.appendRecords(lines, droppedLines)
             }
         }
     }

@@ -6273,6 +6273,11 @@ void BridgeClientTest::diagnosticsShowsAndCopiesLinesLoggedWhileItIsOpen() {
     for (int n = 0; n < 300; ++n) {
         client.logInfo(QStringLiteral("app"), QStringLiteral("line %1").arg(n));
     }
+    // A line that the view breaks in two still counts as one of the log's.
+    client.logInfo(QStringLiteral("library"), QStringLiteral("Scanning \"/fixture/a\u2028b.flac\"."));
+    const auto asShown = [&client]() {
+        return client.diagnosticsText().replace(QChar::LineSeparator, QLatin1Char('\n'));
+    };
     // Closed, Diagnostics costs the log nothing.
     QVERIFY(!client.diagnosticsShown());
     QVERIFY(client.m_pendingDiagnosticsShownLines.isEmpty());
@@ -6339,6 +6344,7 @@ ApplicationWindow {
     QCOMPARE(view->contentY(), 300.0);
     QCOMPARE(view->selectionStart(), from);
     QCOMPARE(view->selectedText(), selected);
+    QCOMPARE(view->text(), asShown());
 
     // A line logged just before a click is in its copy.
     client.logInfo(QStringLiteral("playback"), QStringLiteral("logged before Copy With Paths"));
@@ -6359,7 +6365,7 @@ ApplicationWindow {
     QCOMPARE(copied.count(QStringLiteral("[playback] info: logged before Copy With Paths\n")), 1);
     QVERIFY(copied.endsWith(QStringLiteral("[playback] info: logged before Copy Without Paths")));
     QTRY_VERIFY(view->text().endsWith(QStringLiteral("[playback] info: logged before Copy Without Paths")));
-    QCOMPARE(view->text().count(QStringLiteral("logged before Copy With Paths")), 1);
+    QCOMPARE(view->text(), asShown());
 
     QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
     QTRY_VERIFY(!dialog->isVisible());

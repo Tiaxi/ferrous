@@ -113,21 +113,13 @@ ApplicationWindow {
         property string diagnosticsLogPath: "/fixture/state/diagnostics.log"
         property int copiesWithoutPaths: 0
         property bool diagnosticsShown: false
-        // Logged and not yet brought to the dialog, as BridgeClient batches.
-        property string pendingLines: ""
         signal diagnosticsChanged()
-        signal diagnosticsLinesAdded(string lines, int lineCount)
+        signal diagnosticsLinesAdded(string lines, int droppedLines)
         function reloadDiagnosticsFromDisk() {}
         function clearDiagnostics() {}
         function openContainingFolder(path) {}
         function copyDiagnosticsWithoutPaths() { copiesWithoutPaths += 1 }
-        function flushDiagnostics() {
-            if (diagnosticsShown && pendingLines.length > 0) {
-                const lines = pendingLines
-                pendingLines = ""
-                diagnosticsLinesAdded(lines, 0)
-            }
-        }
+        function flushDiagnostics() {}
     }
     Dialogs.DiagnosticsDialog {
         id: dialog
@@ -178,10 +170,11 @@ ApplicationWindow {
         QMetaObject::invokeMethod(bridge, "diagnosticsChanged");
     }
 
-    // Lines logged while it is open, as the bridge brings them, of which
-    // the log keeps `lineCount`, or all for 0.
-    void addLines(const QString &lines, int lineCount) const {
-        QMetaObject::invokeMethod(bridge, "diagnosticsLinesAdded", Q_ARG(QString, lines), Q_ARG(int, lineCount));
+    // Lines logged while it is open, as the bridge brings them, with the
+    // first lines the log dropped.
+    void addLines(const QString &lines, int droppedLines) const {
+        QMetaObject::invokeMethod(bridge, "diagnosticsLinesAdded", Q_ARG(QString, lines),
+                                  Q_ARG(int, droppedLines));
     }
 
     // Whether the rows are those that laying out the whole text places.
@@ -668,12 +661,12 @@ void DiagnosticsLogViewTest::linesLoggedWhileOpenKeepThePlaceAndTheSelection() {
     QCOMPARE(log.contentY(), y);
     QCOMPARE(log.view->selectedText(), selected);
 
-    // The log keeps its last 250 lines.
-    const int dropped = static_cast<int>(lines.size()) + 1 - 250;
+    // The log drops its first lines.
+    const int dropped = 53;
     const int droppedCharacters = static_cast<int>(lines.mid(0, dropped).join(QLatin1Char('\n')).size()) + 1;
     lines += QStringLiteral("[app] info: added 2");
     lines = lines.mid(dropped);
-    log.addLines(QStringLiteral("[app] info: added 2"), 250);
+    log.addLines(QStringLiteral("[app] info: added 2"), dropped);
     QVERIFY(log.frame());
     QCOMPARE(log.view->text(), lines.join(QLatin1Char('\n')));
     top -= droppedCharacters;
@@ -688,18 +681,11 @@ void DiagnosticsLogViewTest::linesLoggedWhileOpenKeepThePlaceAndTheSelection() {
     QVERIFY(log.frame());
     lines += QStringLiteral("[app] info: added 3");
     lines.removeFirst();
-    log.addLines(QStringLiteral("[app] info: added 3"), 250);
+    log.addLines(QStringLiteral("[app] info: added 3"), 1);
     QVERIFY(log.frame());
     QCOMPARE(log.view->text(), lines.join(QLatin1Char('\n')));
     QVERIFY(qAbs(log.contentY() - (log.view->contentHeight() - log.view->height())) < 1);
     QCOMPARE(log.view->layoutPasses(), passes);
-
-    // Copy With Paths has what was logged before the click.
-    log.bridge->setProperty("pendingLines", QStringLiteral("[app] info: logged before the click"));
-    QQuickItem *copyAll = itemNamed(log.window->contentItem(), QStringLiteral("diagnosticsCopyAllButton"));
-    QVERIFY(copyAll != nullptr && QMetaObject::invokeMethod(copyAll, "click"));
-    lines += QStringLiteral("[app] info: logged before the click");
-    QCOMPARE(clipboardText(), lines.join(QLatin1Char('\n')));
 
     // Closed, it takes none.
     log.close();

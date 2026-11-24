@@ -111,7 +111,7 @@ void DiagnosticsLogView::setText(const QString &text) {
     }
 }
 
-void DiagnosticsLogView::appendRecords(const QString &text, int keep) {
+void DiagnosticsLogView::appendRecords(const QString &text, int drop) {
     if (text.isEmpty()) {
         return;
     }
@@ -131,8 +131,10 @@ void DiagnosticsLogView::appendRecords(const QString &text, int keep) {
         QAccessible::updateAccessibility(&inserted);
     }
     DiagnosticsLogLayout::Dropped dropped;
-    if (keep > 0 && m_layout.recordCount() > keep) {
-        const int first = m_layout.recordCount() - keep;
+    // A log line with another kind of line break in it is more than one
+    // record, of which one may stay: never one of a line the log still has.
+    if (drop > 0) {
+        const int first = std::min(drop, m_layout.recordCount() - 1);
         const QString removed = announces ? m_layout.text().left(m_layout.recordStart(first)) : QString();
         dropped = m_layout.dropRecordsBefore(first);
         if (announces) {

@@ -666,8 +666,8 @@ signals:
     // The log changed as a whole, so diagnosticsText is to take again.
     void diagnosticsChanged();
     // While diagnosticsShown, a batch of lines logged, joined by newlines,
-    // and the lines the log keeps, the last `lineCount`.
-    void diagnosticsLinesAdded(const QString &lines, int lineCount);
+    // and how many of its first lines the log dropped since the last.
+    void diagnosticsLinesAdded(const QString &lines, int droppedLines);
     void diagnosticsShownChanged();
     void connectedChanged();
     void backendFailureChanged();
@@ -1180,6 +1180,8 @@ private:
     QStringList m_pendingDiagnosticsDiskLines;
     // Logged while Diagnostics is shown, for its next diagnosticsLinesAdded.
     QStringList m_pendingDiagnosticsShownLines;
+    // The lines Diagnostics shows that the log dropped since the last batch.
+    int m_pendingDiagnosticsShownDrops{0};
     // Writes the log's lines off the GUI thread. Destroyed after the
     // destructor's last flush, it writes what still waits.
     std::unique_ptr<DiagnosticsLog::Writer> m_diagnosticsWriter;

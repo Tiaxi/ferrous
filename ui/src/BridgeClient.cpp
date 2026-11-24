@@ -4593,6 +4593,7 @@ void BridgeClient::setDiagnosticsShown(bool shown) {
     // Opening, it takes diagnosticsText, which has them; closed, it takes
     // none.
     m_pendingDiagnosticsShownLines.clear();
+    m_pendingDiagnosticsShownDrops = 0;
     emit diagnosticsShownChanged();
 }
 
@@ -4616,12 +4617,17 @@ void BridgeClient::appendDiagnosticLine(const QString &line) {
         m_diagnosticsLines.erase(
             m_diagnosticsLines.begin(),
             m_diagnosticsLines.begin() + removeCount);
+        if (m_diagnosticsShown) {
+            m_pendingDiagnosticsShownDrops += removeCount;
+        }
     }
     if (m_diagnosticsShown) {
         m_pendingDiagnosticsShownLines.push_back(line);
-        // Of a burst, the lines the log keeps.
+        // Of a burst, the lines the log keeps: the one dropped was never
+        // shown.
         if (m_pendingDiagnosticsShownLines.size() > kMaxDiagnosticsLines) {
             m_pendingDiagnosticsShownLines.removeFirst();
+            --m_pendingDiagnosticsShownDrops;
         }
     }
 }
@@ -4641,13 +4647,16 @@ void BridgeClient::showPendingDiagnosticLines() {
         return;
     }
     const QString lines = m_pendingDiagnosticsShownLines.join(QLatin1Char('\n'));
+    const int dropped = m_pendingDiagnosticsShownDrops;
     m_pendingDiagnosticsShownLines.clear();
-    emit diagnosticsLinesAdded(lines, static_cast<int>(m_diagnosticsLines.size()));
+    m_pendingDiagnosticsShownDrops = 0;
+    emit diagnosticsLinesAdded(lines, dropped);
 }
 
 void BridgeClient::notifyDiagnosticsChanged() {
     // diagnosticsText has the lines that were still to show.
     m_pendingDiagnosticsShownLines.clear();
+    m_pendingDiagnosticsShownDrops = 0;
     emit diagnosticsChanged();
 }
 

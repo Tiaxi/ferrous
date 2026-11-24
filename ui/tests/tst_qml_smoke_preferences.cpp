@@ -47,7 +47,7 @@ ApplicationWindow {
         property string diagnosticsLogPath: "/fixture/diagnostics.log"
         property bool diagnosticsShown: false
         signal diagnosticsChanged()
-        signal diagnosticsLinesAdded(string lines, int lineCount)
+        signal diagnosticsLinesAdded(string lines, int droppedLines)
         function reloadDiagnosticsFromDisk() {}
         function clearDiagnostics() { window.clears++; diagnosticsText = ""; diagnosticsChanged() }
         function flushDiagnostics() {}

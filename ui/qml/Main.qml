@@ -395,7 +395,7 @@ ApplicationWindow {
         signal itunesArtworkChanged()
         signal imageFileDetailsChanged(string path)
         signal diagnosticsChanged()
-        signal diagnosticsLinesAdded(string lines, int lineCount)
+        signal diagnosticsLinesAdded(string lines, int droppedLines)
         signal bridgeError(string message, int category, int severity, string subject, string detail,
             bool failedToPlay)
         signal precomputedSpectrogramChunkReady(var data, int bins, int channelCount, int columns,

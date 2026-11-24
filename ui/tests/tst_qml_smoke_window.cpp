@@ -249,7 +249,7 @@ Item {
         property bool diagnosticsShown: false
         property int sampleRateHz: 48000
         signal diagnosticsChanged()
-        signal diagnosticsLinesAdded(string lines, int lineCount)
+        signal diagnosticsLinesAdded(string lines, int droppedLines)
         signal itunesArtworkChanged()
         signal imageFileDetailsChanged(string path)
         signal precomputedSpectrogramChunkReady(var data, int bins, int channelCount, int columns,
