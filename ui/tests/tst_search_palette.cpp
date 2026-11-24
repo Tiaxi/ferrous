@@ -2478,11 +2478,14 @@ void SearchPaletteTest::enterWhileSearchingActsOnTheQueryAsTyped() {
         harness.field()->setProperty("text", QStringLiteral("mer"));
         QTest::keyClick(harness.window, Qt::Key_Return);
         QTest::keyClick(harness.window, Qt::Key_Down);
+        QCOMPARE(harness.controller->property("pendingAction").toString(), QString());
         answer(harness, merRows(harness.coverUrl));
         harness.field()->setProperty("text", QStringLiteral("merx"));
         QTest::keyClick(harness.window, Qt::Key_Return);
+        QCOMPARE(harness.controller->property("pendingAction").toString(), QStringLiteral("activate"));
         answer(harness, {});
         QCOMPARE(harness.model.rowCount(), 0);
+        QCOMPARE(harness.controller->property("pendingAction").toString(), QString());
         harness.field()->setProperty("text", QStringLiteral("meridian"));
         answer(harness, meridianRows(harness.coverUrl), {1, 2, 26});
         QVERIFY(none(harness));

@@ -455,6 +455,7 @@ private slots:
     void searchProtocolTotalsAndExpansion();
     void searchSuggestionAndMoreRowsArriveWithTheirResults();
     void searchDeferredResultsRejectSupersededQuery();
+    void searchTypedBackToTheQuerySentEndsItsSearch();
     void searchModelDelegateTypeRoleIsExposed();
     void searchModelDelegateTypeValuesCorrect();
     void clearSearchQueryRetainsModelRows();
@@ -10960,6 +10961,44 @@ void BridgeClientTest::searchDeferredResultsRejectSupersededQuery() {
     client.applyDeferredSearchDisplayRows();
     QCOMPARE(client.m_globalSearchModel.rowCount(), 0);
     QVERIFY(client.m_globalSearchBusy);
+}
+
+// A query edited and typed back to the one sent last before the debounce
+// ends is sent again, and its answer ends the search the edits started:
+// it stayed busy, so the palette held an Enter pressed then for good (#723).
+void BridgeClientTest::searchTypedBackToTheQuerySentEndsItsSearch() {
+    BridgeClient client;
+    QVERIFY(client.m_ffiBridge != nullptr);
+    // "mer" was sent and its results shown.
+    client.setGlobalSearchQuery(QStringLiteral("mer"));
+    client.m_globalSearchDebounceTimer.stop();
+    client.flushGlobalSearchQuery();
+    const quint32 merSeq = client.m_latestGlobalSearchSeqSent;
+    QCOMPARE(client.m_lastGlobalSearchQuerySent, QStringLiteral("mer"));
+    client.m_globalSearchBusy = false;
+
+    client.setGlobalSearchQuery(QStringLiteral("merx"));
+    client.setGlobalSearchQuery(QStringLiteral("mer"));
+    QVERIFY(client.m_globalSearchBusy);
+    QVERIFY(client.m_globalSearchDebounceTimer.isActive());
+    client.m_globalSearchDebounceTimer.stop();
+    client.flushGlobalSearchQuery();
+    QVERIFY(client.m_latestGlobalSearchSeqSent != merSeq);
+
+    BridgeClient::SearchWorkerOutputFrame frame;
+    frame.seq = client.m_latestGlobalSearchSeqSent;
+    frame.trackCount = 1;
+    frame.totals = {0, 0, 1};
+    GlobalSearchResultsModel::SearchDisplayRow row;
+    row.kind = "item";
+    row.rowType = "track";
+    row.label = "Meridian Line";
+    frame.displayRows.push_back(row);
+    QVERIFY(client.applyPreparedSearchResultsFrame(std::move(frame)));
+    client.applyDeferredSearchDisplayRows();
+    QVERIFY(!client.m_globalSearchBusy);
+    QCOMPARE(client.m_globalSearchModel.rowCount(), 2);
+    isolateBridgeClient(client);
 }
 
 void BridgeClientTest::searchSuggestionAndMoreRowsArriveWithTheirResults() {

@@ -4932,8 +4932,10 @@ void BridgeClient::flushGlobalSearchQuery() {
         }
         return;
     }
+    // A query typed back to the one sent last is sent again while busy:
+    // only its answer ends the search the edits started (#723).
     if (m_pendingGlobalSearchQuery == m_lastGlobalSearchQuerySent
-        && m_globalSearchLimit == m_lastGlobalSearchLimitSent) {
+        && m_globalSearchLimit == m_lastGlobalSearchLimitSent && !m_globalSearchBusy) {
         if (m_profileUiEnabled) {
             FERROUS_PROFILE_LOG_DIAGNOSTIC(
                 QStringLiteral("search"),
