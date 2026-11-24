@@ -752,7 +752,7 @@ SCOPES.update({
     # The library, the search palette and the menus
     "library-search": dict(
         title="The library, search and the menus",
-        sessions=["main", "menus", "roots", "density", "bigfont", "wide-bigfont", "narrow-bigfont", "hidpi", "motion-ui", "contrast"],
+        sessions=["main", "menus", "roots", "density", "bigfont", "wide-bigfont", "narrow-bigfont", "hidpi", "motion-ui", "contrast", "empty"],
         sheets=[
             ("lib-states", "The library's row states at 1:1 (the pane's top): hover, click, keys; dark", "dark",
              [[("library", st, "subject", lb, dict(part=(0, 0, 1, pt), lh=16, gap=6)) for st, lb, pt in row]
@@ -776,7 +776,11 @@ SCOPES.update({
              "artist, a library folder's root row; dark", "dark",
              [[("menu", st, "popup", lb, dict(margin=40, lh=16, gap=6)) for st, lb in row]
               for row in ((("context-library-track", "On a track"), ("context-library-album", "On an album")),
-                          (("context-library-artist", "On an artist"), ("context-library-root", "On a folder's root row")))]),
+                          (("context-library-artist", "On an artist"), ("context-library-root", "On a folder's root row")))]
+             # (the pane with no library folder yet: the queue beside it holds the first-run prompt, in the full shot)
+             + [[("main", "first-run-empty-library", (0, 0.075, 0.23, 0.45),
+                  "No library folder yet (first run; the queue's prompt is in shots/main_first-run-empty-library_dark_1x_1600x1000.png)",
+                  dict(lh=16, gap=6))]]),
             ("search-states", "The search palette (Ctrl+F) at 1:1; dark", "dark",
              [[("search", "empty", "popup", "Empty (its footer keys)", dict(margin=4, lh=16, gap=6))],
               [("search", "results", "popup", "\u201cmer\u201d: results", dict(margin=4, lh=16, gap=6))],
@@ -786,7 +790,7 @@ SCOPES.update({
             ("search-more", "The search palette at 1:1: many results, hover, help, non-ASCII; light", "light",
              [[("search", "results-many", "popup", "Many results (\u201cl\u201d): the groups cut", dict(margin=4, lh=16, gap=6))],
               # (down to under the hovered row, where its tooltip shows so as to leave the field clear)
-              [("search", "result-hover", "popup", "A result hovered: its tooltip (the top)", dict(margin=4, part=(0, 0, 1, 0.41), lh=16, gap=6))],
+              [("search", "result-hover", "popup", "A result hovered (the top; its tooltip shows beside the palette: shots/search_result-hover_light_1x_1600x1000.png)", dict(margin=4, part=(0, 0, 1, 0.41), lh=16, gap=6))],
               [("search", "help-hover", (0.24, 0.076, 0.555, 0.115), "Help hovered: its tooltip", dict(lh=16, gap=6))],
               [("search", "results-unicode", "popup", "\u201c\u00f8rn\u201d (the top)", dict(margin=4, part=(0, 0, 1, 0.3), lh=16, gap=6))]]),
             ("search-24pt", "The search palette at 24 pt, 1:1; dark", "dark",
@@ -822,8 +826,8 @@ SCOPES.update({
              "the amber mark at each depth; Show in Library's result"),
             ("sheet", "lib-density", "dark", "320 artists, a row focused beside the scrollbar; two folders; 24 pt at 1920x1200",
              "density and scanning; the root rows; the focused row's right edge against the scrollbar's lane"),
-            ("sheet", "lib-menus", "dark", "The library's keyboard menus on a track, album, artist and root row",
-             "where each opens against its row; the items and their order"),
+            ("sheet", "lib-menus", "dark", "The library's keyboard menus on a track, album, artist and root row; the empty library",
+             "where each opens against its row; the items and their order; what the empty pane says"),
             ("strip", "pair:library-expand-collapse", "dark", "An artist expanded (left) and collapsed (right) with the keyboard",
              "the rows' motion; content cuts"),
             ("sheet", "search-states", "dark", "The search palette: empty, results, keyboard selection, no results",
