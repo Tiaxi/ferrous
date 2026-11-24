@@ -2820,7 +2820,7 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
     // the dialog's first line. A search that ends without results says how
     // in a semibold heading, the window's whole answer, with a line under
     // it: "No artwork found" under the search's glyph, and a failure, with
-    // the system's words, under a warning glyph, so it does not read as
+    // the system's words, under the error glyph, so it does not read as
     // finding nothing. The glyph is 48 px in the spinner's place (32 px
     // and a lone line were under-scaled for the window's answer).
     QTemporaryDir dir;
@@ -2899,24 +2899,25 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
             // Laid out once it shows.
             QTRY_VERIFY2(sceneRectOf(heading).bottom() <= sceneRectOf(message).top(), at.constData());
         }
-        // A failed search has a warning glyph where the spinner is while
-        // searching: 32 px, a mask in the negative colour as every failure's
-        // glyph is, above the heading.
-        QQuickItem *warning = itemNamed(content, QStringLiteral("itunesArtworkFailureIcon"));
-        QVERIFY2(warning != nullptr, at.constData());
-        QCOMPARE(warning->isVisible(), failed);
+        // A failed search has the error glyph where the spinner is while
+        // searching: 48 px, above the heading. A failed search is an error,
+        // so it is the app's error mark, the ring with a cross, in the
+        // negative colour, as every error's glyph is (it was the warning's
+        // triangle in the negative colour, which told the two apart by
+        // colour alone).
+        QQuickItem *failure = itemNamed(content, QStringLiteral("itunesArtworkFailureIcon"));
+        QVERIFY2(failure != nullptr, at.constData());
+        QCOMPARE(failure->isVisible(), failed);
         if (failed) {
-            // The app's own warning mark, whose "!" survives the mask
-            // (dialog-warning drew a plain triangle).
-            QVERIFY2(warning->property("source").toString().endsWith(QStringLiteral("assets/status-warning.svg")),
-                     qPrintable(warning->property("source").toString()));
-            QVERIFY(warning->property("isMask").toBool());
-            QCOMPARE(warning->property("color").value<QColor>().rgba(),
+            QVERIFY2(failure->property("source").toString().endsWith(QStringLiteral("assets/status-error.svg")),
+                     qPrintable(failure->property("source").toString()));
+            QVERIFY(failure->property("isMask").toBool());
+            QCOMPARE(failure->property("color").value<QColor>().rgba(),
                      palette->property("negative").value<QColor>().rgba());
-            QTRY_COMPARE(sceneRectOf(warning).size(), QSizeF(48, 48));
-            QCOMPARE(sceneRectOf(warning).top(), sceneRectOf(placeholder).top());
-            QCOMPARE(sceneRectOf(warning).center().x(), sceneRectOf(placeholder).center().x());
-            QVERIFY2(sceneRectOf(warning).bottom() < sceneRectOf(heading).top(), at.constData());
+            QTRY_COMPARE(sceneRectOf(failure).size(), QSizeF(48, 48));
+            QCOMPARE(sceneRectOf(failure).top(), sceneRectOf(placeholder).top());
+            QCOMPARE(sceneRectOf(failure).center().x(), sceneRectOf(placeholder).center().x());
+            QVERIFY2(sceneRectOf(failure).bottom() < sceneRectOf(heading).top(), at.constData());
         }
         if (searching) {
             QCOMPARE(sceneRectOf(busy).top(), sceneRectOf(placeholder).top());
@@ -2937,7 +2938,7 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
             QVERIFY2(sceneRectOf(found).bottom() < sceneRectOf(heading).top(), at.constData());
         }
         // The only glyph: the busy indicator's while searching, the
-        // warning's when the search failed, the search's with nothing found.
+        // error's when the search failed, the search's with nothing found.
         int glyphs = 0;
         const std::function<void(QQuickItem *)> countGlyphs = [&](QQuickItem *item) {
             if (!item->isVisible()) {
@@ -3707,7 +3708,7 @@ void AlbumArtSmokeTest::itunesArtworkScalesAsAWholeWithTheFont() {
                  && sceneRectOf(loadingDetails).bottom() <= sceneRectOf(loadingRow).bottom() - 8 + 0.5,
              qPrintable(loadingAt));
 
-    // The search's glyph, the spinner or a failure's warning mark, is
+    // The search's glyph, the spinner or a failure's error mark, is
     // 48 px with the default font and scaled with a larger one, as the
     // text under it (it was 32 px over 24 pt text, and 32 px was small for
     // the window's whole answer).
@@ -3727,10 +3728,10 @@ void AlbumArtSmokeTest::itunesArtworkScalesAsAWholeWithTheFont() {
     bridge->setProperty("itunesArtworkLoading", false);
     bridge->setProperty("itunesArtworkErrorText", QStringLiteral("Connection refused"));
     bridge->setProperty("itunesArtworkFailed", true);
-    QQuickItem *warning = itemNamed(opened.content, QStringLiteral("itunesArtworkFailureIcon"));
-    QVERIFY(warning != nullptr);
-    QTRY_VERIFY(warning->isVisible());
-    QTRY_COMPARE(warning->size(), QSizeF(stateGlyph, stateGlyph));
+    QQuickItem *failure = itemNamed(opened.content, QStringLiteral("itunesArtworkFailureIcon"));
+    QVERIFY(failure != nullptr);
+    QTRY_VERIFY(failure->isVisible());
+    QTRY_COMPARE(failure->size(), QSizeF(stateGlyph, stateGlyph));
 }
 
 void AlbumArtSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
