@@ -1351,17 +1351,21 @@ void UiMenusTest::menuBarTellsHoverFromOpen() {
 void UiMenusTest::menuItemGlyphsGrowWithTheFont_data() {
     QTest::addColumn<qreal>("pointSize");
     QTest::addColumn<int>("glyph");
-    QTest::newRow("10 pt") << 10.0 << 16;
-    QTest::newRow("24 pt") << 24.0 << 32;
-    QTest::newRow("40 pt") << 40.0 << 32;
+    QTest::addColumn<int>("gap");
+    QTest::newRow("10 pt") << 10.0 << 16 << 5;
+    QTest::newRow("24 pt") << 24.0 << 32 << 8;
+    QTest::newRow("40 pt") << 40.0 << 32 << 8;
 }
 
 // A menu item's glyph grows with the font as its words do, from 16 px at
 // the default font to 32 px and no larger, in the menu bar's menus and the
-// context menus, with the gap to the words as at the default font.
+// context menus, and the gap to the words grows with it: the row's
+// spacing at the default font, a quarter of the glyph at 32 px. At the
+// row's spacing, Previous and Next crowded their words at 24 pt.
 void UiMenusTest::menuItemGlyphsGrowWithTheFont() {
     QFETCH(qreal, pointSize);
     QFETCH(int, glyph);
+    QFETCH(int, gap);
     ScopedApplicationFont font(pointSize);
     MainWindowFixture main(wideWindow());
     QQuickWindow *window = main.window;
@@ -1396,9 +1400,8 @@ void UiMenusTest::menuItemGlyphsGrowWithTheFont() {
             QVERIFY2(icon->isVisible(), qPrintable(name));
             QCOMPARE(icon->width(), qreal(glyph));
             QCOMPARE(icon->height(), qreal(glyph));
-            const qreal gap = label->x() - icon->mapToItem(row, QPointF(icon->width(), 0)).x();
-            QCOMPARE(gap, row->property("spacing").toReal());
-            QVERIFY2(gap >= 4.0, qPrintable(QStringLiteral("%1: %2").arg(name).arg(gap)));
+            const qreal drawnGap = label->x() - icon->mapToItem(row, QPointF(icon->width(), 0)).x();
+            QVERIFY2(qFuzzyCompare(drawnGap, qreal(gap)), qPrintable(QStringLiteral("%1: %2").arg(name).arg(drawnGap)));
             // The row holds the glyph.
             QVERIFY2(item->height() >= glyph + item->property("topPadding").toReal()
                                            + item->property("bottomPadding").toReal(),

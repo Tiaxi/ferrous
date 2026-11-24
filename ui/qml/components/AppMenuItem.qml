@@ -49,6 +49,11 @@ MenuItem {
                                               Kirigami.Units.iconSizes.sizeForLabels)
     icon.width: root.glyphSize
     icon.height: root.glyphSize
+    // The gap between the glyphs' column and the words, which grows with
+    // the glyph as the words do: the row's spacing up to 20 px glyphs,
+    // and a quarter of the glyph above, 8 px at 32 px. At the row's
+    // spacing a large glyph crowded its words.
+    readonly property real glyphGap: Math.max(row.spacing, Math.round(root.icon.width / 4))
 
     // `mnemonicLabel`, the words with "&" before the mnemonic and "&&" for
     // an ampersand, as styled text: every character escaped, and the
@@ -81,6 +86,7 @@ MenuItem {
     }
 
     contentItem: RowLayout {
+        id: row
         objectName: "appMenuItemRow"
 
         // The check mark's own column, in every item of a menu that has
@@ -117,6 +123,7 @@ MenuItem {
             objectName: "appMenuItemLabel"
             Layout.alignment: Qt.AlignVCenter
             Layout.fillWidth: true
+            Layout.leftMargin: glyphColumn.visible ? root.glyphGap - row.spacing : 0
             // The words, with the mnemonic underlined while Alt is held,
             // as Breeze shows them; the words' own markup shows as text.
             textFormat: Text.StyledText
