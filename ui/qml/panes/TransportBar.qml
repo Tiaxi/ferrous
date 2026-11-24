@@ -670,24 +670,33 @@ ToolBar {
         // Whether it is to show, as its delay begins, and to hide, as its
         // fade out begins: a popup is `visible` until it has faded out.
         property bool wanted: false
+        // Whether a press on its control shows it at once (a button's
+        // hides while it is held down, which it says only after the press).
+        property bool showsOnPress: false
         // Set together with the delay, which the tooltip reads as it is
         // made visible: a binding of each could see the other still
-        // unchanged. The style's delay, or none on a press, or with the
-        // pointer on its control while the lane is warm, also for one the
-        // keyboard's focus shows that still waits (it waited on, and the
-        // lane stood empty). Without the pointer, the delay: in the gap
-        // between two buttons the focused volume's opened for a moment.
+        // unchanged. The style's delay, or none on a press that shows it,
+        // or with the pointer on its control while the lane is warm, also
+        // for one the keyboard's focus shows that still waits (it waited
+        // on, and the lane stood empty). Without the pointer, the delay: in
+        // the gap between two buttons the focused volume's opened for a
+        // moment.
         visible: false
         delay: 0
         function showOrHide() {
-            delay = rowItem.pressed || (rowItem.hovered && root.laneWarm) ? 0 : Kirigami.Units.toolTipDelay
+            delay = (showsOnPress && rowItem.pressed) || (rowItem.hovered && root.laneWarm)
+                ? 0 : Kirigami.Units.toolTipDelay
             visible = wanted
         }
         onWantedChanged: showOrHide()
         Connections {
             target: laneToolTip.rowItem
             function onHoveredChanged() { laneToolTip.showOrHide() }
-            function onPressedChanged() { laneToolTip.showOrHide() }
+            function onPressedChanged() {
+                if (laneToolTip.showsOnPress) {
+                    laneToolTip.showOrHide()
+                }
+            }
         }
         parent: rowItem
         y: root.laneY(rowItem, height)
@@ -1822,6 +1831,7 @@ ToolBar {
                 // A press shows it at once, also within the hover's delay
                 // (with the delay in a binding of its own, a press within
                 // it waited the delay out again).
+                showsOnPress: true
                 wanted: (volumeSlider.hovered || volumeSlider.visualFocus
                     || volumeSlider.pressed) && root.laneFreeFor(volumeSlider)
                 message: volumeSlider.toolTipText

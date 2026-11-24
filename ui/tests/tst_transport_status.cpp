@@ -1214,6 +1214,20 @@ void TransportStatusTest::transportToolTipsPassAlongTheRowAtOnce() {
     QVERIFY(!playTip->property("visible").toBool());
     QTest::mouseMove(harness.window, sceneCentre(buttons.at(1)));
     QVERIFY(playTip->property("visible").toBool());
+
+    // A click within the delay shows none: a button's tooltip hides while
+    // it is held down (the press opened it at once, then sent it out).
+    harness.root->property("startButton").value<QQuickItem *>()->forceActiveFocus(Qt::TabFocusReason);
+    QTest::mouseMove(harness.window, QPointF(bar.center().x(), sceneRect(transport).bottom() + 60).toPoint());
+    QTRY_VERIFY(!transport->property("laneWarm").toBool());
+    QObject *stopTip = buttonToolTip(buttons.at(2));
+    QTest::mouseMove(harness.window, sceneCentre(buttons.at(2)));
+    QTest::mousePress(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(buttons.at(2)));
+    QVERIFY(buttons.at(2)->property("down").toBool());
+    QVERIFY(!stopTip->property("visible").toBool());
+    QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(buttons.at(2)));
+    QVERIFY(!stopTip->property("visible").toBool());
+    QTRY_VERIFY(stopTip->property("opened").toBool());
 }
 
 void TransportStatusTest::seekWaveformMeetsItsContrastAsDrawn_data() {
