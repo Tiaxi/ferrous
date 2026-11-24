@@ -230,20 +230,23 @@ ToolBar {
 
     implicitWidth: contentItem.implicitWidth + leftPadding + rightPadding
     // The row of controls: 48 px, or the buttons and 8 px above and below
-    // them.
-    readonly property real rowHeight: Math.max(48, root.buttonSize + 16)
-    // The transport's popups have one place: a lane above the row, in the
-    // transport's band. The seek bar's time box, the buttons' tooltips,
-    // Mute's and the volume's open there, so the band has one rail (the
-    // buttons' opened under the band, over the cover and the queue's
-    // header, and Mute's and the volume's above it). Under the bar the
-    // time box hung over the queue's header (H5) and, at a large font, the
-    // now-playing title; above the band it met the menu's titles; beside
-    // its line on the waveform it hid what the scrub reads. The lane ends
-    // laneRingGap clear of the seek bar's focus ring and of the buttons',
-    // and its boxes are a line of text and a little room above and below
-    // it, so the band grows by no more than the lane needs beyond the room
-    // above the row. The lane's bottom, up from the row's centre line:
+    // them, or the seek bar's focus ring and 5 px above and below it, so
+    // that at a large font the ring never comes within 2 px of the seam.
+    readonly property real rowHeight: Math.max(48, root.buttonSize + 16,
+        seekSlider.boxHeight + 2 * seekSlider.focusRingOutset + 10)
+    // The transport's popups have one place: a lane over the row, in the
+    // menu bar's row, borrowed while a transport popup is open. The seek
+    // bar's time box, the buttons' tooltips, Mute's and the volume's open
+    // there, so the band has one rail (the buttons' opened under the band,
+    // over the cover and the queue's header, and Mute's and the volume's
+    // above it). Under the bar the time box hung over the queue's header
+    // (H5) and, at a large font, the now-playing title; beside its line on
+    // the waveform it hid what the scrub reads; a lane of the band's own,
+    // empty at rest, made the band 80 px tall for its 48 px row (158 px at
+    // 24 pt). The lane ends laneRingGap clear of the seek bar's focus ring
+    // and of the buttons', and its boxes are a line of text and a little
+    // room above and below it. The lane's bottom, up from the row's centre
+    // line:
     readonly property real laneClearance: Math.max(
         seekSlider.boxHeight / 2 + seekSlider.focusRingOutset + root.laneRingGap,
         root.buttonSize / 2 + root.buttonFocusRingOutset + root.laneRingGap)
@@ -252,13 +255,34 @@ ToolBar {
     readonly property int laneRingGap: 3
     // The line's own leading, which grows with the font, is most of the
     // room around its figures; the style's 6 px above and below it made
-    // the lane, which is empty at rest, a third taller.
+    // the lane a third taller.
     readonly property real laneToolTipPadding: 2
     readonly property real laneBoxHeight: seekTimeBox.implicitHeight
-    // What the band grows by, above the row, in whole pixels: the lane
-    // starts at the band's top, under the menu's titles.
-    readonly property real laneGrowth: Math.max(0,
-        Math.ceil(root.laneBoxHeight + root.laneClearance - root.rowHeight / 2))
+    // Between a box in the lane and the window's top edge.
+    readonly property int laneWindowTopMargin: 4
+    // The room above the band that the lane borrows: the menu bar's row,
+    // while the window shows one.
+    readonly property var windowMenuBar: ApplicationWindow.menuBar
+    readonly property real popupHeadroomAbove: root.windowMenuBar && root.windowMenuBar.visible
+        ? root.windowMenuBar.height : 0
+    // Whether a menu of the menu bar is open: the lane then gives the row
+    // back, as a box there would stand over the open menu's title (with
+    // the pointer resting on the seek bar, Alt+P left the time box over
+    // "Playback").
+    readonly property bool windowMenuOpen: {
+        const menus = root.windowMenuBar && root.windowMenuBar.visible ? root.windowMenuBar.menus : []
+        for (let i = 0; i < menus.length; ++i) {
+            if (menus[i].visible) {
+                return true
+            }
+        }
+        return false
+    }
+    // What the band grows by, above the row, in whole pixels: nothing
+    // under the menu bar, whose row holds the lane; without one, as much
+    // as the lane needs beyond the room above the row.
+    readonly property real laneGrowth: Math.max(0, Math.ceil(root.laneBoxHeight + root.laneClearance
+        + root.laneWindowTopMargin - root.rowHeight / 2 - root.popupHeadroomAbove))
     // The lane's bottom, in the transport's coordinates.
     readonly property real laneBottom: root.snapped(root.laneGrowth + root.rowHeight / 2 - root.laneClearance)
     // The y of a box in the lane, `boxHeight` tall, whose parent is
@@ -270,26 +294,9 @@ ToolBar {
         }
         return root.laneBottom - boxHeight - root.topPadding - rowY
     }
-    // The room in the row above and under the glyphs' ink.
-    readonly property real rowInkInset: (root.rowHeight - root.smallGlyphSize) / 2
-    // The room under the row, which balances the lane above it: the band
-    // over the glyphs under 4:3 of the band under them, by a whole pixel
-    // at most, so that with the menu's room under its titles the eye sees
-    // at most 3:2 (the empty lane over the row and 8 px under it sank the
-    // controls onto the seam, 44 px above their ink against 17 px under
-    // it; at exactly 4:3, 36 against 27 px at 10 pt, the eye saw 41:27).
-    readonly property real wantedBalanceRoom: Math.max(0,
-        Math.floor((root.laneGrowth + root.rowInkInset) * 3 / 4) + 1 - root.rowInkInset)
-    // The height the window has beyond its least, of which the room takes
-    // what it wants: in the least window, at a large font, the panes keep
-    // their minimums and the room gives way (it would make the window's
-    // least height 736 px at 24 pt, over the 720 px it fits).
-    property real balanceRoomLimit: Infinity
-    readonly property real balanceRoom: Math.max(0, Math.min(root.wantedBalanceRoom,
-        Math.floor(root.balanceRoomLimit)))
-    // The band without the room: what the window's least height holds.
-    readonly property real leastHeight: root.rowHeight + root.laneGrowth
-    implicitHeight: root.leastHeight + root.balanceRoom
+    // The band at rest is its row: under the menu's titles, the room the
+    // menu bar leaves under them and the row balance by themselves.
+    implicitHeight: root.rowHeight + root.laneGrowth
     // The content's inset, on both sides, measured to what is drawn, as
     // the transport's other gaps are: Previous's glyph starts where the
     // library's rows and the status bar's text do, with its button's clear
@@ -303,7 +310,7 @@ ToolBar {
     leftPadding: Math.max(root.buttonFocusRingOutset, Math.round(root.edgeInset - root.smallGlyphInset))
     rightPadding: root.edgeInset
     topPadding: root.laneGrowth
-    bottomPadding: root.balanceRoom
+    bottomPadding: 0
     // Chrome. The seam under it is the main window's.
     background: Rectangle {
         objectName: "transportBackground"
@@ -465,14 +472,18 @@ ToolBar {
         border.color: root.laneBoxEdge
     }
 
-    // A tooltip in the lane above the row, of `rowItem`, an item of the
-    // row: one line, as the time box is (the style's label wrapped Mute's
-    // to two lines at a large font, past the lane's top).
+    // A tooltip in the lane over the row, the menu bar's row, borrowed
+    // while it is open, of `rowItem`, an item of the row: one line, as the
+    // time box is (the style's label wrapped Mute's to two lines at a large
+    // font, past the lane's top). The lane keeps it off the window's top
+    // edge, so the popup's own margin, which would push it down onto the
+    // focus rings, is none.
     component LaneToolTip: Components.PlainToolTip {
         id: laneToolTip
         required property Item rowItem
         parent: rowItem
         y: root.laneY(rowItem, height)
+        topMargin: 0
         topPadding: root.laneToolTipPadding
         bottomPadding: root.laneToolTipPadding
         background: LaneBox {}
@@ -552,6 +563,7 @@ ToolBar {
             objectName: "transportButtonToolTip"
             rowItem: transportButton
             visible: (transportButton.hovered || transportButton.visualFocus) && !transportButton.down
+                && !root.windowMenuOpen
             delay: Kirigami.Units.toolTipDelay
             message: transportButton.toolTipText
         }
@@ -1260,11 +1272,12 @@ ToolBar {
                 restoreMode: Binding.RestoreNone
             }
 
-            // The time in a native tooltip in the transport's lane above
-            // the bar, over the line it names: the playhead while a gesture
-            // moves it, otherwise the hovering pointer's line. It hides none
-            // of the waveform it reads (beside the line it covered some
-            // 40 px of it where the pointer was).
+            // The time in a native tooltip in the transport's lane, the
+            // menu bar's row, borrowed while it is open, over the line it
+            // names: the playhead while a gesture moves it, otherwise the
+            // hovering pointer's line. It hides none of the waveform it
+            // reads (beside the line it covered some 40 px of it where the
+            // pointer was).
             ToolTip {
                 id: seekTimeBox
                 objectName: "seekTimeBox"
@@ -1272,7 +1285,7 @@ ToolBar {
                 // It follows the pointer and the gesture, not clicks or keys.
                 closePolicy: Popup.NoAutoClose
                 readonly property bool shown: (seekSlider.adjusting || seekSlider.hoverTimeShown)
-                    && seekSlider.seekAllowed
+                    && seekSlider.seekAllowed && !root.windowMenuOpen
                 // Whether the time it shows, or last showed, is the hover's
                 // rather than a gesture's: the hover line then shows, and
                 // fades out, with it.
@@ -1328,10 +1341,10 @@ ToolBar {
                     Math.min(seekSlider.width - width, centredX)))
                 x: placedX
                 // At the lane's bottom, clear of the bar's focus ring, at
-                // every point of the bar: there is no other place to jump
-                // to (near the menu's titles it went under the bar, ~54 px
-                // down, over the now-playing title at 24 pt). Its padding
-                // is the lane's.
+                // every point of the bar, over the menu's titles there:
+                // there is no other place to jump to (near the titles it
+                // went under the bar, ~54 px down, over the now-playing
+                // title at 24 pt). Its padding is the lane's.
                 y: root.laneY(seekSlider, height)
                 topPadding: root.laneToolTipPadding
                 bottomPadding: root.laneToolTipPadding
@@ -1504,6 +1517,7 @@ ToolBar {
                 objectName: "transportButtonToolTip"
                 rowItem: muteButton
                 visible: (muteButton.hovered || muteButton.visualFocus) && !muteButton.down
+                    && !root.windowMenuOpen
                 delay: Kirigami.Units.toolTipDelay
                 message: muteButton.toolTipText
             }
@@ -1586,8 +1600,8 @@ ToolBar {
                 id: volumeToolTip
                 objectName: "volumeToolTip"
                 rowItem: volumeSlider
-                readonly property bool wanted: volumeSlider.hovered || volumeSlider.visualFocus
-                    || volumeSlider.pressed
+                readonly property bool wanted: (volumeSlider.hovered || volumeSlider.visualFocus
+                    || volumeSlider.pressed) && !root.windowMenuOpen
                 // Set together with the delay, which the tooltip reads as it
                 // is made visible: a binding of each could see the other
                 // still unchanged, and a press within the hover's delay then

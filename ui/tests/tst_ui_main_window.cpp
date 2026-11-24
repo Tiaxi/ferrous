@@ -1157,6 +1157,8 @@ private slots:
     void seekTimeStaysOverItsLine();
     void seekTimeBoxIsCrispWithoutAShadow_data();
     void seekTimeBoxIsCrispWithoutAShadow();
+    void seekTimeBoxGivesWayToAnOpenMenu_data();
+    void seekTimeBoxGivesWayToAnOpenMenu();
     void transportRowSitsBalancedInItsBand_data();
     void transportRowSitsBalancedInItsBand();
     void contentIsOneSheetWithFourSeams();
@@ -1364,28 +1366,34 @@ void UiMainWindowTest::seekTimeStaysOverItsLine_data() {
     QTest::addColumn<int>("windowWidth");
     QTest::addColumn<int>("windowHeight");
     QTest::addColumn<bool>("dark");
+    QTest::addColumn<qreal>("bandHeight");
     // The default window and the narrow one, at 10 pt and at 24 pt, whose
     // time's box is widest on the narrow window's shortest bar, and whose
-    // titles run past the sidebar in the wide window.
-    QTest::newRow("10 pt, 1600 by 1000, dark") << 10.0 << 1600 << 1000 << true;
-    QTest::newRow("10 pt, 1000 by 720, light") << 10.0 << 1000 << 720 << false;
-    QTest::newRow("24 pt, 1600 by 1000, light") << 24.0 << 1600 << 1000 << false;
-    QTest::newRow("24 pt, 1000 by 720, dark") << 24.0 << 1000 << 720 << true;
+    // titles run past the sidebar in the wide window; 1000 by 720 at 24 pt
+    // is the least window. The band is its row in each: 48 px, and at 24 pt
+    // the seek bar's focus ring and 5 px above and below it.
+    QTest::newRow("10 pt, 1600 by 1000, dark") << 10.0 << 1600 << 1000 << true << 48.0;
+    QTest::newRow("10 pt, 1000 by 720, light") << 10.0 << 1000 << 720 << false << 48.0;
+    QTest::newRow("24 pt, 1600 by 1000, light") << 24.0 << 1600 << 1000 << false << 82.0;
+    QTest::newRow("24 pt, 1000 by 720, dark") << 24.0 << 1000 << 720 << true << 82.0;
 }
 
-// The seek bar's time has one place: a lane above the bar, in the
-// transport's band, centred on the line it reads, wherever the pointer is
-// on the bar, and within the bar at either end. It covers none of the
-// waveform, no menu title, nothing of the now-playing card or the queue's
-// header (it flipped under the bar near the start, ~54 px down and over
-// the now-playing title at 24 pt), and stays 3 px clear of the bar's and
-// the buttons' focus rings. The band grows by no more than the lane needs,
+// The seek bar's time has one place: a lane over the bar, in the menu
+// bar's row, borrowed while the box is open, centred on the line it reads,
+// wherever the pointer is on the bar, and within the bar at either end. It
+// covers none of the waveform, nothing of the now-playing card or the
+// queue's header (it flipped under the bar near the start, ~54 px down and
+// over the now-playing title at 24 pt), stays 3 px clear of the bar's and
+// the buttons' focus rings and off the window's top edge, and covers a
+// menu title's text whole or not at all. The band is its row (a lane of its
+// own, empty at rest, made it 80 px for a 48 px row, and 158 px at 24 pt),
 // and the buttons, the bar, the time and the volume keep one centre line.
 void UiMainWindowTest::seekTimeStaysOverItsLine() {
     QFETCH(qreal, pointSize);
     QFETCH(int, windowWidth);
     QFETCH(int, windowHeight);
     QFETCH(bool, dark);
+    QFETCH(qreal, bandHeight);
     const auto restorePalette = useDarkPalette(dark);
     const ScopedApplicationFont font(pointSize);
     MainWindowFixture fixture(sized(windowWidth, windowHeight));
@@ -1427,18 +1435,50 @@ void UiMainWindowTest::seekTimeStaysOverItsLine() {
                  qPrintable(item->objectName() + QLatin1Char(' ') + describeRect(sceneRect(item))
                             + QStringLiteral(", the bar ") + describeRect(bar)));
     }
-    // The band ends at its seam, and holds the row with 8 px under the
-    // buttons, or more where the band's 48 px leave more.
+    // The band is its row, right under the menu bar, and ends at its seam;
+    // it holds the row with 8 px under the buttons, or more where the
+    // band's 48 px leave more.
+    QCOMPARE(band.height(), bandHeight);
+    QCOMPARE(band.top(), sceneRect(menuBar).bottom());
     QCOMPARE(sceneRect(seam).top(), band.bottom());
     QVERIFY(band.bottom() - sceneRect(playPause).bottom() >= 8 - 0.5);
 
+    // The titles, and their text's ink, as drawn at rest.
     QList<QRectF> titles;
+    QList<std::pair<qreal, qreal>> titleInks;
+    const Drawn atRest(window);
     for (int i = 0; i < menuBar->property("count").toInt(); ++i) {
         QQuickItem *title = nullptr;
         QVERIFY(QMetaObject::invokeMethod(menuBar, "itemAt", Q_RETURN_ARG(QQuickItem *, title), Q_ARG(int, i)));
         QVERIFY(title != nullptr);
-        titles.append(sceneRect(title));
+        const QRectF titleRect = sceneRect(title);
+        titles.append(titleRect);
+        const QColor chrome = atRest.at(titleRect.left() + 1, titleRect.top() + 1);
+        std::optional<qreal> inkTop;
+        std::optional<qreal> inkBottom;
+        for (qreal y = std::floor(titleRect.top()); y < titleRect.bottom(); ++y) {
+            for (qreal x = std::floor(titleRect.left()); x < titleRect.right(); ++x) {
+                if (channelDistance(atRest.at(x + 0.5, y + 0.5), chrome) > 40) {
+                    inkTop = inkTop ? inkTop : y;
+                    inkBottom = y + 1;
+                    break;
+                }
+            }
+        }
+        QVERIFY2(inkTop && inkBottom, qPrintable(describeRect(titleRect)));
+        titleInks.append({*inkTop, *inkBottom});
     }
+    // A box over a title covers its text's ink whole: no half-cut letters.
+    const auto coversTitlesWholeOrNot = [&](const QRectF &box) -> QString {
+        for (int i = 0; i < titles.size(); ++i) {
+            const QRectF ink(titles[i].left(), titleInks[i].first, titles[i].width(),
+                             titleInks[i].second - titleInks[i].first);
+            if (box.intersects(ink) && (box.top() > ink.top() + 0.5 || box.bottom() < ink.bottom() - 0.5)) {
+                return QStringLiteral(", cuts a title's text ") + describeRect(ink);
+            }
+        }
+        return {};
+    };
     QVERIFY(titles.size() >= 6);
     QVERIFY(bar.left() < titles.constLast().right());
     // Under the bar where it flipped before: the now-playing card and the
@@ -1466,18 +1506,18 @@ void UiMainWindowTest::seekTimeStaysOverItsLine() {
         const QRectF box = sceneRect(tipBox);
         const QString where =
             QStringLiteral("at %1: %2, the bar %3").arg(at.x()).arg(describeRect(box), describeRect(bar));
-        // In one place: every box at the same height, in the band, over the
-        // bar and its focus ring, and in the window.
+        // In one place: every box at the same height, in the menu bar's
+        // row, over the bar and its focus ring, and in the window, off its
+        // top edge.
         if (!boxTop) {
             boxTop = box.top();
         }
         QVERIFY2(std::abs(box.top() - *boxTop) <= 0.5, qPrintable(where));
-        QVERIFY2(box.top() >= band.top() - 0.5 && box.bottom() < bar.top(), qPrintable(where));
+        QVERIFY2(box.top() >= 4 - 0.5 && box.top() < band.top() && box.bottom() < bar.top(), qPrintable(where));
         QVERIFY2(!box.intersects(sceneRect(waveform)), qPrintable(where));
         QVERIFY2(box.left() >= 0.0 && box.right() <= windowWidth, qPrintable(where));
-        for (const QRectF &title : titles) {
-            QVERIFY2(!box.intersects(title), qPrintable(where + QStringLiteral(", a title ") + describeRect(title)));
-        }
+        const QString cut = coversTitlesWholeOrNot(box);
+        QVERIFY2(cut.isEmpty(), qPrintable(where + cut));
         QVERIFY2(!box.intersects(card), qPrintable(where + QStringLiteral(", the card ") + describeRect(card)));
         QVERIFY2(!box.intersects(header), qPrintable(where));
         // Centred on its line, or, where that would hang past the bar's
@@ -1497,15 +1537,12 @@ void UiMainWindowTest::seekTimeStaysOverItsLine() {
     QVERIFY2(sceneRect(tipBox).bottom() <= sceneRect(seekRing).top() - 3 + 0.5,
              qPrintable(describeRect(sceneRect(tipBox)) + QStringLiteral(" over ") + describeRect(sceneRect(seekRing))));
     QCOMPARE(sceneRect(tipBox).top(), box.top());
-    // The band grew by no more than the lane needs: the box is at its top
-    // where the room above the bar was too little for it.
-    QVERIFY2(box.top() - band.top() <= std::max(0.0, bar.top() - band.top() - box.height()) + 1.0,
-             qPrintable(describeRect(box) + QStringLiteral(" in ") + describeRect(band)));
 
     // Every tooltip of the transport shares the lane: one line on the time
-    // box's line, as tall as it, in the band and the window, none of the
-    // menu's titles covered (the buttons' opened under the band, over the
-    // cover and the queue's header, and Mute's did).
+    // box's line, as tall as it, in the window, a title's text covered
+    // whole or not at all, and nothing under the band covered (the
+    // buttons' opened under the band, over the cover and the queue's
+    // header).
     QList<std::pair<QQuickItem *, QObject *>> laneTips;
     for (const char *name : {"transportButton_previous", "transportButton_playPause", "transportButton_stop",
                              "transportButton_next", "muteButton"}) {
@@ -1530,11 +1567,88 @@ void UiMainWindowTest::seekTimeStaysOverItsLine() {
             + QStringLiteral(", the time box ") + describeRect(box);
         QVERIFY2(std::abs(drawn.bottom() - box.bottom()) <= 0.5 && std::abs(drawn.height() - box.height()) <= 0.5,
                  qPrintable(where));
-        QVERIFY2(drawn.top() >= band.top() && drawn.left() >= 0 && drawn.right() <= windowWidth, qPrintable(where));
-        for (const QRectF &title : titles) {
-            QVERIFY2(!drawn.intersects(title), qPrintable(where + QStringLiteral(", a title ") + describeRect(title)));
+        QVERIFY2(drawn.top() >= 4 - 0.5 && drawn.left() >= 0 && drawn.right() <= windowWidth, qPrintable(where));
+        QVERIFY2(drawn.bottom() < bar.top() && !drawn.intersects(card) && !drawn.intersects(header), qPrintable(where));
+        const QString tipCut = coversTitlesWholeOrNot(drawn);
+        QVERIFY2(tipCut.isEmpty(), qPrintable(where + tipCut));
+    }
+}
+
+void UiMainWindowTest::seekTimeBoxGivesWayToAnOpenMenu_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The transport's popups borrow the menu bar's row, so while a menu is
+// open they give the row back: with the pointer resting on the seek bar
+// under the Playback title, a menu opened from the keyboard (Alt+P) hides
+// the time box, which stood over that title, and closed, the box shows
+// again; a button's tooltip does the same.
+void UiMainWindowTest::seekTimeBoxGivesWayToAnOpenMenu() {
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    MainWindowFixture fixture(sized(1600, 1000));
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QTRY_COMPARE(paletteOf(window)->property("basePointSize").toReal(), pointSize);
+    QObject *bridge = bridgeOf(window);
+    QVERIFY(bridge != nullptr);
+    bridge->setProperty("durationText", QStringLiteral("03:49"));
+    bridge->setProperty("durationSeconds", 229.0);
+    playTrack(bridge);
+    QQuickItem *seek = named(window, "seekSlider");
+    QQuickItem *menuBar = named(window, "mainMenuBar");
+    QObject *playbackMenu = window->findChild<QObject *>(QStringLiteral("playbackMenu"));
+    QObject *tip = window->findChild<QObject *>(QStringLiteral("seekTimeBox"));
+    QVERIFY(seek && menuBar && playbackMenu && tip);
+    QTRY_VERIFY(seek->isEnabled());
+    auto *tipBox = tip->property("background").value<QQuickItem *>();
+    QVERIFY(tipBox != nullptr);
+    QQuickItem *playbackTitle = nullptr;
+    for (int i = 0; i < menuBar->property("count").toInt() && playbackTitle == nullptr; ++i) {
+        QQuickItem *title = nullptr;
+        QVERIFY(QMetaObject::invokeMethod(menuBar, "itemAt", Q_RETURN_ARG(QQuickItem *, title), Q_ARG(int, i)));
+        if (title && title->property("menu").value<QObject *>() == playbackMenu) {
+            playbackTitle = title;
         }
     }
+    QVERIFY(playbackTitle != nullptr);
+    const QRectF bar = sceneRect(seek);
+    const QRectF titleRect = sceneRect(playbackTitle);
+    const QPoint at = QPointF(std::max(bar.left() + 4, titleRect.center().x()), bar.center().y()).toPoint();
+    QTest::mouseMove(window, at);
+    QTRY_VERIFY(tip->property("opened").toBool());
+    QVERIFY2(sceneRect(tipBox).intersects(titleRect),
+             qPrintable(describeRect(sceneRect(tipBox)) + QStringLiteral(", the title ") + describeRect(titleRect)));
+
+    QTest::keyClick(window, Qt::Key_P, Qt::AltModifier);
+    QTRY_VERIFY(playbackMenu->property("opened").toBool());
+    QTRY_VERIFY2(!tip->property("visible").toBool(),
+                 qPrintable(QStringLiteral("the box ") + describeRect(sceneRect(tipBox)) + QStringLiteral(" over ")
+                            + describeRect(titleRect)));
+
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!playbackMenu->property("visible").toBool());
+    QTRY_VERIFY(tip->property("opened").toBool());
+
+    // The buttons' tooltips in the same row give way too: Previous's, under
+    // the File title, while the File menu is open.
+    QQuickItem *previous = named(window, "transportButton_previous");
+    QObject *fileMenu = window->findChild<QObject *>(QStringLiteral("fileMenu"));
+    QVERIFY(previous && fileMenu);
+    QObject *previousTip = previous->findChild<QObject *>(QStringLiteral("transportButtonToolTip"));
+    QVERIFY(previousTip != nullptr);
+    // Hover as on the desktop, which the offscreen platform's hints leave off.
+    previous->setProperty("hoverEnabled", true);
+    QTest::mouseMove(window, sceneRect(previous).center().toPoint());
+    QTRY_VERIFY(previousTip->property("opened").toBool());
+    QTest::keyClick(window, Qt::Key_F, Qt::AltModifier);
+    QTRY_VERIFY(fileMenu->property("opened").toBool());
+    QTRY_VERIFY(!previousTip->property("visible").toBool());
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!fileMenu->property("visible").toBool());
+    QTRY_VERIFY(previousTip->property("opened").toBool());
 }
 
 void UiMainWindowTest::seekTimeBoxIsCrispWithoutAShadow_data() {
@@ -1630,27 +1744,28 @@ void UiMainWindowTest::transportRowSitsBalancedInItsBand_data() {
     QTest::addColumn<int>("windowWidth");
     QTest::addColumn<int>("windowHeight");
     QTest::addColumn<bool>("dark");
-    QTest::newRow("10 pt, 1600 by 1000, dark") << 10.0 << 1600 << 1000 << true;
-    QTest::newRow("10 pt, 1000 by 720, light") << 10.0 << 1000 << 720 << false;
-    QTest::newRow("24 pt, 1600 by 1000, light") << 24.0 << 1600 << 1000 << false;
-    QTest::newRow("24 pt, 1000 by 720, dark") << 24.0 << 1000 << 720 << true;
+    QTest::addColumn<qreal>("bandHeight");
+    QTest::newRow("10 pt, 1600 by 1000, dark") << 10.0 << 1600 << 1000 << true << 48.0;
+    QTest::newRow("10 pt, 1000 by 720, light") << 10.0 << 1000 << 720 << false << 48.0;
+    QTest::newRow("24 pt, 1600 by 1000, light") << 24.0 << 1600 << 1000 << false << 82.0;
+    QTest::newRow("24 pt, 1000 by 720, dark") << 24.0 << 1000 << 720 << true << 82.0;
 }
 
-// The transport's row sits balanced in its band, the lane of its popups
-// above it, empty at rest, and room under it: from the menu's titles down
-// to the buttons' glyphs, as drawn, at most 3:2 of the band under the
-// glyphs (the lane over the row and 8 px under it sank the controls onto
-// the seam, 44 px against 17 px at 10 pt, 76 px against 21 px at 24 pt).
-// In the least window, at 24 pt in 1000 by 720, the room under the row
-// gives way to the panes' minimums, so the window still fits; the row
-// still sits higher than it did (76 px against 21). There the lane's
-// 3 px clear of the focus rings, 2 px more than it had, come out of the
-// room under the row: 74 px against 32.
+// The transport's band at rest is its row, in every window, the least
+// one, 1000 by 720 at 24 pt, included; its popups borrow the menu bar's
+// row. The row sits balanced under the menu's titles by itself: from the
+// titles' ink down to the buttons' glyphs, as drawn, no less than the band
+// under the glyphs and at most 3:2 of it (a lane of the band's own over
+// the row, empty at rest, and 8 px under it sank the controls onto the
+// seam, 44 px against 17 px at 10 pt, 76 px against 21 px at 24 pt; the
+// room under the row that balanced it made the band 80 px for a 48 px row,
+// 158 px at 24 pt).
 void UiMainWindowTest::transportRowSitsBalancedInItsBand() {
     QFETCH(qreal, pointSize);
     QFETCH(int, windowWidth);
     QFETCH(int, windowHeight);
     QFETCH(bool, dark);
+    QFETCH(qreal, bandHeight);
     const auto restorePalette = useDarkPalette(dark);
     const ScopedApplicationFont font(pointSize);
     MainWindowFixture fixture(sized(windowWidth, windowHeight));
@@ -1668,19 +1783,11 @@ void UiMainWindowTest::transportRowSitsBalancedInItsBand() {
     const QRectF band = sceneRect(transport);
     QCOMPARE(sceneRect(seam).top(), band.bottom());
 
-    // The room under the row: what balances the lane, or in the least
-    // window what it has beyond the panes' minimums.
-    const qreal wanted = transport->property("wantedBalanceRoom").toReal();
-    const qreal room = transport->property("balanceRoom").toReal();
-    QVERIFY(wanted > 0);
-    QCOMPARE(band.height(), transport->property("leastHeight").toReal() + room);
-    const bool least = pointSize > 10 && windowHeight == 720;
-    if (least) {
-        QVERIFY2(room < wanted && room >= 0, qPrintable(QStringLiteral("%1 of %2").arg(room).arg(wanted)));
-        QCOMPARE(room, qreal(windowHeight - window->minimumHeight()));
-    } else {
-        QCOMPARE(room, wanted);
-    }
+    // The band is its row, with nothing over or under it, right under the
+    // menu bar.
+    QCOMPARE(band.height(), bandHeight);
+    QCOMPARE(transport->property("rowHeight").toReal(), bandHeight);
+    QCOMPARE(band.top(), sceneRect(menuBar).bottom());
 
     // As drawn: the lowest ink of the titles, and the glyphs' ink, read
     // against the chrome at the band's right end.
@@ -1714,8 +1821,8 @@ void UiMainWindowTest::transportRowSitsBalancedInItsBand() {
     const qreal below = band.bottom() - *glyphBottom;
     const QString proportions = QStringLiteral("%1 px over the glyphs, %2 px under them, the band %3")
         .arg(above).arg(below).arg(describeRect(band));
-    QVERIFY2(below > 0 && above > 0, qPrintable(proportions));
-    QVERIFY2(above <= (least ? 2.35 : 1.5) * below, qPrintable(proportions));
+    QVERIFY2(below > 0 && above >= below, qPrintable(proportions));
+    QVERIFY2(above <= 1.5 * below, qPrintable(proportions));
 }
 
 void UiMainWindowTest::sidebarWidthFollowsTheWindowAndTheFont_data() {

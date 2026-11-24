@@ -651,9 +651,11 @@ void TransportStatusTest::drawsOffscreenUnlessAPlatformIsChosen() {
     verifyOffscreenPlatformByDefault();
 }
 
-// The sizes of the design at 1×: a 48 px row under the lane of the
-// transport's popups, which grows the band, and over the room that
-// balances it; 32 px buttons 4 px apart
+// The sizes of the design at 1×: a 48 px row, the band, which grows by
+// the lane of the transport's popups only where there is no menu bar's
+// row for them to borrow, as here, by what the lane needs beyond the room
+// over the row, and keeps the window's top 4 px clear of them, with no
+// room under the row; 32 px buttons 4 px apart
 // from 12 px, the content's inset; the seek bar 16 px after Next; then on
 // one rhythm, between what is drawn: the time 16 px after the seek bar, as
 // wide as "0:00 / 0:00", the volume glyph 24 px after it, and the 96 px
@@ -664,9 +666,14 @@ void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
     QVERIFY2(harness.load(), qPrintable(harness.error));
     QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
     QVERIFY(transport != nullptr);
+    QCOMPARE(transport->property("popupHeadroomAbove").toReal(), 0.0);
     const qreal lane = transport->property("laneGrowth").toReal();
+    // The lane's bottom 22 px over the row's centre line: 3 px over the
+    // bar's and the buttons' focus rings.
+    QCOMPARE(transport->property("laneClearance").toReal(), 22.0);
+    QCOMPARE(lane, std::ceil(transport->property("laneBoxHeight").toReal() + 22.0 + 4.0 - 24.0));
     QVERIFY(lane > 0);
-    QCOMPARE(transport->height(), 48.0 + lane + transport->property("balanceRoom").toReal());
+    QCOMPARE(transport->height(), 48.0 + lane);
     // The row's top.
     const qreal top = sceneRect(transport).top() + lane;
 
@@ -5867,8 +5874,13 @@ void TransportStatusTest::transportAndStatusBarGrowWithALargeFont() {
         QVERIFY2(rect.left() >= previousRight, qPrintable(names[i]));
         previousRight = rect.right();
     }
-    QCOMPARE(band.height(), std::max(48.0, buttonSize + 16.0) + transport->property("laneGrowth").toReal()
-                                + transport->property("balanceRoom").toReal());
+    // The row holds the buttons and 8 px above and below them, and the
+    // seek bar's focus ring and 5 px above and below it, so the ring stays
+    // clear of the seam: 82 px. Without a menu bar's row to borrow, the
+    // band grows by the lane alone, with no room under the row.
+    QCOMPARE(buttonSize, 60.0);
+    QCOMPARE(transport->property("rowHeight").toReal(), 82.0);
+    QCOMPARE(band.height(), 82.0 + transport->property("laneGrowth").toReal());
     for (const QString &name : {QStringLiteral("seekSlider"), QStringLiteral("transportTimePosition"),
                                 QStringLiteral("transportTimeLength"), QStringLiteral("muteButton"),
                                 QStringLiteral("volumeSlider")}) {
