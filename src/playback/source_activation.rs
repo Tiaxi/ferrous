@@ -35,12 +35,26 @@
 //! activates it has returned, because the activating thread goes on to
 //! change the state of what the source sets up.
 //!
+//! `GStreamer` also changes the state of the pipeline on a thread of its
+//! own, which no state change here can wait for: a pipeline asked to play
+//! before it has prerolled goes on to Playing from a pool thread once it
+//! has, and so does one that prerolls again after a flushing seek. A
+//! successor handed over meanwhile, as a short track's is while the run
+//! prerolls, can find its type just then. So a setup also holds the state
+//! lock of its `urisourcebin`, which every state change of the source
+//! takes: one that would reach the source meanwhile waits for the setup,
+//! and one that is changing the source's state already finishes first,
+//! which it can because the `parsebin` it would deadlock on is not there
+//! yet.
+//!
 //! Connecting also orders the stream collection of each stream that a
 //! source parses ahead of the stream's data (see `collection_order`),
 //! reports each stream that a `parsebin` holds after exposing it (see
 //! `parsebin_stall`), and makes the sources read their files on a thread
 //! that a flush does not wait for (see `file_source`).
 
+use std::cell::RefCell;
+use std::marker::PhantomData;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use gst::glib;
@@ -238,15 +252,20 @@ impl SourceActivation {
         let activation = Arc::clone(self);
         typefind.connect("have-type", false, move |values| {
             let typefind = values.first()?.get::<gst::Element>().ok()?;
-            if !activation.setting_up(&typefind) {
+            if activation.setting_up(&typefind) {
+                SourceStateLock::hold(&typefind);
+            } else {
                 typefind.stop_signal_emission_by_name("have-type");
             }
             None
         });
-        // After it.
+        // After it, which the handler of `urisourcebin` lets run: it does
+        // not stop the emission.
         let activation = Arc::clone(self);
         typefind.connect("have-type", true, move |values| {
-            activation.set_up(&values.first()?.get::<gst::Element>().ok()?);
+            let typefind = values.first()?.get::<gst::Element>().ok()?;
+            SourceStateLock::release(&typefind);
+            activation.set_up(&typefind);
             None
         });
     }
@@ -326,6 +345,66 @@ impl SourceActivation {
     #[cfg(test)]
     pub(crate) fn run_ends(&self) -> bool {
         self.lock().ending > 0
+    }
+}
+
+thread_local! {
+    /// The state locks that the setups on this thread hold.
+    static SOURCE_STATE_LOCKS: RefCell<Vec<SourceStateLock>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The state lock of the `urisourcebin` of a type finder, held on the type
+/// finder's streaming thread while the `urisourcebin` sets up what the type
+/// finder found, so that no state change of the source runs meanwhile. A
+/// recursive mutex that the thread which locked it must unlock, so it never
+/// leaves that thread.
+struct SourceStateLock {
+    typefind: gst::Element,
+    source: gst::Element,
+    _thread: PhantomData<*const ()>,
+}
+
+impl SourceStateLock {
+    /// Lock the state of the `urisourcebin` of `typefind`, waiting for a
+    /// state change of it in progress, until `release`.
+    fn hold(typefind: &gst::Element) {
+        let Some(source) = typefind.parent().and_downcast::<gst::Element>() else {
+            return;
+        };
+        // SAFETY: `source` is a live `GstElement`, kept alive by the
+        // reference this holds until the lock is dropped, and its state lock
+        // is a `GRecMutex` initialized with the element, which GStreamer
+        // documents for use by code outside the element (`GST_STATE_LOCK`).
+        // It is unlocked by `Drop` on this thread, which locked it.
+        unsafe {
+            gst::glib::ffi::g_rec_mutex_lock(&raw mut (*source.as_ptr()).state_lock);
+        }
+        let lock = Self {
+            typefind: typefind.clone(),
+            source,
+            _thread: PhantomData,
+        };
+        SOURCE_STATE_LOCKS.with(|locks| locks.borrow_mut().push(lock));
+    }
+
+    /// Unlock what `hold` locked for `typefind`.
+    fn release(typefind: &gst::Element) {
+        let lock = SOURCE_STATE_LOCKS.with(|locks| {
+            let mut locks = locks.borrow_mut();
+            let held = locks.iter().rposition(|lock| lock.typefind == *typefind)?;
+            Some(locks.remove(held))
+        });
+        drop(lock);
+    }
+}
+
+impl Drop for SourceStateLock {
+    fn drop(&mut self) {
+        // SAFETY: `hold` locked this state lock on this thread, since the
+        // lock never leaves the thread, and `self.source` keeps it alive.
+        unsafe {
+            gst::glib::ffi::g_rec_mutex_unlock(&raw mut (*self.source.as_ptr()).state_lock);
+        }
     }
 }
 
@@ -567,6 +646,93 @@ mod tests {
         });
         setup.join().unwrap();
         assert_eq!(activation.skipped_setups(), 1);
+    }
+
+    #[test]
+    fn a_state_change_of_a_source_on_another_thread_waits_for_its_setup() {
+        // GStreamer goes on to Playing on a thread of its own once the
+        // pipeline has prerolled, which no state change here waits for. That
+        // state change once reached the parsebin that the source of a
+        // successor was setting up, and deadlocked with the setup.
+        gst::init().expect("gstreamer initialization");
+        let dir =
+            std::env::temp_dir().join(format!("ferrous-source-activation-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.mp3");
+        std::fs::write(&file, include_bytes!("../analysis/fixtures/seek-tone.mp3")).unwrap();
+        let uri = url::Url::from_file_path(&file).unwrap().to_string();
+
+        let pipeline = gst::Pipeline::new();
+        // As each input of playbin3 is.
+        let source = gst::ElementFactory::make("urisourcebin")
+            .property("uri", uri.as_str())
+            .property("parse-streams", true)
+            .build()
+            .expect("urisourcebin");
+        pipeline.add(&source).unwrap();
+        let activation = SourceActivation::connect(pipeline.upcast_ref());
+
+        // Once the source has added its parsebin, on the thread that sets
+        // it up, another thread asks whether a state change of the source
+        // could start now, without waiting, and then changes its state.
+        // Sends the answer, and where the state change sends its result.
+        let (sent, during_setup) = mpsc::channel();
+        let sent = std::sync::Mutex::new(Some(sent));
+        pipeline.connect("deep-element-added", false, move |values| {
+            let element = values.get(2)?.get::<gst::Element>().ok()?;
+            if element.factory()?.name() != "parsebin" {
+                return None;
+            }
+            let sent = sent.lock().unwrap().take()?;
+            let source = element.parent().and_downcast::<gst::Element>()?;
+            let (answered, answer) = mpsc::channel();
+            let (changed, change) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = answered.send(state_lock_free(&source));
+                let _ = changed.send(source.set_state(gst::State::Playing));
+            });
+            let _ = sent.send((answer.recv_timeout(TIMEOUT), change));
+            None
+        });
+
+        activation
+            .set_state(pipeline.upcast_ref(), gst::State::Paused)
+            .unwrap();
+        let (free, change) = during_setup
+            .recv_timeout(TIMEOUT)
+            .expect("the source did not set up a parsebin");
+        // Once the setup has ended, the state change goes on.
+        let Ok(result) = change.recv_timeout(TIMEOUT) else {
+            // Still held: the teardown would wait for it too.
+            std::mem::forget(pipeline);
+            panic!("the state change of the source did not return after the setup");
+        };
+        activation
+            .set_state(pipeline.upcast_ref(), gst::State::Null)
+            .unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(
+            free,
+            Ok(false),
+            "a state change could start during the setup"
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// Whether a state change of `element` could start now: no other thread
+    /// holds its state lock.
+    fn state_lock_free(element: &gst::Element) -> bool {
+        // SAFETY: `element` is a live `GstElement`, and its state lock is a
+        // `GRecMutex` initialized with it. A lock this takes is unlocked at
+        // once, on this thread.
+        unsafe {
+            let lock = &raw mut (*element.as_ptr()).state_lock;
+            let free = gst::glib::ffi::g_rec_mutex_trylock(lock) != 0;
+            if free {
+                gst::glib::ffi::g_rec_mutex_unlock(lock);
+            }
+            free
+        }
     }
 
     #[test]

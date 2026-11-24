@@ -6793,6 +6793,9 @@ mod engine_tests {
         prepared: Vec<PathBuf>,
         cancelled_staging: usize,
         trace: Trace,
+        /// What the test checks with the engine, which a report names, when
+        /// it checks several things with engines of their own.
+        case: Option<String>,
         /// When the engine last reported an event.
         last_event_at: Option<Instant>,
         /// The engine's thread, which returns what it left behind.
@@ -6853,6 +6856,7 @@ mod engine_tests {
                 prepared: Vec::new(),
                 cancelled_staging: 0,
                 trace,
+                case: None,
                 last_event_at: None,
                 thread,
             }
@@ -6882,7 +6886,11 @@ mod engine_tests {
                 self.cancelled_staging,
             );
             let files = describe_error_files(&self.errors);
-            self.trace.report(what, &format!("{engine}{files}"))
+            let what = match &self.case {
+                Some(case) => format!("{case}: {what}"),
+                None => what.to_owned(),
+            };
+            self.trace.report(&what, &format!("{engine}{files}"))
         }
 
         /// Poll and record until `done` holds, or panic with a report of
@@ -7119,6 +7127,7 @@ mod engine_tests {
     ) {
         let case = format!("{start:?} from {from:?}, repeat {repeat:?}");
         let mut engine = Engine::start();
+        engine.case = Some(case.clone());
         engine.send(PlaybackCommand::SetRepeatMode(repeat));
         engine.send(PlaybackCommand::LoadQueue(queue));
         engine.wait_for_changes(1);
