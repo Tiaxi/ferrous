@@ -102,6 +102,23 @@
   <!-- scripts/bump-version.sh adds the new version here; the newest entry must
        match the version in Cargo.toml. -->
   <releases>
+    <release version="0.4.0" date="2026-11-24">
+      <description>
+        <p>
+          A redesign: every part of the app was reworked in two rounds of design
+          review, from the main window, the transport and its waveform seek bar to
+          the spectrogram and waveform, menus, search, dialogs and the fullscreen
+          viewers, with new motion and a new app icon.
+        </p>
+        <ul>
+          <li>Change any keyboard shortcut, and redo an undone queue change</li>
+          <li>Drag or autoscroll the spectrogram and waveform to any part of the track, with the zoomed view marked on the seek bar</li>
+          <li>See the time under the pointer on the seek bar, and Last.fm's scrobble progress in the status bar</li>
+          <li>Many fixes, including safer tag editing and smoother playback across track changes</li>
+          <li>Ferrous now needs Qt 6.8 or newer</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-11-04"/>
     <release version="0.2.2" date="2026-09-19"/>
     <release version="0.2.1" date="2026-09-12"/>
