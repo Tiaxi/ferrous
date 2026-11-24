@@ -26,6 +26,16 @@ QtObject {
     // A section being expanded: its type and how many of its results
     // showed, so that the selection moves to the first one revealed.
     property var pendingExpansion: null
+    // What a key pressed while the rows were not yet the results of the
+    // query as typed does once they are: "activate", "queue" or "reveal"
+    // (#723). Editing the query, another key or closing drops it.
+    property string pendingAction: ""
+    // Whether the rows are the results of the query as typed: not an older
+    // query's, kept while a newer one runs or after the field was cleared.
+    // An expansion searches the same query for more of its results.
+    readonly property bool rowsMatchQuery: !root.uiBridge.globalSearchModelRetained
+        && (!root.uiBridge.globalSearchBusy || root.pendingExpansion !== null)
+    onRowsMatchQueryChanged: if (root.rowsMatchQuery) root.takePendingAction()
     readonly property bool dialogVisible: !!root.dialog && root.dialog.visible
     readonly property bool dialogHasActiveInputFocus: root.dialogVisible
         && ((root.queryField && root.queryField.activeFocus)
@@ -176,6 +186,8 @@ QtObject {
 
     function beginOpen() {
         root.opening = true
+        root.pendingAction = ""
+        root.pendingExpansion = null
         root.ignoreRefocusFind = true
         root.pendingPrefillText = ""
         root.openInitialText = root.queryField ? (root.queryField.text || "") : ""
@@ -198,6 +210,7 @@ QtObject {
         root.opening = false
         root.ignoreRefocusFind = false
         openSettleTimer.stop()
+        root.pendingAction = ""
         root.pendingPrefillText = ""
         root.openInitialText = ""
         if (closeDialog) {
@@ -322,8 +335,26 @@ QtObject {
         return false
     }
 
+    // Holds `action` for the results of the query as typed when the rows
+    // are not yet them; true when it was held.
+    function deferUntilRowsMatchQuery(action) {
+        root.pendingAction = root.rowsMatchQuery ? "" : action
+        return root.pendingAction !== ""
+    }
+
+    // Takes the held action on the selection, now that the rows are the
+    // results it was pressed for: on none when they found nothing.
+    function takePendingAction() {
+        const action = root.pendingAction
+        root.pendingAction = ""
+        if (!root.dialogVisible) return
+        if (action === "activate") root.activateSelection()
+        else if (action === "queue") root.queueSelection()
+        else if (action === "reveal") root.navigateSelectionToLibrary()
+    }
+
     function navigateSelectionToLibrary() {
-        if (root.uiBridge.globalSearchBusy || root.uiBridge.globalSearchModelRetained) return
+        if (root.deferUntilRowsMatchQuery("reveal")) return
         let row = root.selectedRow()
         if (!row) {
             const first = root.searchFirstSelectableIndex()
@@ -344,7 +375,7 @@ QtObject {
     }
 
     function activateRow(row) {
-        if (root.uiBridge.globalSearchBusy || root.uiBridge.globalSearchModelRetained) return
+        if (!root.rowsMatchQuery) return
         if (row && row.kind === "more") {
             root.expandRow(row)
             return
@@ -371,7 +402,7 @@ QtObject {
     }
 
     function queueRow(row) {
-        if (root.uiBridge.globalSearchBusy || root.uiBridge.globalSearchModelRetained) return
+        if (!root.rowsMatchQuery) return
         if (!row || row.kind !== "item") {
             return
         }
@@ -398,7 +429,7 @@ QtObject {
     }
 
     function activateSelection() {
-        if (root.uiBridge.globalSearchBusy || root.uiBridge.globalSearchModelRetained) return
+        if (root.deferUntilRowsMatchQuery("activate")) return
         const row = root.selectedRow()
         if (row) {
             root.activateRow(row)
@@ -408,7 +439,7 @@ QtObject {
     // Adds the selected result to the queue; the palette stays open for
     // more.
     function queueSelection() {
-        if (root.uiBridge.globalSearchBusy || root.uiBridge.globalSearchModelRetained) return
+        if (root.deferUntilRowsMatchQuery("queue")) return
         const row = root.selectedRow()
         if (row) {
             root.queueRow(row)

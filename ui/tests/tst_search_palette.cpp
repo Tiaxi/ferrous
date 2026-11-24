@@ -542,6 +542,7 @@ private slots:
     void resultMenuNamesWhatItActsOn();
     void resultMenuLeavesItsRowTheInactiveSelection();
     void staleAndBusyResultsDoNotAct();
+    void enterWhileSearchingActsOnTheQueryAsTyped();
     void typingKeepsTheResultsInPlaceAsTheyAre();
     void onlyASlowSearchDimsTheResults();
     void reopeningWithKeptTextShowsNoEmptySearch();
@@ -2378,13 +2379,20 @@ void SearchPaletteTest::staleAndBusyResultsDoNotAct() {
     QVERIFY(harness.strings("queued").isEmpty());
     QVERIFY(harness.strings("revealed").isEmpty());
     QVERIFY(harness.dialog->property("visible").toBool());
+    // The last key waits for the results (enterWhileSearchingActsOnTheQueryAsTyped);
+    // another key drops it.
+    QCOMPARE(harness.controller->property("pendingAction").toString(), QStringLiteral("reveal"));
+    QTest::keyClick(harness.window, Qt::Key_Down);
+    QCOMPARE(harness.controller->property("pendingAction").toString(), QString());
     harness.bridge->setProperty("globalSearchBusy", false);
 
     harness.bridge->setProperty("globalSearchModelRetained", true);
     QVERIFY(!harness.view()->isVisible());
     QTest::keyClick(harness.window, Qt::Key_Return);
     QVERIFY(harness.strings("played").isEmpty());
+    QTest::keyClick(harness.window, Qt::Key_Down);
     harness.bridge->setProperty("globalSearchModelRetained", false);
+    QVERIFY(harness.strings("played").isEmpty());
 
     for (int i = 0; i < harness.model.rowCount(); ++i) {
         if (harness.model.rowDataAt(i).value(QStringLiteral("kind")) == QStringLiteral("more")) {
@@ -2397,6 +2405,155 @@ void SearchPaletteTest::staleAndBusyResultsDoNotAct() {
     harness.field()->setProperty("text", QStringLiteral("other"));
     QVERIFY(!harness.controller->property("pendingExpansion").toMap().contains(QStringLiteral("rowType")));
     QCOMPARE(harness.strings("queries").last(), QStringLiteral("other"));
+}
+
+// Enter, Ctrl+Enter or Alt+Enter pressed while a query runs act on that
+// query's results once they arrive, never on the older query's rows still
+// shown (#723). Editing the query, another key or closing first drops the
+// key, and so do results that found nothing. While an expansion runs, the
+// rows are the query's own, so the key acts on them at once.
+void SearchPaletteTest::enterWhileSearchingActsOnTheQueryAsTyped() {
+    // A palette whose bridge is busy from a query until its results
+    // arrive, as the app's is. Each case that closes it has one of its own.
+    const auto start = [](Harness &harness) {
+        QString errorText;
+        if (!harness.load(kBreezeDark, &errorText)) return errorText;
+        if (!harness.open()) return QStringLiteral("the palette did not open");
+        QQmlExpression busyWhileSearching(qmlContext(harness.root.get()), harness.root.get(), QStringLiteral(R"JS(
+            bridge.queriesChanged.connect(function() {
+                bridge.globalSearchBusy = bridge.queries[bridge.queries.length - 1].trim().length > 0
+            }))JS"));
+        busyWhileSearching.evaluate();
+        return busyWhileSearching.hasError() ? busyWhileSearching.error().toString() : QString();
+    };
+    // The results of the query typed last arrive: the rows first, then the
+    // end of the search, as the bridge applies them.
+    const auto answer = [](Harness &harness, const QVector<Row> &rows, const QVector<int> &totals = {}) {
+        harness.model.presentSearchRows(rows, totals, !totals.isEmpty());
+        harness.bridge->setProperty("globalSearchModelRetained", false);
+        harness.bridge->setProperty("globalSearchBusy", false);
+        harness.settleRows();
+    };
+    const auto none = [](const Harness &harness) {
+        return harness.strings("played").isEmpty() && harness.strings("queued").isEmpty()
+            && harness.strings("revealed").isEmpty();
+    };
+    // "mer" finds the artist first, "meridian" a track.
+    const QStringList meridianFirst{QStringLiteral("track:/fixture/drift.flac")};
+
+    {
+        Harness harness;
+        const QString error = start(harness);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        harness.field()->setProperty("text", QStringLiteral("mer"));
+        answer(harness, merRows(harness.coverUrl));
+        QTRY_VERIFY(harness.view()->isVisible());
+
+        // Ctrl+Enter while the query runs queues the first of its results,
+        // not of the older query's rows still shown; the palette stays.
+        harness.field()->setProperty("text", QStringLiteral("meridian"));
+        QVERIFY(harness.bridge->property("globalSearchBusy").toBool());
+        QTest::keyClick(harness.window, Qt::Key_Return, Qt::ControlModifier);
+        QVERIFY(none(harness));
+        answer(harness, meridianRows(harness.coverUrl));
+        QCOMPARE(harness.strings("queued"), meridianFirst);
+        QVERIFY(harness.strings("played").isEmpty());
+        QVERIFY(harness.dialog->property("visible").toBool());
+        // Taken once: later results take nothing.
+        harness.field()->setProperty("text", QStringLiteral("mer"));
+        answer(harness, merRows(harness.coverUrl));
+        QCOMPARE(harness.strings("queued"), meridianFirst);
+        harness.bridge->setProperty("queued", QVariantList{});
+
+        // A query edited again before its results arrive drops the key,
+        // Enter and Ctrl+Enter alike.
+        for (const Qt::KeyboardModifiers modifiers : {Qt::KeyboardModifiers(), Qt::KeyboardModifiers(Qt::ControlModifier)}) {
+            harness.field()->setProperty("text", QStringLiteral("meri"));
+            QTest::keyClick(harness.window, Qt::Key_Return, modifiers);
+            harness.field()->setProperty("text", QStringLiteral("meridian"));
+            answer(harness, meridianRows(harness.coverUrl));
+            QVERIFY(none(harness));
+        }
+        // So do another key, and results that found nothing.
+        harness.field()->setProperty("text", QStringLiteral("mer"));
+        QTest::keyClick(harness.window, Qt::Key_Return);
+        QTest::keyClick(harness.window, Qt::Key_Down);
+        QCOMPARE(harness.controller->property("pendingAction").toString(), QString());
+        answer(harness, merRows(harness.coverUrl));
+        harness.field()->setProperty("text", QStringLiteral("merx"));
+        QTest::keyClick(harness.window, Qt::Key_Return);
+        QCOMPARE(harness.controller->property("pendingAction").toString(), QStringLiteral("activate"));
+        answer(harness, {});
+        QCOMPARE(harness.model.rowCount(), 0);
+        QCOMPARE(harness.controller->property("pendingAction").toString(), QString());
+        harness.field()->setProperty("text", QStringLiteral("meridian"));
+        answer(harness, meridianRows(harness.coverUrl), {1, 2, 26});
+        QVERIFY(none(harness));
+        QVERIFY(harness.dialog->property("visible").toBool());
+
+        // While an expansion runs, Ctrl+Enter queues the selected result
+        // at once.
+        for (int i = 0; i < harness.model.rowCount(); ++i) {
+            if (harness.model.rowDataAt(i).value(QStringLiteral("kind")) == QStringLiteral("more")) {
+                QVERIFY(QMetaObject::invokeMethod(harness.controller, "selectDisplayIndex", Q_ARG(QVariant, i)));
+            }
+        }
+        QTest::keyClick(harness.window, Qt::Key_Return);
+        QCOMPARE(harness.strings("expanded"), QStringList{QStringLiteral("track")});
+        harness.bridge->setProperty("globalSearchBusy", true);
+        const int album = harness.model.indexOfResult(QStringLiteral("album"), 0);
+        QVERIFY(QMetaObject::invokeMethod(harness.controller, "selectDisplayIndex", Q_ARG(QVariant, album)));
+        QTest::keyClick(harness.window, Qt::Key_Return, Qt::ControlModifier);
+        QCOMPARE(harness.strings("queued"), QStringList{QStringLiteral("album:Grey Lines")});
+        harness.bridge->setProperty("queued", QVariantList{});
+
+        // Enter while the query runs plays the first of its results.
+        harness.field()->setProperty("text", QStringLiteral("mer"));
+        answer(harness, merRows(harness.coverUrl));
+        harness.field()->setProperty("text", QStringLiteral("meridian"));
+        QTest::keyClick(harness.window, Qt::Key_Return);
+        QVERIFY(none(harness));
+        QVERIFY(harness.dialog->property("visible").toBool());
+        answer(harness, meridianRows(harness.coverUrl));
+        QCOMPARE(harness.strings("played"), meridianFirst);
+        QVERIFY(harness.strings("queued").isEmpty());
+        QTRY_VERIFY(!harness.dialog->property("visible").toBool());
+    }
+
+    // Typed into a cleared field, whose older rows are kept unseen,
+    // Alt+Enter waits for the results too, and shows the first in the
+    // library.
+    {
+        Harness harness;
+        const QString error = start(harness);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        harness.field()->setProperty("text", QStringLiteral("meridian"));
+        answer(harness, meridianRows(harness.coverUrl));
+        harness.field()->setProperty("text", QString());
+        harness.bridge->setProperty("globalSearchModelRetained", true);
+        harness.field()->setProperty("text", QStringLiteral("mer"));
+        QTest::keyClick(harness.window, Qt::Key_Return, Qt::AltModifier);
+        QVERIFY(none(harness));
+        answer(harness, merRows(harness.coverUrl));
+        QCOMPARE(harness.strings("revealed"), QStringList{QStringLiteral("The Quiet Meridian")});
+        QTRY_VERIFY(!harness.dialog->property("visible").toBool());
+    }
+
+    // Closing drops it.
+    {
+        Harness harness;
+        const QString error = start(harness);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        harness.field()->setProperty("text", QStringLiteral("mer"));
+        answer(harness, merRows(harness.coverUrl));
+        harness.field()->setProperty("text", QStringLiteral("meridian"));
+        QTest::keyClick(harness.window, Qt::Key_Return);
+        QTest::keyClick(harness.window, Qt::Key_Escape);
+        QTRY_VERIFY(!harness.dialog->property("visible").toBool());
+        answer(harness, meridianRows(harness.coverUrl));
+        QVERIFY(none(harness));
+        QCOMPARE(harness.controller->property("pendingAction").toString(), QString());
+    }
 }
 
 // While a newer query runs, the rows it replaces are drawn as they were:
