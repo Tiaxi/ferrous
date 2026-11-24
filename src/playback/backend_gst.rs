@@ -1075,7 +1075,9 @@ impl GstPlaybackRuntime {
         self.snapshot.duration = Duration::ZERO;
     }
 
-    fn load_queue(&mut self, paths: Vec<PathBuf>) {
+    /// Replace the queue with `paths` and open its first row, playing it
+    /// when `play` is set and otherwise keeping the playback state.
+    fn load_queue(&mut self, paths: Vec<PathBuf>, play: bool) {
         if paths.is_empty() {
             return;
         }
@@ -1093,7 +1095,7 @@ impl GstPlaybackRuntime {
         let Some(first) = first else {
             return;
         };
-        self.switch_to_path(first, current_index, TrackChangeKind::Manual, false);
+        self.switch_to_path(first, current_index, TrackChangeKind::Manual, play);
     }
 
     fn add_to_queue(&mut self, paths: Vec<PathBuf>) {
@@ -2808,6 +2810,7 @@ impl GstPlaybackRuntime {
         if matches!(
             cmd,
             PlaybackCommand::LoadQueue(_)
+                | PlaybackCommand::PlayQueue(_)
                 | PlaybackCommand::ClearQueue
                 | PlaybackCommand::PlayAt(_)
                 | PlaybackCommand::Next
@@ -2818,7 +2821,8 @@ impl GstPlaybackRuntime {
             self.reset_failures();
         }
         match cmd {
-            PlaybackCommand::LoadQueue(paths) => self.load_queue(paths),
+            PlaybackCommand::LoadQueue(paths) => self.load_queue(paths, false),
+            PlaybackCommand::PlayQueue(paths) => self.load_queue(paths, true),
             PlaybackCommand::AddToQueue(paths) => self.add_to_queue(paths),
             PlaybackCommand::RemapPaths(renames) => self.remap_paths(&renames),
             PlaybackCommand::RestoreQueue { paths, current } => self.restore_queue(paths, current),
@@ -7065,6 +7069,101 @@ mod engine_tests {
 
     fn millis(value: u64) -> Duration {
         Duration::from_millis(value)
+    }
+
+    #[test]
+    fn a_queue_played_from_any_state_changes_track_once_and_is_reported_playing() {
+        let fixtures = Fixtures::new("play-queue");
+        let old = fixtures.wav("old.wav", 4_000);
+        let a = fixtures.wav("a.wav", 1_500);
+        let b = fixtures.wav("b.wav", 4_000);
+        let cases = [
+            (PlaybackState::Stopped, RepeatMode::Off),
+            (PlaybackState::Paused, RepeatMode::Off),
+            (PlaybackState::Playing, RepeatMode::Off),
+            (PlaybackState::Stopped, RepeatMode::One),
+            (PlaybackState::Playing, RepeatMode::One),
+        ];
+        for (from, repeat) in cases {
+            let case = format!("from {from:?}, repeat {repeat:?}");
+            let mut engine = Engine::start();
+            engine.send(PlaybackCommand::SetRepeatMode(repeat));
+            engine.send(PlaybackCommand::LoadQueue(vec![old.clone()]));
+            engine.wait_for_changes(1);
+            if from != PlaybackState::Stopped {
+                engine.send(PlaybackCommand::Play);
+                engine.wait_until(&format!("{case}: the old track did not play"), |engine| {
+                    engine.snapshot.state == PlaybackState::Playing
+                        && engine.snapshot.position >= millis(200)
+                });
+            }
+            if from == PlaybackState::Paused {
+                engine.send(PlaybackCommand::Pause);
+                engine.wait_until(&format!("{case}: the old track did not pause"), |engine| {
+                    engine.snapshot.state == PlaybackState::Paused
+                });
+            }
+            let snapshots = engine.snapshots.len();
+
+            engine.send(PlaybackCommand::PlayQueue(vec![a.clone(), b.clone()]));
+            let change = engine.wait_for_changes(2);
+            assert_change(&change, &a, 0, Expect::Manual);
+            engine.wait_until(&format!("{case}: the first row did not play"), |engine| {
+                engine.snapshot.current.as_deref() == Some(a.as_path())
+                    && engine.snapshot.position >= millis(300)
+            });
+            assert_eq!(engine.changes.len(), 2, "{case}: {:?}", engine.changes);
+            // Every report of the new track is of it playing, under its one
+            // token: the UI never sees it stopped or paused first.
+            for snapshot in &engine.snapshots[snapshots..] {
+                if snapshot.current.as_deref() != Some(a.as_path()) {
+                    continue;
+                }
+                assert_eq!(
+                    (
+                        snapshot.state,
+                        snapshot.current_queue_index,
+                        snapshot.track_token
+                    ),
+                    (PlaybackState::Playing, Some(0), change.token),
+                    "{case}"
+                );
+            }
+
+            // The track goes on as one started with Play does.
+            let (successor, row) = if repeat == RepeatMode::One {
+                (&a, 0)
+            } else {
+                (&b, 1)
+            };
+            assert_change(&engine.wait_for_changes(3), successor, row, Expect::Gapless);
+            assert!(engine.errors.is_empty(), "{case}: {:?}", engine.errors);
+        }
+    }
+
+    #[test]
+    fn a_loaded_queue_keeps_the_playback_state() {
+        let fixtures = Fixtures::new("load-queue-state");
+        let old = fixtures.wav("old.wav", 4_000);
+        let a = fixtures.wav("a.wav", 4_000);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![old]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("the old track did not play", |engine| {
+            engine.snapshot.state == PlaybackState::Playing
+        });
+        engine.send(PlaybackCommand::Stop);
+        engine.wait_until("the old track did not stop", |engine| {
+            engine.snapshot.state == PlaybackState::Stopped
+        });
+
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone()]));
+        assert_change(&engine.wait_for_changes(2), &a, 0, Expect::Manual);
+        let until = Instant::now() + millis(400);
+        engine.wait_until("time passed", |_| Instant::now() >= until);
+        assert_eq!(engine.snapshot.current.as_deref(), Some(a.as_path()));
+        assert_eq!(engine.snapshot.state, PlaybackState::Stopped);
+        assert_eq!(engine.snapshot.position, Duration::ZERO);
     }
 
     #[test]

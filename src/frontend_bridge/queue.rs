@@ -89,6 +89,9 @@ pub(super) fn handle_queue_command(
             QueuePlaybackOp::LoadQueue(tracks) => {
                 playback.command(PlaybackCommand::LoadQueue(tracks.clone()));
             }
+            QueuePlaybackOp::PlayQueue(tracks) => {
+                playback.command(PlaybackCommand::PlayQueue(tracks.clone()));
+            }
             QueuePlaybackOp::AddToQueue(tracks) => {
                 playback.command(PlaybackCommand::AddToQueue(tracks.clone()));
             }
@@ -516,11 +519,19 @@ pub(super) fn reorder_edits(order: &[usize]) -> Option<Vec<QueueEdit>> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum QueuePlaybackOp {
     LoadQueue(Vec<PathBuf>),
+    /// Load the queue and play its first row, in one step of the engine.
+    PlayQueue(Vec<PathBuf>),
     AddToQueue(Vec<PathBuf>),
-    Insert { at: usize, paths: Vec<PathBuf> },
+    Insert {
+        at: usize,
+        paths: Vec<PathBuf>,
+    },
     RemoveAt(usize),
     RemoveMany(Vec<usize>),
-    Move { from: usize, to: usize },
+    Move {
+        from: usize,
+        to: usize,
+    },
     ClearQueue,
     PlayAt(usize),
     Play,
@@ -547,25 +558,21 @@ fn replace_queue_command_outcome(
     selected_queue_index: &mut Option<usize>,
     tracks: Vec<PathBuf>,
     autoplay: bool,
-    playback_state: PlaybackState,
 ) -> QueueCommandOutcome {
     *queue = tracks;
     *selected_queue_index = if queue.is_empty() { None } else { Some(0) };
-    let mut playback_ops = Vec::new();
-    if queue.is_empty() {
-        playback_ops.push(QueuePlaybackOp::ClearQueue);
+    // One command, so the engine switches to the first row once and
+    // reports it playing, not first stopped or paused there.
+    let playback_op = if queue.is_empty() {
+        QueuePlaybackOp::ClearQueue
+    } else if autoplay {
+        QueuePlaybackOp::PlayQueue(queue.clone())
     } else {
-        playback_ops.push(QueuePlaybackOp::LoadQueue(queue.clone()));
-        if autoplay {
-            playback_ops.push(QueuePlaybackOp::PlayAt(0));
-            if playback_state != PlaybackState::Playing {
-                playback_ops.push(QueuePlaybackOp::Play);
-            }
-        }
-    }
+        QueuePlaybackOp::LoadQueue(queue.clone())
+    };
     QueueCommandOutcome {
         changed: true,
-        playback_ops,
+        playback_ops: vec![playback_op],
         error: None,
         row_change: Some(QueueRowChange::Reset),
     }
@@ -722,13 +729,9 @@ pub(super) fn apply_queue_command_state(
     playback_state: PlaybackState,
 ) -> QueueCommandOutcome {
     match cmd {
-        BridgeQueueCommand::Replace { tracks, autoplay } => replace_queue_command_outcome(
-            queue,
-            selected_queue_index,
-            tracks,
-            autoplay,
-            playback_state,
-        ),
+        BridgeQueueCommand::Replace { tracks, autoplay } => {
+            replace_queue_command_outcome(queue, selected_queue_index, tracks, autoplay)
+        }
         BridgeQueueCommand::Append(tracks) => append_queue_command_outcome(queue, tracks),
         BridgeQueueCommand::InsertAt { at, tracks, .. } => {
             insert_queue_command_outcome(queue, selected_queue_index, at, tracks)
@@ -948,28 +951,33 @@ mod tests {
     }
 
     #[test]
-    fn queue_replace_autoplay_loads_and_starts_playback() {
-        let mut queue = Vec::new();
-        let mut selected = None;
-        let outcome = apply_queue_command_state(
-            BridgeQueueCommand::Replace {
-                tracks: vec![p("/a.flac"), p("/b.flac")],
-                autoplay: true,
-            },
-            &mut queue,
-            &mut selected,
+    fn queue_replace_autoplay_loads_and_plays_in_one_engine_command() {
+        // Whatever plays, the engine gets one command, so it switches to the
+        // first row once and reports it playing straight away.
+        for state in [
             PlaybackState::Stopped,
-        );
-        assert!(outcome.changed);
-        assert_eq!(selected, Some(0));
-        assert_eq!(
-            outcome.playback_ops,
-            vec![
-                QueuePlaybackOp::LoadQueue(vec![p("/a.flac"), p("/b.flac")]),
-                QueuePlaybackOp::PlayAt(0),
-                QueuePlaybackOp::Play,
-            ]
-        );
+            PlaybackState::Paused,
+            PlaybackState::Playing,
+        ] {
+            let mut queue = vec![p("/old.flac")];
+            let mut selected = Some(0);
+            let outcome = apply_queue_command_state(
+                BridgeQueueCommand::Replace {
+                    tracks: vec![p("/a.flac"), p("/b.flac")],
+                    autoplay: true,
+                },
+                &mut queue,
+                &mut selected,
+                state,
+            );
+            assert!(outcome.changed, "{state:?}");
+            assert_eq!(selected, Some(0), "{state:?}");
+            assert_eq!(
+                outcome.playback_ops,
+                vec![QueuePlaybackOp::PlayQueue(vec![p("/a.flac"), p("/b.flac")])],
+                "{state:?}"
+            );
+        }
     }
 
     #[test]
@@ -1204,30 +1212,6 @@ mod tests {
         assert_eq!(selected, Some(1));
         assert_eq!(outcome.playback_ops, vec![QueuePlaybackOp::PlayAt(1)]);
         assert!(outcome.error.is_none());
-    }
-
-    #[test]
-    fn queue_replace_autoplay_while_playing_skips_redundant_play_op() {
-        let mut queue = vec![p("/old.flac")];
-        let mut selected = Some(0);
-        let outcome = apply_queue_command_state(
-            BridgeQueueCommand::Replace {
-                tracks: vec![p("/a.flac"), p("/b.flac")],
-                autoplay: true,
-            },
-            &mut queue,
-            &mut selected,
-            PlaybackState::Playing,
-        );
-        assert!(outcome.changed);
-        assert_eq!(selected, Some(0));
-        assert_eq!(
-            outcome.playback_ops,
-            vec![
-                QueuePlaybackOp::LoadQueue(vec![p("/a.flac"), p("/b.flac")]),
-                QueuePlaybackOp::PlayAt(0),
-            ]
-        );
     }
 
     /// The rows of `order` as letters, for readable expectations.

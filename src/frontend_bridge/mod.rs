@@ -5326,6 +5326,7 @@ mod tests {
             .try_iter()
             .map(|command| match command {
                 PlaybackCommand::LoadQueue(tracks) => format!("load {tracks:?}"),
+                PlaybackCommand::PlayQueue(tracks) => format!("play {tracks:?}"),
                 PlaybackCommand::AddToQueue(tracks) => format!("add {tracks:?}"),
                 PlaybackCommand::PlayAt(index) => format!("play at {index}"),
                 PlaybackCommand::Play => "play".to_string(),
@@ -5356,12 +5357,7 @@ mod tests {
         assert_eq!(runtime.state.selected_queue_index, Some(0));
         assert_eq!(
             queue_ops(&engine_rx),
-            vec![
-                format!("load {:?}", vec![track]),
-                "play at 0".to_string(),
-                "play".to_string(),
-                format!("add {album:?}"),
-            ]
+            vec![format!("play {:?}", vec![track]), format!("add {album:?}"),]
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -5407,11 +5403,7 @@ mod tests {
         assert_eq!(runtime.state.selected_queue_index, Some(0));
         assert_eq!(
             queue_ops(&engine_rx),
-            vec![
-                format!("load {tracks:?}"),
-                "play at 0".to_string(),
-                "play".to_string(),
-            ],
+            vec![format!("play {tracks:?}"),],
             "one queue change, playing from the first file"
         );
         let _ = std::fs::remove_dir_all(dir);
@@ -5466,14 +5458,7 @@ mod tests {
         apply_next_import_result(&mut runtime, &event_tx);
 
         assert_eq!(runtime.state.queue, album, "the append was discarded");
-        assert_eq!(
-            queue_ops(&engine_rx),
-            vec![
-                format!("load {album:?}"),
-                "play at 0".to_string(),
-                "play".to_string(),
-            ]
-        );
+        assert_eq!(queue_ops(&engine_rx), vec![format!("play {album:?}"),]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -6257,14 +6242,7 @@ mod tests {
         apply_next_import_result(&mut runtime, &event_tx);
         let selection = vec![other.clone(), first.clone(), second.clone()];
         assert_eq!(runtime.state.queue, selection);
-        assert_eq!(
-            queue_ops(&engine_rx),
-            vec![
-                format!("load {selection:?}"),
-                "play at 0".to_string(),
-                "play".to_string(),
-            ]
-        );
+        assert_eq!(queue_ops(&engine_rx), vec![format!("play {selection:?}"),]);
         // One undo brings back the queue the selection replaced.
         let offer = runtime.state.snapshot(false).queue_undo;
         assert_eq!(offer.kind, Some(QueueUndoKind::Replaced));

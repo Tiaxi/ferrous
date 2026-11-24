@@ -131,7 +131,14 @@ pub type PathRenames = HashMap<PathBuf, PathBuf>;
 
 #[derive(Debug, Clone)]
 pub enum PlaybackCommand {
+    /// Replace the queue with `paths` and open its first row from its
+    /// start, keeping the playback state: a stopped player stays stopped
+    /// and a paused one paused.
     LoadQueue(Vec<PathBuf>),
+    /// Replace the queue with `paths` and play its first row from its
+    /// start, whatever the playback state was: one track change, whose
+    /// snapshot already plays.
+    PlayQueue(Vec<PathBuf>),
     AddToQueue(Vec<PathBuf>),
     /// Replace the paths of renamed files in place. The queue order, current
     /// track, position, and playback state stay the same, and the current
@@ -1046,6 +1053,46 @@ mod tests {
         assert_eq!(snap.current, None);
         assert_eq!(snap.state, PlaybackState::Stopped);
         assert_eq!(snap.position, Duration::ZERO);
+    }
+
+    #[test]
+    fn a_played_queue_changes_track_once_and_its_snapshot_plays() {
+        let (engine, rx) = make_test_engine();
+        let old = PathBuf::from("/tmp/old.flac");
+        let a = PathBuf::from("/tmp/a.flac");
+        let b = PathBuf::from("/tmp/b.flac");
+        engine.command(PlaybackCommand::LoadQueue(vec![old]));
+        let loaded = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(loaded.state, PlaybackState::Stopped);
+
+        engine.command(PlaybackCommand::PlayQueue(vec![a.clone(), b]));
+        let mut changes = Vec::new();
+        let deadline = Instant::now() + Duration::from_millis(300);
+        let snapshot = loop {
+            assert!(Instant::now() < deadline, "no snapshot of the played queue");
+            match rx.recv_timeout(Duration::from_millis(10)) {
+                Ok(PlaybackEvent::TrackChanged {
+                    path,
+                    queue_index,
+                    kind,
+                    track_token,
+                }) => changes.push((path, queue_index, kind, track_token)),
+                Ok(PlaybackEvent::Snapshot(snapshot)) if snapshot.current.as_ref() == Some(&a) => {
+                    break snapshot;
+                }
+                _ => {}
+            }
+        };
+        assert!(
+            matches!(
+                changes.as_slice(),
+                [(path, 0, TrackChangeKind::Manual, token)]
+                    if *path == a && *token == snapshot.track_token
+            ),
+            "{changes:?}"
+        );
+        assert_eq!(snapshot.state, PlaybackState::Playing);
+        assert_eq!(snapshot.current_queue_index, Some(0));
     }
 
     #[test]

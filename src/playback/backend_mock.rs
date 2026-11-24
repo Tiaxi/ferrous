@@ -147,6 +147,12 @@ impl MockPlaybackRuntime {
     fn handle_command(&mut self, cmd: PlaybackCommand) {
         match cmd {
             PlaybackCommand::LoadQueue(paths) => self.load_queue(paths),
+            PlaybackCommand::PlayQueue(paths) => {
+                if !paths.is_empty() {
+                    self.load_queue(paths);
+                    self.snapshot.state = PlaybackState::Playing;
+                }
+            }
             PlaybackCommand::AddToQueue(paths) => {
                 let cancelled = self.queue.add_to_queue(paths);
                 self.continue_after_cancelled_advance(cancelled);
