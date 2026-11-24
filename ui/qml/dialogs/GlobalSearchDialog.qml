@@ -963,19 +963,30 @@ Dialog {
                         x: root.sideInset
                         y: Math.round((parent.height - root.leadSize) / 2)
                         active: resultRow.isResult && resultRow.rowType !== "artist"
-                            && (model.coverUrl || "").length === 0
+                            && ((model.coverUrl || "").length === 0 || thumbnail.failed)
                         sourceComponent: noCoverTile
                     }
+                    // A cover that has not loaded yet has the library's
+                    // loading tint, so that rows coming into view do not
+                    // show an empty lead before their covers; one that
+                    // fails has the no-cover tile under it, as in the
+                    // library.
                     Kirigami.ShadowedImage {
                         id: thumbnail
                         objectName: "globalSearchThumbnail"
+                        readonly property bool failed: status === Image.Error
                         visible: resultRow.isResult && resultRow.rowType !== "artist" && (model.coverUrl || "").length > 0
                         x: root.sideInset
                         y: Math.round((parent.height - height) / 2)
                         width: root.leadSize
                         height: root.leadSize
                         radius: 2
-                        color: "transparent"
+                        // Wholly transparent rather than "transparent" once
+                        // loaded or failed, so the fill changes as a cover
+                        // loads, which the thumbnail repaints on (as the
+                        // library's thumbnails).
+                        color: status === Image.Loading || status === Image.Null
+                            ? root.uiPalette.hover : ColorUtils.withAlpha(root.uiPalette.hover, 0)
                         source: visible ? model.coverUrl : ""
                         fillMode: Image.PreserveAspectCrop
                         asynchronous: true

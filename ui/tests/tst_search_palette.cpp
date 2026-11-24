@@ -557,6 +557,7 @@ private slots:
     void glyphsTargetsAndThumbnailsFollowTheFont();
     void glyphsDrawAtTheirOwnSize_data();
     void glyphsDrawAtTheirOwnSize();
+    void thumbnailsHaveTheLoadingTintUntilTheirCoversLoad();
     void rowColumnsNeverMeet_data();
     void rowColumnsNeverMeet();
     void headingsStartTheirSections_data();
@@ -3742,6 +3743,66 @@ void SearchPaletteTest::glyphsDrawAtTheirOwnSize() {
     QQuickItem *recent = harness.drawn(QStringLiteral("globalSearchAuxGlyph"));
     QCOMPARE(recent->width(), leadGlyph);
     QVERIFY(!recent->property("roundToIconSize").toBool());
+}
+
+// A cover that has not loaded yet has the library's loading tint in its
+// place (the lead was empty until it loaded), and none once it shows; one
+// that fails to load has the no-cover tile, as in the library.
+void SearchPaletteTest::thumbnailsHaveTheLoadingTintUntilTheirCoversLoad() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    const QColor hover = harness.token("hover");
+    const auto thumbnails = [&harness] {
+        QList<QQuickItem *> items;
+        for (int i = 0; i < harness.model.rowCount(); ++i) {
+            if (QQuickItem *row = harness.row(i)) items += visibleNamed(row, QStringLiteral("globalSearchThumbnail"));
+        }
+        return items;
+    };
+    QVERIFY(thumbnails().size() >= 2);
+    for (QQuickItem *thumbnail : thumbnails()) {
+        QTRY_COMPARE(thumbnail->property("status").toInt(), 1); // Image.Ready
+        QCOMPARE(colorOf(thumbnail).alpha(), 0);
+    }
+
+    // A cover that takes a moment to load: the rows take it as the
+    // results change, and have the tint until it is ready.
+    QImage large(2400, 2400, QImage::Format_RGB32);
+    for (int y = 0; y < large.height(); ++y) {
+        for (int x = 0; x < large.width(); ++x) large.setPixel(x, y, qRgb(x % 251, y % 241, (x * y) % 239));
+    }
+    const QString largePath = harness.covers.filePath(QStringLiteral("large.png"));
+    QVERIFY(large.save(largePath));
+    harness.model.presentSearchRows(meridianRows(QUrl::fromLocalFile(largePath).toString()), {1, 2, 4}, true);
+    int loading = 0;
+    for (QQuickItem *thumbnail : thumbnails()) {
+        if (thumbnail->property("status").toInt() != 2) continue; // Image.Loading
+        ++loading;
+        QCOMPARE(hex(colorOf(thumbnail)), hex(hover));
+        QCOMPARE(colorOf(thumbnail).alpha(), hover.alpha());
+    }
+    QVERIFY(loading >= 2);
+    for (QQuickItem *thumbnail : thumbnails()) {
+        QTRY_COMPARE_WITH_TIMEOUT(thumbnail->property("status").toInt(), 1, 10000);
+        QCOMPARE(colorOf(thumbnail).alpha(), 0);
+        QVERIFY(visibleChildNamed(thumbnail->parentItem(), QStringLiteral("globalSearchCoverPlaceholder")) == nullptr);
+    }
+
+    // A cover that fails: the no-cover tile, and no tint over it.
+    harness.model.presentSearchRows(meridianRows(QUrl::fromLocalFile(harness.covers.filePath(QStringLiteral("gone.png"))).toString()),
+                                    {1, 2, 4}, true);
+    harness.settleRows();
+    for (QQuickItem *thumbnail : thumbnails()) {
+        QTRY_COMPARE(thumbnail->property("status").toInt(), 3); // Image.Error
+        QCOMPARE(colorOf(thumbnail).alpha(), 0);
+        QTRY_VERIFY(visibleChildNamed(thumbnail->parentItem(), QStringLiteral("globalSearchCoverPlaceholder")) != nullptr);
+    }
+    // The image's own warnings, one for each row.
+    dropCapturedMessagesMatching(QRegularExpression(QStringLiteral("Cannot open: .*gone\\.png")));
 }
 
 #include "tst_search_palette.moc"
