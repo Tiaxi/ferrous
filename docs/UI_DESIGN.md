@@ -148,6 +148,7 @@ Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs
 
 ## States
 
+- **A transient state doesn't reserve permanent space.** A hover readout, a tooltip, a drag box or another popup opens over space that already exists; the window doesn't keep room for it at rest, where it spends nearly all its time. The transport's time box and tooltips open over the menu bar's row, so the band is just its row: 48 px at 10 pt. A lane reserved for them made the band 80 px (158 px at 24 pt), and room added under the row to balance that lane made it worse (#784). A fix that would grow a pane or band at rest to hold a transient state needs its trade-off argued first.
 - **Rest:** no fill. Flat tool buttons show their glyph only.
 - **Hover:** the hover tint for the surface (`hover`, `rowHover`, or `hoverOn(bg)`) fades in and out over `shortDuration`. On a viewer's strip and corner plate, hover is a wash of the plot's text colour: 14 % on dark (about 1.4:1), 12 % on light. At 6.5 %, hover looked the same as rest.
 - **Pressed:** `pressed` or `pressedOn(bg)`, a clear step past the hover. It shows on the first frame of the press, never faded in. A press that matches the hover reads as nothing.
@@ -233,6 +234,7 @@ Ideas that were tried and rejected, and why. Bring one back only if your change 
 |---|---|---|
 | Main window | banners or notices for routine events | the main window stays quiet: routine events go to the status bar; a dialog appears only when the user must act |
 | Transport | the window's own colour as its background | the bar read as part of the content; it uses Breeze's Header colours |
+| Transport band | a lane above the row reserved for the seek bar's time box and the tooltips, and room under the row to balance it | 80 px for a 48 px row at rest (158 px at 24 pt), for popups that show while hovering; they now open over the menu bar's row |
 | Seek bar | an accent or amber waveform fill | amber is reserved for "now" and the playhead |
 | Seek time readout | a box on the waveform; a readout under the bar | it hid the part being scrubbed to; under the bar, it hung over the queue's header |
 | Row hover (light) | a hover tint stronger than the selection | the hovered row looked more selected than the selected one |
