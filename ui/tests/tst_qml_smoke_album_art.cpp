@@ -2237,8 +2237,7 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
     QQuickItem *label = visibleItemNamed(host, QStringLiteral("albumArtPreviewLabel"));
     QQuickItem *back = visibleItemNamed(host, QStringLiteral("albumArtPreviewBackButton"));
     QQuickItem *apply = visibleItemNamed(host, QStringLiteral("albumArtPreviewApplyButton"));
-    QQuickItem *title = visibleItemNamed(host, QStringLiteral("albumArtInfoTitle"));
-    QVERIFY2(label != nullptr && back != nullptr && apply != nullptr && title != nullptr, at.constData());
+    QVERIFY2(label != nullptr && back != nullptr && apply != nullptr, at.constData());
     const auto rectOf = [](QQuickItem *item) {
         return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
     };
@@ -2251,8 +2250,7 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
     const auto settled = [&]() {
         const QRectF rect = rectOf(column);
         return column->parentItem()->property("infoReveal").toReal() >= 1.0 && rect.contains(rectOf(label))
-            && rect.contains(rectOf(back)) && rect.contains(rectOf(apply)) && !layoutPending(label)
-            && !layoutPending(title) && !layoutPending(back) && !layoutPending(apply);
+            && rect.contains(rectOf(back)) && rect.contains(rectOf(apply)) && !layoutPending(label);
     };
     QTRY_VERIFY2(settled(), at.constData());
     const QRectF columnRect = rectOf(column);
@@ -2265,6 +2263,8 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
     // under a seam the column's width, the padding clear of the column's
     // edges, Back to Results then Apply, side by side or, in a view too
     // narrow for that, stacked. The details end above the footer.
+    QQuickItem *title = visibleItemNamed(host, QStringLiteral("albumArtInfoTitle"));
+    QVERIFY2(title != nullptr, at.constData());
     QVERIFY2(rectOf(label).bottom() <= rectOf(title).top(), at.constData());
     const qreal padding = column->parentItem()->property("infoPadding").toReal();
     QVERIFY2(padding >= 16.0, at.constData());

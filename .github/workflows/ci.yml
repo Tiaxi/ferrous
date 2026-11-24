@@ -256,8 +256,9 @@ jobs:
       - name: Install system dependencies
         timeout-minutes: 10
         run: |
-          # RPM Fusion's full FFmpeg for the libav plugin's AC-3 decoder,
-          # which the GStreamer tests of AC-3 streams play; see the Rust job.
+          # RPM Fusion's full FFmpeg for the libav plugin, as in the Rust job;
+          # Fedora's own build of the plugin, which the RPM's %check uses,
+          # also has the AC-3 decoder the GStreamer tests of AC-3 streams play.
           dnf -y $DNF_OPTS install distribution-gpg-keys
           rpm --import "/usr/share/distribution-gpg-keys/rpmfusion/RPM-GPG-KEY-rpmfusion-free-fedora-$FEDORA"
           release_rpm="$RUNNER_TEMP/rpmfusion-free-release-$FEDORA.noarch.rpm"
