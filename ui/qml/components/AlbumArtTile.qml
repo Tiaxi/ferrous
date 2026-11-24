@@ -457,9 +457,9 @@ Rectangle {
         id: albumArtMenu
         objectName: "albumArtMenu"
 
-        MenuItem { action: root.replaceFromItunesAction }
+        Components.AppMenuItem { action: root.replaceFromItunesAction }
 
-        MenuItem {
+        Components.AppMenuItem {
             enabled: false
             visible: !root.replaceFromItunesAction.enabled
             text: root.currentTrackItunesArtworkDisabledReason()

@@ -1287,7 +1287,7 @@ Components.DialogWindow {
     }
 
     // A case change of one field, in the Tools menu.
-    component CaseItem: MenuItem {
+    component CaseItem: Components.AppMenuItem {
         required property string fieldKey
         required property bool titleCase
         objectName: (titleCase ? "tagEditorTitleCase_" : "tagEditorCapitalCase_") + fieldKey
@@ -1372,7 +1372,7 @@ Components.DialogWindow {
                 objectName: "tagEditorToolsMenu"
                 y: toolsButton.height
 
-                MenuItem {
+                Components.AppMenuItem {
                     objectName: "tagEditorAutoNumberButton"
                     text: I18n.i18nc("@action:inmenu", "Auto Number…")
                     icon.name: "format-list-ordered"
@@ -1382,7 +1382,7 @@ Components.DialogWindow {
                         autoNumberDialog.open()
                     }
                 }
-                MenuItem {
+                Components.AppMenuItem {
                     objectName: "tagEditorRenameButton"
                     text: I18n.i18nc("@action:inmenu", "Rename Files…")
                     icon.name: "edit-rename"
@@ -1408,13 +1408,13 @@ Components.DialogWindow {
                     CaseItem { fieldKey: "genre"; titleCase: false }
                 }
                 MenuSeparator {}
-                MenuItem {
+                Components.AppMenuItem {
                     text: I18n.i18nc("@action:inmenu", "Select All")
                     icon.name: "edit-select-all"
                     enabled: root.totalRows > 0
                     onClicked: root.selectAllRows()
                 }
-                MenuItem {
+                Components.AppMenuItem {
                     objectName: "tagEditorClearSelectionItem"
                     text: I18n.i18nc("@action:inmenu", "Clear Selection")
                     icon.name: "edit-select-none"

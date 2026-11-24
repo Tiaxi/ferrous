@@ -253,6 +253,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/AlternateShortcuts.qml
         qml/components/AppMenu.qml
         qml/components/AppMenuBarItem.qml
+        qml/components/AppMenuItem.qml
         qml/components/CaptionButton.qml
         qml/components/CompactDialogWindow.qml
         qml/components/ConditionalMenuItem.qml

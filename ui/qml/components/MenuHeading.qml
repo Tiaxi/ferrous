@@ -12,7 +12,7 @@ import org.kde.kirigami 2.20 as Kirigami
 // It is a menu item, not a bare Item, so that a native menu (DBusMenu, the
 // Plasma Global Menu) would show it as a labelled item rather than drop it.
 // Qt 6.11 draws a MenuBar's menus itself on Linux, so today it never is.
-MenuItem {
+AppMenuItem {
     id: root
 
     // Tells headings from the items they head, for tests and tools.

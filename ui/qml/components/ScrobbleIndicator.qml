@@ -396,14 +396,14 @@ AbstractButton {
         id: menu
         objectName: "scrobbleIndicatorMenu"
 
-        MenuItem {
+        Components.AppMenuItem {
             objectName: "scrobbleIndicatorPauseItem"
             text: I18n.i18nc("@action:inmenu", "Pause Scrobbling")
             checkable: true
             checked: root.paused
             onTriggered: root.uiBridge.setLastFmScrobblingPaused(checked)
         }
-        MenuItem {
+        Components.AppMenuItem {
             objectName: "scrobbleIndicatorSettingsItem"
             text: I18n.i18nc("@action:inmenu", "Last.fm Settings…")
             // No glyph: its words line up with Pause Scrobbling's after the

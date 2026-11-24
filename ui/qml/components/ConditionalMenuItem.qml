@@ -11,7 +11,7 @@ import QtQuick.Controls
 // action and at each change of it, after the bindings that read it have
 // run, so a binding was written over. The item follows the action after the
 // button has.
-MenuItem {
+AppMenuItem {
     id: root
 
     property bool canAct: true

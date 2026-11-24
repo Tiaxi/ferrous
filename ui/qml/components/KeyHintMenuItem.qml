@@ -8,7 +8,7 @@ import org.kde.kirigami 2.20 as Kirigami
 // in the view the menu was opened from: Enter plays the selected row, Delete
 // removes it. An action's shortcut would take the key from the whole window
 // (and Enter from the open menu), so the key is only shown here.
-MenuItem {
+AppMenuItem {
     id: root
 
     // The key, as the menu shows a shortcut, such as "Enter" or "Del".

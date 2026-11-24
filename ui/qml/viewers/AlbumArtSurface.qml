@@ -631,8 +631,8 @@ Item {
             // the whole screen anyway.
             popupType: Popup.Item
 
-            MenuItem { action: root.replaceFromItunesAction }
-            MenuItem {
+            Components.AppMenuItem { action: root.replaceFromItunesAction }
+            Components.AppMenuItem {
                 enabled: false
                 visible: !root.replaceFromItunesAction.enabled
                 text: root.currentTrackItunesArtworkDisabledReason()

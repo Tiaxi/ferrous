@@ -518,22 +518,22 @@ Preferences.PreferencesPage {
     Components.AppMenu {
         id: rootContextMenu
         objectName: "libraryRootContextMenu"
-        MenuItem {
+        Components.AppMenuItem {
             text: I18n.i18nc("@action:inmenu %1 is the file manager", "Open in %1", root.uiBridge.fileBrowserName || "")
             icon.name: "system-file-manager"
             onTriggered: root.openCurrentRoot()
         }
-        MenuItem {
+        Components.AppMenuItem {
             text: I18n.i18nc("@action:inmenu", "Rename…")
             icon.name: "edit-rename"
             onTriggered: root.renameCurrentRoot()
         }
-        MenuItem {
+        Components.AppMenuItem {
             text: I18n.i18nc("@action:inmenu", "Rescan")
             icon.name: "view-refresh"
             onTriggered: root.rescanCurrentRoot()
         }
-        MenuItem {
+        Components.AppMenuItem {
             objectName: "libraryRootRescanAllMenuItem"
             text: I18n.i18nc("@action:inmenu", "Rescan All Folders")
             // A folder with sync arrows, not Rescan's: the two read apart,
@@ -542,7 +542,7 @@ Preferences.PreferencesPage {
             onTriggered: root.uiBridge.rescanAllLibraryRoots()
         }
         MenuSeparator {}
-        MenuItem {
+        Components.AppMenuItem {
             text: I18n.i18nc("@action:inmenu", "Remove")
             icon.name: "list-remove"
             onTriggered: root.removeCurrentRoot()

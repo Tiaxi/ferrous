@@ -1188,7 +1188,7 @@ Rectangle {
 
                     MenuSeparator {}
 
-                    MenuItem {
+                    Components.AppMenuItem {
                         objectName: "queueShowInLibraryItem"
                         text: I18n.i18nc("@action:inmenu", "Show in Library")
                         icon.name: "go-jump"
@@ -1199,7 +1199,7 @@ Rectangle {
                         }
                     }
 
-                    MenuItem {
+                    Components.AppMenuItem {
                         objectName: "queueOpenFolderItem"
                         text: I18n.i18nc("@action:inmenu", "Open Containing Folder")
                         icon.name: "folder-open"
@@ -1212,7 +1212,7 @@ Rectangle {
                         }
                     }
 
-                    MenuItem {
+                    Components.AppMenuItem {
                         objectName: "queueEditTagsItem"
                         text: I18n.i18nc("@action:inmenu", "Edit Tags…")
                         icon.name: "document-edit"

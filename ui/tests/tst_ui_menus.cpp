@@ -13,6 +13,8 @@
 #include <QColor>
 #include <QCursor>
 #include <QDesktopServices>
+#include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFont>
 #include <QKeySequence>
@@ -595,6 +597,9 @@ private slots:
     void menuBarTitleReadsWhenOpenOrHovered();
     void menuBarTellsHoverFromOpen_data();
     void menuBarTellsHoverFromOpen();
+    void menuItemGlyphsGrowWithTheFont_data();
+    void menuItemGlyphsGrowWithTheFont();
+    void everyMenuItemIsAnAppMenuItem();
     void menusReadInKdesWordsAndOrder();
     void libraryFolderMenuNamesTheFolder();
     void menusAnswerThePointerAndTheKeyboard();
@@ -1335,6 +1340,172 @@ void UiMenusTest::menuBarTellsHoverFromOpen() {
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(!file->property("highlighted").toBool());
     QTRY_VERIFY(!background->isVisible());
+}
+
+void UiMenusTest::menuItemGlyphsGrowWithTheFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("glyph");
+    QTest::newRow("10 pt") << 10.0 << 16;
+    QTest::newRow("24 pt") << 24.0 << 32;
+    QTest::newRow("40 pt") << 40.0 << 32;
+}
+
+// A menu item's glyph grows with the font as its words do, from 16 px at
+// the default font to 32 px and no larger, in the menu bar's menus and the
+// context menus, with the gap to the words as at the default font.
+void UiMenusTest::menuItemGlyphsGrowWithTheFont() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, glyph);
+    ScopedApplicationFont font(pointSize);
+    MainWindowFixture main(wideWindow());
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+
+    // Every item of every menu bar menu, as declared.
+    for (QObject *menu : menusOf(window)) {
+        for (QQuickItem *item : menuItems(menu)) {
+            if (item == nullptr || item->inherits("QQuickMenuSeparator")) {
+                continue;
+            }
+            const QString name = withoutMnemonic(item->property("text").toString());
+            QCOMPARE(QQmlProperty::read(item, QStringLiteral("icon.width")).toInt(), glyph);
+            QCOMPARE(QQmlProperty::read(item, QStringLiteral("icon.height")).toInt(), glyph);
+            QVERIFY2(childNamed(item, "appMenuItemIcon") != nullptr, qPrintable(name));
+        }
+    }
+
+    // As drawn: the glyph at its size, the words a spacing after it.
+    const auto checkDrawn = [&](QObject *menu) {
+        int glyphs = 0;
+        for (QQuickItem *item : menuItems(menu)) {
+            if (item == nullptr || !item->isVisible() || item->inherits("QQuickMenuSeparator")
+                || iconOf(item).isEmpty()) {
+                continue;
+            }
+            const QString name = withoutMnemonic(item->property("text").toString());
+            QQuickItem *icon = childNamed(item, "appMenuItemIcon");
+            QQuickItem *label = childNamed(item, "appMenuItemLabel");
+            QQuickItem *row = childNamed(item, "appMenuItemRow");
+            QVERIFY2(icon != nullptr && label != nullptr && row != nullptr, qPrintable(name));
+            QVERIFY2(icon->isVisible(), qPrintable(name));
+            QCOMPARE(icon->width(), qreal(glyph));
+            QCOMPARE(icon->height(), qreal(glyph));
+            const qreal gap = label->x() - (icon->x() + icon->width());
+            QCOMPARE(gap, row->property("spacing").toReal());
+            QVERIFY2(gap >= 4.0, qPrintable(QStringLiteral("%1: %2").arg(name).arg(gap)));
+            // The row holds the glyph.
+            QVERIFY2(item->height() >= glyph + item->property("topPadding").toReal()
+                                           + item->property("bottomPadding").toReal(),
+                     qPrintable(name));
+            ++glyphs;
+        }
+        QVERIFY(glyphs >= 3);
+    };
+
+    QObject *menuBar = menuBarOf(window);
+    QObject *edit = menuNamed(window, "editMenu");
+    QVERIFY(edit != nullptr);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRect(menuBarItemAt(menuBar, 1)).center().toPoint());
+    QTRY_VERIFY(edit->property("opened").toBool());
+    checkDrawn(edit);
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+    QMetaObject::invokeMethod(edit, "close");
+    QTRY_VERIFY(!edit->property("visible").toBool());
+
+    // A context menu: the library's.
+    QObject *bridge = bridgeOf(window);
+    bridge->setProperty("libraryRootCount", 1);
+    main.libraryModel.setExpandedKeys({kArtistKey, kAlbumKey});
+    main.libraryModel.setLibraryTreeFromBinary(artistAlbumTrackTree());
+    QTRY_VERIFY(viewRow(window, "libraryView", 1) != nullptr);
+    rightClick(window, viewRow(window, "libraryView", 1));
+    QObject *library = nullptr;
+    QTRY_VERIFY(QTest::qWaitFor([&]() {
+        library = visibleMenu(window, QStringLiteral("libraryContextMenu"));
+        return library != nullptr && library->property("opened").toBool();
+    }));
+    checkDrawn(library);
+    QMetaObject::invokeMethod(library, "close");
+    QTRY_VERIFY(!library->property("visible").toBool());
+}
+
+// Every menu item in the app's sources is an AppMenuItem, or a component
+// made from one, so every menu's glyphs follow the font; and its words
+// show markup as text, with the mnemonic underlined.
+void UiMenusTest::everyMenuItemIsAnAppMenuItem() {
+    const QDir qml(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml"));
+    QDirIterator files(qml.path(), {QStringLiteral("*.qml")}, QDir::Files, QDirIterator::Subdirectories);
+    const QRegularExpression bareItem(QStringLiteral(R"((^|[^A-Za-z.])(Controls\.|T\.)?MenuItem\s*\{)"),
+                                      QRegularExpression::MultilineOption);
+    int files_ = 0;
+    while (files.hasNext()) {
+        const QString path = files.next();
+        const QString file = qml.relativeFilePath(path);
+        if (file == QStringLiteral("components/AppMenuItem.qml")) {
+            continue;
+        }
+        QFile source(path);
+        QVERIFY(source.open(QIODevice::ReadOnly));
+        const QString text = QString::fromUtf8(source.readAll());
+        QVERIFY2(!bareItem.match(text).hasMatch(), qPrintable(file));
+        ++files_;
+    }
+    QVERIFY(files_ > 20);
+
+    // At a large font, where a glyph is wider than Breeze's.
+    ScopedApplicationFont font(24);
+    QQmlEngine engine;
+    QQmlComponent component(&engine);
+    component.setData(QByteArrayLiteral(R"QML(
+import QtQuick
+import QtQuick.Controls
+import "components" as Components
+
+ApplicationWindow {
+    width: 300
+    height: 200
+    visible: true
+    property alias menu: menu
+    Components.AppMenu {
+        id: menu
+        Components.AppMenuItem { objectName: "markup"; text: "<b>Bold</b> && \"Q\" &Open"; icon.name: "document-open" }
+        Components.AppMenu {
+            title: "&More"
+            Components.AppMenuItem { text: "&Inner" }
+        }
+    }
+}
+)QML"),
+                      QUrl::fromLocalFile(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/AppMenuItemHarness.qml")));
+    std::unique_ptr<QObject> root(component.create());
+    QVERIFY2(root != nullptr, qPrintable(component.errorString()));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
+    QObject *menu = qvariant_cast<QObject *>(root->property("menu"));
+    QMetaObject::invokeMethod(menu, "open");
+    QTRY_VERIFY(menu->property("opened").toBool());
+    QQuickItem *item = menuItems(menu).value(0);
+    QQuickItem *submenuItem = menuItems(menu).value(1);
+    QVERIFY(item != nullptr && submenuItem != nullptr);
+    QQuickItem *label = childNamed(item, "appMenuItemLabel");
+    QVERIFY(label != nullptr);
+    // The menu makes a submenu's item, an AppMenuItem as well: its words
+    // in the other items' column.
+    QQuickItem *submenuLabel = childNamed(submenuItem, "appMenuItemLabel");
+    QVERIFY(submenuLabel != nullptr);
+    QTRY_COMPARE(submenuLabel->mapToScene(QPointF()).x(), label->mapToScene(QPointF()).x());
+    // The words' own markup is escaped, and shows as text.
+    QCOMPARE(label->property("text").toString(), QStringLiteral("&lt;b&gt;Bold&lt;/b&gt; &amp; &quot;Q&quot; Open"));
+    // Alt held: the mnemonic, underlined, is the only markup.
+    QVariant underlined;
+    QVERIFY(QMetaObject::invokeMethod(item, "styledLabel", Q_RETURN_ARG(QVariant, underlined),
+                                      Q_ARG(QVariant, QStringLiteral("<b>Bold</b> && \"Q\" &Open")),
+                                      Q_ARG(QVariant, true)));
+    QCOMPARE(underlined.toString(), QStringLiteral("&lt;b&gt;Bold&lt;/b&gt; &amp; &quot;Q&quot; <u>O</u>pen"));
+    QMetaObject::invokeMethod(menu, "close");
+    QTRY_VERIFY(!menu->property("visible").toBool());
 }
 
 void UiMenusTest::checkMenusListTheirItemsInOrder(QQuickWindow *window) {
