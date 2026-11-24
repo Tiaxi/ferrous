@@ -1198,6 +1198,22 @@ void TransportStatusTest::transportToolTipsPassAlongTheRowAtOnce() {
     QTest::mouseMove(harness.window, sceneCentre(buttons.at(1)));
     QVERIFY(buttonToolTip(buttons.at(1))->property("visible").toBool());
     QVERIFY(!volumeTip->property("visible").toBool());
+
+    // One that the keyboard's focus shows, still waiting as the pointer
+    // comes on to its control, opens at once then too: Play focused, from
+    // Previous, across the gap, on to Play (it waited the rest of the
+    // delay, the lane empty).
+    QObject *playTip = buttonToolTip(buttons.at(1));
+    QTest::mouseMove(harness.window, sceneCentre(buttons.at(0)));
+    buttons.at(1)->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(buttons.at(1)->property("visualFocus").toBool());
+    QTRY_VERIFY(buttonToolTip(buttons.at(0))->property("opened").toBool());
+    QTRY_VERIFY(!playTip->property("visible").toBool());
+    QTest::mouseMove(harness.window, QPointF((sceneRect(buttons.at(0)).right() + sceneRect(buttons.at(1)).left()) / 2,
+                                             sceneRect(buttons.at(1)).center().y()).toPoint());
+    QVERIFY(!playTip->property("visible").toBool());
+    QTest::mouseMove(harness.window, sceneCentre(buttons.at(1)));
+    QVERIFY(playTip->property("visible").toBool());
 }
 
 void TransportStatusTest::seekWaveformMeetsItsContrastAsDrawn_data() {

@@ -526,13 +526,6 @@ ToolBar {
     // of a second at each button, and the menu's titles came back in
     // between.
     readonly property bool laneWarm: root.lanePopups.some(popup => popup.background.visible)
-    // The delay of a tooltip in the lane: the style's, or none for the
-    // control under the pointer, `pointed`, while the lane is warm. A
-    // tooltip the keyboard's focus shows waits it (in the gap between two
-    // buttons, the focused volume's opened at once, for a moment).
-    function laneToolTipDelay(pointed) {
-        return pointed && root.laneWarm ? 0 : Kirigami.Units.toolTipDelay
-    }
 
     // Over the menu bar's row, while a box of the lane covers or comes
     // within laneBackdropReach of a menu title, all of the titles go under
@@ -677,6 +670,25 @@ ToolBar {
         // Whether it is to show, as its delay begins, and to hide, as its
         // fade out begins: a popup is `visible` until it has faded out.
         property bool wanted: false
+        // Set together with the delay, which the tooltip reads as it is
+        // made visible: a binding of each could see the other still
+        // unchanged. The style's delay, or none on a press, or with the
+        // pointer on its control while the lane is warm, also for one the
+        // keyboard's focus shows that still waits (it waited on, and the
+        // lane stood empty). Without the pointer, the delay: in the gap
+        // between two buttons the focused volume's opened for a moment.
+        visible: false
+        delay: 0
+        function showOrHide() {
+            delay = rowItem.pressed || (rowItem.hovered && root.laneWarm) ? 0 : Kirigami.Units.toolTipDelay
+            visible = wanted
+        }
+        onWantedChanged: showOrHide()
+        Connections {
+            target: laneToolTip.rowItem
+            function onHoveredChanged() { laneToolTip.showOrHide() }
+            function onPressedChanged() { laneToolTip.showOrHide() }
+        }
         parent: rowItem
         y: root.laneY(rowItem, height)
         topMargin: 0
@@ -763,15 +775,6 @@ ToolBar {
             rowItem: transportButton
             wanted: (transportButton.hovered || transportButton.visualFocus) && !transportButton.down
                 && root.laneFreeFor(transportButton)
-            // Set together with the delay, which the tooltip reads as it is
-            // made visible: a binding of each could see the other still
-            // unchanged.
-            visible: false
-            delay: 0
-            onWantedChanged: {
-                delay = root.laneToolTipDelay(transportButton.hovered)
-                visible = wanted
-            }
             message: transportButton.toolTipText
         }
         // Space presses the focused button rather than playing or pausing;
@@ -1735,13 +1738,6 @@ ToolBar {
                 rowItem: muteButton
                 wanted: (muteButton.hovered || muteButton.visualFocus) && !muteButton.down
                     && root.laneFreeFor(muteButton)
-                // Set together with the delay, as the other buttons' are.
-                visible: false
-                delay: 0
-                onWantedChanged: {
-                    delay = root.laneToolTipDelay(muteButton.hovered)
-                    visible = wanted
-                }
                 message: muteButton.toolTipText
             }
             focusPolicy: Qt.TabFocus
@@ -1823,23 +1819,11 @@ ToolBar {
                 id: volumeToolTip
                 objectName: "volumeToolTip"
                 rowItem: volumeSlider
+                // A press shows it at once, also within the hover's delay
+                // (with the delay in a binding of its own, a press within
+                // it waited the delay out again).
                 wanted: (volumeSlider.hovered || volumeSlider.visualFocus
                     || volumeSlider.pressed) && root.laneFreeFor(volumeSlider)
-                // Set together with the delay, which the tooltip reads as it
-                // is made visible: a binding of each could see the other
-                // still unchanged, and a press within the hover's delay then
-                // waited the delay out again.
-                visible: false
-                delay: 0
-                function showOrHide() {
-                    delay = volumeSlider.pressed ? 0 : root.laneToolTipDelay(volumeSlider.hovered)
-                    visible = wanted
-                }
-                onWantedChanged: showOrHide()
-                Connections {
-                    target: volumeSlider
-                    function onPressedChanged() { volumeToolTip.showOrHide() }
-                }
                 message: volumeSlider.toolTipText
             }
 
