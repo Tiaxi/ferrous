@@ -1199,6 +1199,8 @@ private slots:
     void regionHeadersNameTheRegionAndItsTotals();
     void libraryHeaderSaysItHasNoFolders_data();
     void libraryHeaderSaysItHasNoFolders();
+    void libraryHeaderShortensToItsTrackTotal_data();
+    void libraryHeaderShortensToItsTrackTotal();
     void selectedRowsDrawTheirMarksForTheSelection();
     void libraryTreeHasOneIndentStep();
     void libraryAlbumWithoutACoverShowsAPlaceholderTile();
@@ -4964,13 +4966,59 @@ void UiMainWindowTest::libraryHeaderSaysItHasNoFolders() {
     bridge->setProperty("libraryArtistCount", 1);
     bridge->setProperty("libraryAlbumCount", 2);
     bridge->setProperty("libraryTrackCount", 9);
-    // (At 24 pt the header shows as many of them as fit.)
+    // (At 24 pt the header shows the track total when they don't all fit.)
     QTRY_COMPARE(header->property("totals").toString(),
                  narrow ? QStringLiteral("9 tracks") : QStringLiteral("1 artist · 2 albums · 9 tracks"));
     // The folder removed again.
     bridge->setProperty("libraryRootCount", 0);
     bridge->setProperty("libraryTrackCount", 0);
     QTRY_COMPARE(totals->property("text").toString(), QStringLiteral("No folders"));
+}
+
+void UiMainWindowTest::libraryHeaderShortensToItsTrackTotal_data() {
+    QTest::addColumn<qreal>("points");
+    QTest::addColumn<int>("width");
+    QTest::addColumn<bool>("whole");
+    QTest::newRow("10 pt, wide") << 10.0 << 1600 << true;
+    QTest::newRow("10 pt, narrow") << 10.0 << 1000 << false;
+    QTest::newRow("24 pt, wide") << 24.0 << 1600 << false;
+    QTest::newRow("24 pt, very wide") << 24.0 << 2400 << true;
+    QTest::newRow("24 pt, narrow") << 24.0 << 1000 << false;
+}
+
+// When the library's totals don't fit whole, its header shows the track
+// total, at any width and font, as the narrow sidebar does. At a large font
+// in a wide window it dropped totals from the end and kept "13 artists",
+// which said less than "180 tracks" and differed from the narrow window.
+void UiMainWindowTest::libraryHeaderShortensToItsTrackTotal() {
+    QFETCH(qreal, points);
+    QFETCH(int, width);
+    QFETCH(bool, whole);
+    const ScopedApplicationFont font(points);
+    MainWindowFixture fixture(sized(width, 1000));
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *header = named(window, "libraryHeader");
+    QVERIFY(header != nullptr);
+    QQuickItem *title = itemNamed(header, QStringLiteral("regionHeaderTitle"));
+    QQuickItem *totals = itemNamed(header, QStringLiteral("regionHeaderTotals"));
+    QVERIFY(title && totals);
+    bridge->setProperty("libraryRootCount", 1);
+    bridge->setProperty("libraryArtistCount", 13);
+    bridge->setProperty("libraryAlbumCount", 29);
+    bridge->setProperty("libraryTrackCount", 180);
+    const QString all = QStringLiteral("13 artists · 29 albums · 180 tracks");
+    const QString shortened = QStringLiteral("180 tracks");
+    QTRY_VERIFY(shown(totals));
+    QTRY_COMPARE(totals->property("text").toString(), whole ? all : shortened);
+    QVERIFY(!totals->property("truncated").toBool());
+    QVERIFY(!title->property("truncated").toBool());
+    // The heading still names every total where there is room for them.
+    QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(header);
+    QVERIFY(accessible != nullptr);
+    QVERIFY2(accessible->text(QAccessible::Name).endsWith(width > 1000 ? all : shortened),
+             qPrintable(accessible->text(QAccessible::Name)));
 }
 
 // A selected row of the queue draws its length in the selected row's

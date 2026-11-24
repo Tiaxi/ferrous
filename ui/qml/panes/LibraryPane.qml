@@ -154,6 +154,15 @@ Rectangle {
     onCurrentTrackTreeKeysChanged: root.followNowTrack()
     Component.onCompleted: root.followNowTrack()
 
+    // The track total alone, which the header shows when the whole totals
+    // don't fit: in a narrow sidebar always, and at a large font in any
+    // width, rather than the artists alone.
+    readonly property string compactTotalsText: root.uiBridge.libraryLoaded === true
+        && root.uiBridge.libraryRootCount > 0 && root.uiBridge.libraryTrackCount > 0
+        ? I18n.i18ncp("@info:status library totals", "%1 track", "%1 tracks",
+                      root.uiBridge.libraryTrackCount)
+        : ""
+
     readonly property string totalsText: {
         // Nothing until the backend has read the library: its counts are
         // not known yet.
@@ -165,19 +174,16 @@ Rectangle {
         if (root.uiBridge.libraryRootCount === 0) {
             return I18n.i18nc("@info:status library totals, no library folder added", "No folders")
         }
-        const tracks = root.uiBridge.libraryTrackCount
         const parts = []
-        if (tracks > 0) {
-            const trackText = I18n.i18ncp("@info:status library totals", "%1 track", "%1 tracks",
-                                          tracks)
+        if (root.uiBridge.libraryTrackCount > 0) {
             if (root.narrow) {
-                parts.push(trackText)
+                parts.push(root.compactTotalsText)
             } else {
                 parts.push(I18n.i18ncp("@info:status library totals", "%1 artist", "%1 artists",
                                        root.uiBridge.libraryArtistCount))
                 parts.push(I18n.i18ncp("@info:status library totals", "%1 album", "%1 albums",
                                        root.uiBridge.libraryAlbumCount))
-                parts.push(trackText)
+                parts.push(root.compactTotalsText)
             }
         }
         // A scan's progress is the status bar's.
@@ -199,6 +205,7 @@ Rectangle {
             rightInset: root.rowInset
             title: I18n.i18nc("@title library region", "Library")
             totals: root.totalsText
+            compactTotals: root.compactTotalsText
         }
 
         Item {
