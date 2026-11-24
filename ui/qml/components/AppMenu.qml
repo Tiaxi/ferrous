@@ -21,6 +21,10 @@ Menu {
 
     popupType: Popup.Window
 
+    // The items the menu makes itself, such as a submenu's, are the app's
+    // too: their words line up with the other items' at any font.
+    delegate: AppMenuItem {}
+
     // A menu that is a window goes at once when it closes, without the
     // style's fade out; Plasma's compositor fades popup windows itself.
     //

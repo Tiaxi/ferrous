@@ -305,19 +305,19 @@ Components.DialogWindow {
                         Components.AppMenu {
                             id: diagnosticsContextMenu
 
-                            MenuItem {
+                            Components.AppMenuItem {
                                 text: I18n.i18nc("@action:inmenu", "Copy")
                                 enabled: diagnosticsLogView.hasSelection
                                 onTriggered: diagnosticsLogView.copy()
                             }
 
-                            MenuItem {
+                            Components.AppMenuItem {
                                 text: I18n.i18nc("@action:inmenu", "Select All")
                                 enabled: diagnosticsLogView.length > 0
                                 onTriggered: diagnosticsLogView.selectAll()
                             }
 
-                            MenuItem {
+                            Components.AppMenuItem {
                                 objectName: "diagnosticsCopyWithPathsMenuItem"
                                 text: I18n.i18nc("@action:inmenu", "Copy With Paths")
                                 enabled: diagnosticsLogView.length > 0
@@ -327,7 +327,7 @@ Components.DialogWindow {
                                 }
                             }
 
-                            MenuItem {
+                            Components.AppMenuItem {
                                 objectName: "diagnosticsCopyWithoutPathsMenuItem"
                                 text: I18n.i18nc("@action:inmenu", "Copy Without Paths")
                                 enabled: diagnosticsLogView.length > 0

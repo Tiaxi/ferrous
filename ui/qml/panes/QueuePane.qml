@@ -1188,10 +1188,11 @@ Rectangle {
 
                     MenuSeparator {}
 
-                    MenuItem {
+                    Components.AppMenuItem {
                         objectName: "queueShowInLibraryItem"
                         text: I18n.i18nc("@action:inmenu", "Show in Library")
-                        icon.name: "go-jump"
+                        // The library's tree, as the search result's item.
+                        icon.name: "view-list-tree"
                         enabled: playlistContextMenu.rowIndex >= 0
                         onTriggered: {
                             const path = root.uiBridge.queuePathAt(playlistContextMenu.rowIndex)
@@ -1199,7 +1200,7 @@ Rectangle {
                         }
                     }
 
-                    MenuItem {
+                    Components.AppMenuItem {
                         objectName: "queueOpenFolderItem"
                         text: I18n.i18nc("@action:inmenu", "Open Containing Folder")
                         icon.name: "folder-open"
@@ -1212,7 +1213,7 @@ Rectangle {
                         }
                     }
 
-                    MenuItem {
+                    Components.AppMenuItem {
                         objectName: "queueEditTagsItem"
                         text: I18n.i18nc("@action:inmenu", "Edit Tags…")
                         icon.name: "document-edit"

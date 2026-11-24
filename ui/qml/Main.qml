@@ -922,7 +922,10 @@ ApplicationWindow {
         shortcutId: "clear_queue"
         overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "&Clear Queue")
-        icon.name: "edit-clear-list"
+        // Breeze's broom, a line glyph as Undo's, Redo's and Find's beside
+        // it, not edit-clear-list's filled badge, the one solid shape in
+        // the menu.
+        icon.name: "edit-clear-all"
         enabled: uiBridge.queueLength > 0 && !root.viewerOpen
         onTriggered: uiBridge.clearQueue()
     }
@@ -1220,7 +1223,10 @@ ApplicationWindow {
         shortcutId: "volume_up"
         overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "Volume &Up")
-        icon.name: "audio-volume-high"
+        // No glyph, nor Volume Down: Breeze's loud and quiet speakers differ
+        // only in how faint their waves are, which 16 px does not show, and
+        // its plus and minus do not say volume. The two read as words, as
+        // Mute beside them.
         defaultKeyBindings: ["Alt+Up"]
         onTriggered: playbackController.changeVolumeBy(root.keyboardVolumeStep)
     }
@@ -1230,7 +1236,6 @@ ApplicationWindow {
         shortcutId: "volume_down"
         overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "Volume &Down")
-        icon.name: "audio-volume-low"
         defaultKeyBindings: ["Alt+Down"]
         onTriggered: playbackController.changeVolumeBy(-root.keyboardVolumeStep)
     }
@@ -1406,54 +1411,54 @@ ApplicationWindow {
         Components.AppMenu {
             objectName: "fileMenu"
             title: I18n.i18nc("@title:menu", "&File")
-            MenuItem { action: openFilesAction }
-            MenuItem { action: addFilesAction }
-            MenuItem { action: addFolderAction }
+            Components.AppMenuItem { action: openFilesAction }
+            Components.AppMenuItem { action: addFilesAction }
+            Components.AppMenuItem { action: addFolderAction }
             MenuSeparator {}
-            MenuItem { action: addLibraryFolderAction }
-            MenuItem { action: playAllLibraryTracksAction }
-            MenuItem { action: appendAllLibraryTracksAction }
+            Components.AppMenuItem { action: addLibraryFolderAction }
+            Components.AppMenuItem { action: playAllLibraryTracksAction }
+            Components.AppMenuItem { action: appendAllLibraryTracksAction }
             MenuSeparator {}
-            MenuItem { action: quitAction }
+            Components.AppMenuItem { action: quitAction }
         }
         Components.AppMenu {
             objectName: "editMenu"
             title: I18n.i18nc("@title:menu", "&Edit")
-            MenuItem { action: undoQueueChangeAction }
-            MenuItem { action: redoQueueChangeAction }
+            Components.AppMenuItem { action: undoQueueChangeAction }
+            Components.AppMenuItem { action: redoQueueChangeAction }
             MenuSeparator {}
-            MenuItem { action: globalSearchAction }
+            Components.AppMenuItem { action: globalSearchAction }
             MenuSeparator {}
-            MenuItem { action: clearQueueAction }
+            Components.AppMenuItem { action: clearQueueAction }
         }
         Components.AppMenu {
             objectName: "viewMenu"
             title: I18n.i18nc("@title:menu", "&View")
-            MenuItem { action: visualizationViewerAction }
-            MenuItem { action: albumArtViewerAction }
+            Components.AppMenuItem { action: visualizationViewerAction }
+            Components.AppMenuItem { action: albumArtViewerAction }
             MenuSeparator {}
             Components.MenuHeading {
                 objectName: "visualizationHeading"
                 text: I18n.i18nc("@title:menu visualization modes", "Visualization")
             }
-            MenuItem {
+            Components.AppMenuItem {
                 action: spectrogramModeAction
                 Accessible.description: I18n.i18nc("@info", "Visualization")
             }
-            MenuItem {
+            Components.AppMenuItem {
                 action: waveformModeAction
                 Accessible.description: I18n.i18nc("@info", "Visualization")
             }
             MenuSeparator {}
-            MenuItem { action: showLevelMeterAction }
-            MenuItem { action: showScaleAction }
+            Components.AppMenuItem { action: showLevelMeterAction }
+            Components.AppMenuItem { action: showScaleAction }
             MenuSeparator {}
             // By what they act on: the plot, then the queue. Two items
             // that follow read as one another's variants in one group.
-            MenuItem { action: resetZoomAction }
-            MenuItem { action: followPlayheadAction }
+            Components.AppMenuItem { action: resetZoomAction }
+            Components.AppMenuItem { action: followPlayheadAction }
             MenuSeparator {}
-            MenuItem { action: autoCenterSelectionAction }
+            Components.AppMenuItem { action: autoCenterSelectionAction }
         }
         Components.AppMenu {
             objectName: "playbackMenu"
@@ -1477,10 +1482,10 @@ ApplicationWindow {
                 canAct: root.skipCanAct
             }
             MenuSeparator {}
-            MenuItem { action: seekBackwardAction }
-            MenuItem { action: seekForwardAction }
+            Components.AppMenuItem { action: seekBackwardAction }
+            Components.AppMenuItem { action: seekForwardAction }
             MenuSeparator {}
-            MenuItem { action: shuffleAction }
+            Components.AppMenuItem { action: shuffleAction }
             // A heading starts a group, as View's Visualization does:
             // without the rule Shuffle read as the first of Repeat's.
             MenuSeparator {}
@@ -1488,37 +1493,37 @@ ApplicationWindow {
                 objectName: "repeatHeading"
                 text: I18n.i18nc("@title:menu repeat modes", "Repeat")
             }
-            MenuItem {
+            Components.AppMenuItem {
                 action: repeatOffAction
                 Accessible.description: I18n.i18nc("@info", "Repeat")
             }
-            MenuItem {
+            Components.AppMenuItem {
                 action: repeatOneAction
                 Accessible.description: I18n.i18nc("@info", "Repeat")
             }
-            MenuItem {
+            Components.AppMenuItem {
                 action: repeatAllAction
                 Accessible.description: I18n.i18nc("@info", "Repeat")
             }
             MenuSeparator {}
-            MenuItem { action: volumeUpAction }
-            MenuItem { action: volumeDownAction }
-            MenuItem { action: muteAction }
+            Components.AppMenuItem { action: volumeUpAction }
+            Components.AppMenuItem { action: volumeDownAction }
+            Components.AppMenuItem { action: muteAction }
         }
         Components.AppMenu {
             objectName: "settingsMenu"
             title: I18n.i18nc("@title:menu", "&Settings")
-            MenuItem { action: configureShortcutsAction }
-            MenuItem { action: preferencesAction }
+            Components.AppMenuItem { action: configureShortcutsAction }
+            Components.AppMenuItem { action: preferencesAction }
         }
         Components.AppMenu {
             objectName: "helpMenu"
             title: I18n.i18nc("@title:menu", "&Help")
-            MenuItem { action: reportBugAction }
-            MenuItem { action: diagnosticsAction }
+            Components.AppMenuItem { action: reportBugAction }
+            Components.AppMenuItem { action: diagnosticsAction }
             MenuSeparator {}
-            MenuItem { action: aboutAction }
-            MenuItem { action: aboutKdeAction }
+            Components.AppMenuItem { action: aboutAction }
+            Components.AppMenuItem { action: aboutKdeAction }
         }
     }
 

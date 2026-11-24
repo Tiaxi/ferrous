@@ -969,7 +969,7 @@ Rectangle {
                         onTriggered: root.controller.playRowItems(libraryContextMenu.rowMap)
                     }
 
-                    MenuItem {
+                    Components.AppMenuItem {
                         objectName: "libraryQueueItem"
                         text: {
                             if (libraryContextMenu.actsOnSelection) {
@@ -1000,7 +1000,7 @@ Rectangle {
                     // library folder's, an artist's, an album's or a
                     // subfolder's is the folder itself, which is not the
                     // one that contains it.
-                    MenuItem {
+                    Components.AppMenuItem {
                         objectName: "libraryOpenFolderItem"
                         text: libraryContextMenu.rowType === "track"
                             ? I18n.i18nc("@action:inmenu", "Open Containing Folder")
@@ -1018,7 +1018,7 @@ Rectangle {
                         }
                     }
 
-                    MenuItem {
+                    Components.AppMenuItem {
                         objectName: "libraryEditTagsItem"
                         text: I18n.i18nc("@action:inmenu", "Edit Tags…")
                         icon.name: "document-edit"
@@ -1031,7 +1031,7 @@ Rectangle {
 
                     // The header has no buttons: collapsing the whole tree
                     // is here, beside the row's own actions.
-                    MenuItem {
+                    Components.AppMenuItem {
                         objectName: "libraryCollapseAllItem"
                         text: I18n.i18nc("@action:inmenu", "Collapse All")
                         icon.name: "collapse-all"

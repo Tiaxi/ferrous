@@ -891,6 +891,9 @@ void PlainTextSmokeTest::everyTextItemStatesASafeFormat() {
     static const QHash<QString, QStringList> intendedMarkup{
         // The menus' own titles, with the mnemonic underlined while Alt is held.
         {QStringLiteral("components/AppMenuBarItem.qml"), {QStringLiteral("Text.AutoText")}},
+        // The menus' items, the same; Kirigami's mnemonic label escapes the words
+        // (tst_ui_menus' menuItemGlyphsGrowWithTheFont).
+        {QStringLiteral("components/AppMenuItem.qml"), {QStringLiteral("Text.StyledText")}},
         // The forms' own labels, underlined in the same way.
         {QStringLiteral("preferences/PreferencesForm.qml"), {QStringLiteral("Text.AutoText")}},
         // A search result's context, whose matches are in the text's colour; escaped() escapes every part.
