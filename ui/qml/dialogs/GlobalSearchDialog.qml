@@ -272,6 +272,7 @@ Dialog {
 
     Component.onCompleted: root.controller.registerRefs(root, queryField, resultsView)
     onOpened: root.controller.handleDialogOpened()
+    onAboutToHide: root.controller.pendingAction = ""
     onClosed: root.controller.endOpen(true)
 
     // `value` cut where the matches of the results' query start and end.
@@ -558,9 +559,11 @@ Dialog {
             else if (event.modifiers & Qt.ControlModifier) root.controller.queueSelection()
             else root.controller.activateSelection()
         } else if (upDown) {
+            root.controller.pendingAction = ""
             const next = root.controller.nextSelectableIndex(root.controller.selectedDisplayIndex, event.key === Qt.Key_Down ? 1 : -1, true)
             if (next >= 0) root.controller.selectDisplayIndex(next)
         } else if (page) {
+            root.controller.pendingAction = ""
             root.controller.moveSelectionByPage(event.key === Qt.Key_PageDown ? 1 : -1)
         } else return false
         event.accepted = true
@@ -623,6 +626,7 @@ Dialog {
                 placeholderText: I18n.i18nc("@info:placeholder", "Search artists, albums, tracks, tags or file names")
                 Accessible.name: I18n.i18nc("@label accessible name of the search field", "Search")
                 onTextChanged: {
+                    root.controller.pendingAction = ""
                     root.controller.pendingExpansion = null
                     root.controller.selectedDisplayIndex = -1
                     root.controller.uiBridge.setGlobalSearchQuery(text)
