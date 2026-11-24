@@ -2242,11 +2242,15 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
         return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
     };
     // The viewer can still be taking its size, as its window shows, and
-    // the details sliding in.
+    // the details sliding in. The details' layout places the heading,
+    // shown again in a column laid out without it (the viewer was open on
+    // the current art), only at its next polish: until then, the heading
+    // keeps where it was, over the file's name, where the user never sees
+    // it.
     const auto settled = [&]() {
         const QRectF rect = rectOf(column);
         return column->parentItem()->property("infoReveal").toReal() >= 1.0 && rect.contains(rectOf(label))
-            && rect.contains(rectOf(back)) && rect.contains(rectOf(apply));
+            && rect.contains(rectOf(back)) && rect.contains(rectOf(apply)) && !layoutPending(label);
     };
     QTRY_VERIFY2(settled(), at.constData());
     const QRectF columnRect = rectOf(column);

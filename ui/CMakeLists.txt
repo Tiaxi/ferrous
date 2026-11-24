@@ -775,7 +775,9 @@ if(BUILD_TESTING)
         tests/tst_qml_smoke_keyboard_shortcuts.cpp
         tests/tst_qml_smoke_plain_text.cpp
     )
-    target_link_libraries(ferrous_qml_smoke_tests PRIVATE ferrous_app_icon)
+    # QuickTest tells the tests whether a layout has placed its items yet
+    # (layoutPending in tests/TestItems.h).
+    target_link_libraries(ferrous_qml_smoke_tests PRIVATE ferrous_app_icon Qt6::QuickTest)
     # The smoke tests run by area, each area in a process of its own, so a
     # crash or hang in one area costs only that area's results, and quickly.
     # An area has one or more test classes; see kSmokeTestAreas in

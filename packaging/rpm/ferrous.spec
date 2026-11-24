@@ -44,6 +44,14 @@ BuildRequires:  pkgconfig(gstreamer-1.0)
 BuildRequires:  pkgconfig(gstreamer-app-1.0)
 BuildRequires:  pkgconfig(gstreamer-audio-1.0)
 BuildRequires:  pkgconfig(gstreamer-pbutils-1.0)
+# The UI tests that play through the GStreamer backend, as CI's do: the bad
+# plugins' fakeaudiosink, which keeps to the clock; the good plugins' FLAC
+# and WAV elements; and the libav plugin's AC-3 decoder (avdec_ac3), which
+# %%check requires with FERROUS_TEST_REQUIRE_DECODERS rather than skip the
+# test that plays AC-3.
+BuildRequires:  gstreamer1-plugins-good
+BuildRequires:  gstreamer1-plugins-bad-free
+BuildRequires:  gstreamer1-plugin-libav
 BuildRequires:  appstream
 BuildRequires:  desktop-file-utils
 # flock, which scripts/build-slot.sh and its test use.
@@ -109,6 +117,7 @@ TMPDIR="${test_state}/tmp" \
 XDG_CONFIG_HOME="${test_state}/config" \
 XDG_DATA_HOME="${test_state}/data" \
 XDG_CACHE_HOME="${test_state}/cache" \
+FERROUS_TEST_REQUIRE_DECODERS=1 \
     ctest --test-dir ui/build --output-on-failure
 rm -rf "${test_state}"
 
