@@ -128,8 +128,9 @@ def layout(tiles, max_tiles, label_h, min_tile=MIN_TILE, max_w=MAX_SIDE, max_h=M
         _, cols, tw, k = best
         if k < len(rest):  # balance the pages: as many per page as an even split needs
             n = -(-len(rest) // k)
-            k = -(-len(rest) // n)
-            _, cols, tw, k = best_page(rest, k, label_h, min_tile, max_w, max_h)
+            balanced = best_page(rest, -(-len(rest) // n), label_h, min_tile, max_w, max_h)
+            if balanced is not None:  # (fewer tiles can leave none that meets the bar: keep the full page then)
+                _, cols, tw, k = balanced
         pages.append((cols, tw, rest[:k]))
         rest = rest[k:]
     return pages

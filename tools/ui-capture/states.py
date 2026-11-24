@@ -6132,12 +6132,12 @@ STATES = [
      f"js {FIND}('playlistView').positionViewAtIndex(25, ListView.Beginning) | wait 0.3 | away | unfocus | "
      "macro queuefocus unselected - | wait 0.3 | macro queuegeom ring-unselected",
      "Queue scrolled to row 26: keyboard focus by a real Tab alone, the ring on row 26, nothing selected; the thumb lower down"),
-    # a column resize handle hovered, then focused (from the list, one more real Tab: the handles follow the rows)
+    # a column resize handle hovered, then focused (from the list, one real Shift+Tab: the handles come before the rows)
     ("queue", "queue", "handle-hover", f"js {FIND}('playlistView').positionViewAtBeginning() | unfocus | "
      "hover queueColumnHandle_album 0.6", "Queue header: the Album column's resize handle hovered"),
-    ("queue", "queue", "handle-focus", "away | unfocus | macro queuefocus handle - | key Tab | wait 0.3 | "
+    ("queue", "queue", "handle-focus", "away | unfocus | macro queuefocus handle - | key Backtab shift | wait 0.3 | "
      f"until ['artist','album','length'].some(function(c){{return {FIND_ANY}('queueColumnHandle_'+c).activeFocus}})",
-     "Queue header: a column resize handle with keyboard focus (real Tab from the list)"),
+     "Queue header: a column resize handle with keyboard focus (real Shift+Tab from the list)"),
     ("queue", "queue", "drop-indicator",
      f"away | unfocus | js (function(){{var a={FIND}('playlistDropArea');var i={FIND_ANY}('queueDropIndicator');"
      f"var v={FIND}('playlistView');var w={FIND}('{QRow}');"
