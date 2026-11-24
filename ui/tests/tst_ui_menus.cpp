@@ -604,6 +604,7 @@ private slots:
     void marksShareTheGlyphColumn_data();
     void marksShareTheGlyphColumn();
     void markedGlyphsKeepTwoColumns();
+    void queueMenuNamesHowManyRowsItRemoves();
     void showInLibraryShowsTheLibraryTree();
     void clearQueueShowsALineGlyph();
     void menusReadInKdesWordsAndOrder();
@@ -1676,6 +1677,74 @@ ApplicationWindow {
         }
     }
     QMetaObject::invokeMethod(menu, "close");
+    QTRY_VERIFY(!menu->property("visible").toBool());
+}
+
+// On one of several selected rows, the queue's Remove acts on them all and
+// says how many; on a row alone it keeps its words. Play plays the row
+// the menu was opened on alone, and keeps its words either way.
+void UiMenusTest::queueMenuNamesHowManyRowsItRemoves() {
+    MainWindowFixture main(wideWindow());
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    bridge->setProperty("queueRows", sampleQueueRows(3));
+    bridge->setProperty("queueLength", 3);
+    QTRY_VERIFY(viewRow(window, "playlistView", 2) != nullptr);
+
+    const auto openOn = [&](int index) -> QObject * {
+        rightClick(window, viewRow(window, "playlistView", index));
+        QObject *menu = nullptr;
+        if (!QTest::qWaitFor([&]() {
+                menu = visibleMenu(window, QStringLiteral("playlistContextMenu"));
+                return menu != nullptr && menu->property("opened").toBool();
+            })) {
+            return nullptr;
+        }
+        return menu;
+    };
+    const auto itemText = [](QObject *menu, const char *name) {
+        QObject *item = menu->findChild<QObject *>(QLatin1String(name));
+        return item != nullptr ? item->property("text").toString() : QString();
+    };
+    const auto close = [&](QObject *menu) {
+        QMetaObject::invokeMethod(menu, "close");
+        return QTest::qWaitFor([&]() { return !menu->property("visible").toBool(); });
+    };
+
+    // One row: as before.
+    QObject *menu = openOn(1);
+    QVERIFY(menu != nullptr);
+    QCOMPARE(itemText(menu, "queueRemoveItem"), QStringLiteral("Remove from Queue"));
+    QCOMPARE(itemText(menu, "queuePlayItem"), QStringLiteral("Play"));
+    QVERIFY(close(menu));
+
+    // Two of the three selected.
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRect(viewRow(window, "playlistView", 0)).center().toPoint());
+    QTest::mouseClick(window, Qt::LeftButton, Qt::ControlModifier,
+                      sceneRect(viewRow(window, "playlistView", 1)).center().toPoint());
+    menu = openOn(1);
+    QVERIFY(menu != nullptr);
+    QCOMPARE(itemText(menu, "queueRemoveItem"), QStringLiteral("Remove 2 Tracks from Queue"));
+    QCOMPARE(itemText(menu, "queuePlayItem"), QStringLiteral("Play"));
+    QVERIFY(close(menu));
+
+    // A row outside the selection, which the press selects alone.
+    menu = openOn(2);
+    QVERIFY(menu != nullptr);
+    QCOMPARE(itemText(menu, "queueRemoveItem"), QStringLiteral("Remove from Queue"));
+    QVERIFY(close(menu));
+
+    // It removes what it names.
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRect(viewRow(window, "playlistView", 0)).center().toPoint());
+    QTest::mouseClick(window, Qt::LeftButton, Qt::ControlModifier,
+                      sceneRect(viewRow(window, "playlistView", 1)).center().toPoint());
+    bridge->setProperty("queueCommands", QStringList());
+    menu = openOn(0);
+    QVERIFY(menu != nullptr);
+    QCOMPARE(itemText(menu, "queueRemoveItem"), QStringLiteral("Remove 2 Tracks from Queue"));
+    QMetaObject::invokeMethod(menu->findChild<QObject *>(QStringLiteral("queueRemoveItem")), "triggered");
+    QTRY_COMPARE(bridge->property("queueCommands").toStringList(), QStringList{QStringLiteral("remove 1,0")});
     QTRY_VERIFY(!menu->property("visible").toBool());
 }
 
