@@ -142,3 +142,22 @@ function issueGlyph(category, severity) {
     }
     return category === CategoryLastFm ? GlyphOffline : GlyphWarning
 }
+
+// The asset of a glyph, in ui/qml/assets.
+function glyphAsset(glyph) {
+    return glyph === GlyphError ? "status-error.svg"
+        : glyph === GlyphOffline ? "status-offline.svg"
+        : "status-warning.svg"
+}
+
+// The colour of a glyph from `palette` (a UiPalette): an error's the
+// negative colour, the others the secondary one.
+function glyphColor(glyph, palette) {
+    return glyph === GlyphError ? palette.negative : palette.textSecondary
+}
+
+// A file that ends early: a playback warning, as the bridge records it
+// (file_ends_early in src/frontend_bridge/events.rs, passed on unchanged by
+// BridgeClient), so the seek bar's mark at the cut is the warning's glyph
+// in its colour, as the issue is in the status bar and Recent Issues.
+const EndsEarlyGlyph = issueGlyph(CategoryPlayback, SeverityWarning)

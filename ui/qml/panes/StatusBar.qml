@@ -79,7 +79,6 @@ ToolBar {
         ? (Number(root.errorController.unseenErrorCount) || 0) > 0
         : false
     readonly property url errorGlyph: Qt.resolvedUrl("../assets/status-error.svg")
-    readonly property url warningGlyph: Qt.resolvedUrl("../assets/status-warning.svg")
     readonly property string backendFailure: root.uiBridge.backendFailure || ""
     readonly property bool backendStopped: root.backendFailure.length > 0
     readonly property bool isDisconnected: !root.uiBridge.connected && !root.backendStopped
@@ -723,9 +722,12 @@ ToolBar {
             text: root.hasUnseenError
                 ? I18n.i18ncp("@action:button", "%1 new issue", "%1 new issues", root.unseenErrorCount)
                 : I18n.i18ncp("@action:button", "%1 issue", "%1 issues", root.errorCount)
-            readonly property color glyphColor: root.unseenIncludesError
-                ? root.uiPalette.negative
-                : root.uiPalette.textSecondary
+            // The most severe new issue's glyph, from the one source the seek
+            // bar's ends-early mark and Recent Issues take theirs from.
+            readonly property int glyph: root.unseenIncludesError
+                ? ErrorUtils.GlyphError
+                : ErrorUtils.GlyphWarning
+            readonly property color glyphColor: ErrorUtils.glyphColor(issuesButton.glyph, root.uiPalette)
             readonly property color labelColor: root.hasUnseenError
                 ? root.uiPalette.text
                 : root.uiPalette.textSecondary
@@ -783,7 +785,7 @@ ToolBar {
                         anchors.verticalCenter: parent.verticalCenter
                         visible: root.hasUnseenError
                         size: root.errorGlyphSize
-                        source: root.unseenIncludesError ? root.errorGlyph : root.warningGlyph
+                        source: Qt.resolvedUrl("../assets/" + ErrorUtils.glyphAsset(issuesButton.glyph))
                         color: issuesButton.glyphColor
                     }
 

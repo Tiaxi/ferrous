@@ -560,6 +560,8 @@ private slots:
     void seekEmptyLineRunsPastAnEarlyEndingWaveform();
     void seekMarksWhereTheFileEnds_data();
     void seekMarksWhereTheFileEnds();
+    void seekEndsEarlyMarkIsItsIssuesWarning_data();
+    void seekEndsEarlyMarkIsItsIssuesWarning();
     void seekPlayheadMovesAcrossAShortTrack_data();
     void seekPlayheadMovesAcrossAShortTrack();
     void seekPlayheadWaitsAtTheStartWithoutALength_data();
@@ -2556,8 +2558,8 @@ void TransportStatusTest::seekMarksWhereTheFileEnds() {
     QQuickItem *glyph = harness.item(QStringLiteral("seekEndsEarlyGlyph"));
     QVERIFY(glyph != nullptr);
     QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("status-warning.svg")));
-    QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("negative")));
-    QVERIFY2(contrastRatio(harness.token("negative"), harness.transportChrome()) >= 3.0, "the mark on the chrome");
+    QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
+    QVERIFY2(contrastRatio(harness.token("textSecondary"), harness.transportChrome()) >= 3.0, "the mark on the chrome");
     // Under the playhead, over the waveform and its unplayed cover.
     QQuickItem *playhead = harness.item(QStringLiteral("seekPlayhead"));
     const QList<QQuickItem *> layers = playhead->parentItem()->childItems();
@@ -2581,6 +2583,56 @@ void TransportStatusTest::seekMarksWhereTheFileEnds() {
     bridge->setProperty("durationSeconds", 229.0);
     bridge->setProperty("waveformPeaksPacked", QByteArray());
     QVERIFY(!mark->isVisible());
+}
+
+void TransportStatusTest::seekEndsEarlyMarkIsItsIssuesWarning_data() {
+    seekMarksWhereTheFileEnds_data();
+    QTest::newRow("breeze light, 24 pt") << false << 24.0;
+}
+
+// One issue has one severity wherever it shows. A file that ends early is
+// a playback warning (file_ends_early in src/frontend_bridge/events.rs):
+// the seek bar's mark at the cut is the warning's triangle in the
+// secondary colour, as the status bar shows that issue while it is new.
+// The mark was red, an error's colour, beside the status bar's grey
+// triangle for the same issue. A new error elsewhere turns the status bar
+// red but leaves the mark a warning: it follows its own issue.
+void TransportStatusTest::seekEndsEarlyMarkIsItsIssuesWarning() {
+    QFETCH(bool, dark);
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    Harness harness;
+    QVERIFY2(harness.load(breeze(dark)), qPrintable(harness.error));
+    QObject *bridge = harness.bridge;
+    QQuickItem *mark = harness.item(QStringLiteral("seekEndsEarlyMark"));
+    QQuickItem *markGlyph = harness.item(QStringLiteral("seekEndsEarlyGlyph"));
+    QQuickItem *statusGlyph = harness.item(QStringLiteral("statusBarErrorsGlyph"));
+    QVERIFY(mark && markGlyph && statusGlyph);
+    bridge->setProperty("waveformPeaksPacked", fullScalePeaks());
+    bridge->setProperty("waveformCoverageSeconds", 137.0);
+    bridge->setProperty("waveformEndsEarly", true);
+    // The issue the bridge reports with it: a playback warning.
+    QVERIFY(harness.reportIssue(1, 0, QStringLiteral("The file ends early.")));
+    QTRY_VERIFY(mark->isVisible() && statusGlyph->isVisible());
+    const QString markSource = markGlyph->property("source").toString();
+    const QColor markColor = markGlyph->property("color").value<QColor>();
+    QVERIFY2(markSource.endsWith(QStringLiteral("status-warning.svg")), qPrintable(markSource));
+    QCOMPARE(markSource, statusGlyph->property("source").toString());
+    QVERIFY2(sameColor(markColor, statusGlyph->property("color").value<QColor>()), qPrintable(markColor.name()));
+    QVERIFY2(sameColor(markColor, harness.token("textSecondary")), qPrintable(markColor.name()));
+    QVERIFY(!sameColor(markColor, harness.token("negative")));
+    // 3:1 on the gap it stands in, which is the transport's chrome.
+    QVERIFY(sameColor(mark->property("color").value<QColor>(), harness.transportChrome()));
+    QVERIFY2(contrastRatio(markColor, harness.transportChrome()) >= 3.0,
+             qPrintable(describeContrast(QStringLiteral("ends-early mark"), markColor, harness.transportChrome())));
+
+    // A new error: the status bar's ring with a cross in red; the mark is
+    // still its own issue's warning.
+    QVERIFY(harness.reportIssue(1, 1, QStringLiteral("Playback stopped.")));
+    QTRY_VERIFY(statusGlyph->property("source").toString().endsWith(QStringLiteral("status-error.svg")));
+    QVERIFY(sameColor(statusGlyph->property("color").value<QColor>(), harness.token("negative")));
+    QCOMPARE(markGlyph->property("source").toString(), markSource);
+    QVERIFY(sameColor(markGlyph->property("color").value<QColor>(), markColor));
 }
 
 // #541: a clip of a second or less has a length, so the playhead is drawn

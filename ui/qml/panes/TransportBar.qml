@@ -8,6 +8,7 @@ import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
 import "../logic/ColorUtils.js" as ColorUtils
+import "../logic/ErrorUtils.js" as ErrorUtils
 import "../logic/FormatUtils.js" as FormatUtils
 import "../logic/KeyUtils.js" as KeyUtils
 
@@ -1083,7 +1084,10 @@ ToolBar {
                     }
                 }
 
-                // A file that ends early: the status bar's warning sign at
+                // A file that ends early: the glyph of its issue's severity,
+                // a warning, in the colour the status bar and Recent Issues
+                // give it (it was red, an error's colour, beside the status
+                // bar's grey warning for the same issue), at
                 // the cut, which the waveform alone didn't explain, in a gap
                 // of the chrome as tall as the waveform, so that no slivers
                 // of it stand over and under the sign. Under the playhead,
@@ -1106,9 +1110,9 @@ ToolBar {
                         width: parent.width
                         height: width
                         roundToIconSize: false
-                        source: Qt.resolvedUrl("../assets/status-warning.svg")
+                        source: Qt.resolvedUrl("../assets/" + ErrorUtils.glyphAsset(ErrorUtils.EndsEarlyGlyph))
                         isMask: true
-                        color: root.uiPalette.negative
+                        color: ErrorUtils.glyphColor(ErrorUtils.EndsEarlyGlyph, root.uiPalette)
                     }
                 }
 

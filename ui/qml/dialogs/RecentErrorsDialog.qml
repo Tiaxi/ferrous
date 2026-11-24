@@ -487,15 +487,9 @@ Popup {
                                 // An error's ring with a cross in the negative
                                 // colour, a warning's triangle in the
                                 // secondary one: shape and colour both.
-                                source: historyRow.glyph === ErrorUtils.GlyphError
-                                    ? Qt.resolvedUrl("../assets/status-error.svg")
-                                    : historyRow.glyph === ErrorUtils.GlyphOffline
-                                        ? Qt.resolvedUrl("../assets/status-offline.svg")
-                                        : Qt.resolvedUrl("../assets/status-warning.svg")
+                                source: Qt.resolvedUrl("../assets/" + ErrorUtils.glyphAsset(historyRow.glyph))
                                 isMask: true
-                                color: historyRow.glyph === ErrorUtils.GlyphError
-                                    ? root.uiPalette.negative
-                                    : root.uiPalette.textSecondary
+                                color: ErrorUtils.glyphColor(historyRow.glyph, root.uiPalette)
                                 Accessible.ignored: true
                             }
 
