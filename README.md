@@ -1,42 +1,46 @@
 # Ferrous
 
-A fast, KDE-native desktop music player built with Rust and Qt6.
+A music player for KDE Plasma, made for listening closely.
 
-Ferrous is a personal project built for my own daily listening. It pairs a Rust backend for playback, analysis, and library management with a Qt6/QML + KDE Kirigami frontend. Developed with KDE Plasma in mind, it targets responsive local-library workflows, gapless playback, and rich real-time visualization. Ferrous is opinionated about library organization — your folder structure *is* your library.
+![Ferrous playing an album, with the library, the queue and the spectrogram](docs/assets/screenshots/main-dark.png)
 
-![Ferrous screenshot](docs/assets/screenshot.png)
+Ferrous started as the player I wanted for my own music: one that feels at home on the Plasma desktop, stays quick however large the library grows, and lets me look into the music as well as listen to it. It is a personal project, but it is built with care, and it tries to do a few things very well.
 
-## Features
+## What Ferrous aims for
 
-**Playback** — GStreamer-backed engine with seeking, gapless queue transitions, repeat, shuffle, and volume control.
+**At home on Plasma.** Ferrous should feel like it belongs next to Dolphin and Kate. It follows Breeze, your colour scheme and Plasma's animation settings, and it works with the desktop's media controls and media keys.
 
-**Library** — Folder-first browsing that mirrors your filesystem. Add one or more root directories, and Ferrous indexes them into a navigable tree with artist, album, and track grouping. It watches the roots, so files added, changed, or removed by other programs appear without a rescan, and it rescans them at startup. Roots on network or FUSE file systems, network or FUSE mounts inside a root, and roots with more folders than `fs.inotify.max_user_watches` allows are rescanned every 30 minutes instead, and the Library page of **Settings › Configure Ferrous…** marks them. Watching can be turned off there. Removing a root there asks first and says how many tracks leave the library; the files stay on disk. [Global search](docs/SEARCH.md) spans the entire library, with ranked results in artist, album and track sections and `type:` filters.
+**Quick, always.** Playing, scanning, searching and analysing happen in the background, so the window keeps up with you. A stutter or a frozen moment is treated as a bug to fix, not something to live with.
 
-**Queue** — Open files, add folders, import M3U playlists, drag-to-reorder, and automatic session restore on launch. Clearing the queue, removing tracks, moving tracks, and replacing the queue can be undone and redone until the queue changes again; see [keyboard and mouse](docs/SHORTCUTS.md#library-and-queue).
+**Made for looking closely.** A spectrogram, inspired by the spectral view of Adobe Audition, and a waveform show the music as it plays. You can zoom in, move around the track, read off what you see, or give the plot the whole screen.
 
-**Tag editor** — Multi-file tag editing with bulk operations and auto-numbering. Renaming files from their tags lists each new name, and any that cannot be used, before any file is renamed. Confirming renames only what the list showed, and nothing if the files changed since.
+**Careful with your files.** Your folders are the library, as they are on disk. When Ferrous changes a file, it shows you what will happen first and saves safely, so that a tag edit, a rename or new album art shouldn't cost you data.
 
-**Album art** — Folder and embedded cover art display with the option to fetch high-resolution artwork from the iTunes catalog. A suggestion can be previewed in the album art viewer, compared with the current art, and applied from there, or the viewer can go back to the suggestions. A folder's cover is its `cover`, `folder`, or `front` image, in that order and in any letter case, or else its first JPEG or PNG image by name. The library and the now-playing view both show the folder's cover before a track's embedded picture. Covers follow images that are added, renamed, removed, or replaced at the next scan, or at once while the library watches its folders. Applied artwork replaces that named image in its current format, or adds a `cover.jpg` or `cover.png` and leaves other images, such as back scans, untouched. In folders without such images, the artwork is embedded in every track there with the same album tag, and no track is changed unless all of them can be updated. Ferrous keeps no copy of the art it replaces, so it asks before replacing a track's existing art. Suggestions go to the album they were searched for, even if playback moves on before they are applied, and nothing is written if that track's file was moved, renamed, deleted or changed since the search.
+## A look around
 
-**Visualization** — Live spectrogram and waveform displays rendered alongside embedded cover art. The spectrogram is inspired by Adobe Audition's spectral view — something I've spent countless hours using to analyze songs. It supports mono downmix or per-channel display, fullscreen viewing, logarithmic or linear frequency scale, an optional limit to the audible band of high-resolution tracks (22.05 or 24 kHz), adjustable dB range, configurable FFT window size, and centered or rolling display modes. Rolling mode scrolls continuously; centered mode shows a zoomable window around playback, with the view clamped at track boundaries. The waveform viewer supports zooming and per-channel inspection.
+**Playback and the queue.** Gapless playback, repeat and shuffle, and a queue that comes back where you left it. Changes to the queue can be undone.
 
-**Desktop integration** — MPRIS media controls, media key support, single-instance file opening, and `.desktop`/MIME registration.
+**Library and search.** The library follows your music folders as files come and go. [Search](docs/SEARCH.md) finds artists, albums and tracks as you type.
 
-**Scrobbling** — Last.fm integration with desktop authentication and batched submissions. In the status bar, a short bar under the Last.fm glyph fills with the time listened towards the scrobble, as the scrobbler counts it: a seek doesn't move it, and only a new play starts it over. Its tooltip gives the time left, and the bar is full as soon as the play reaches the scrobble point; the scrobble is sent in the background. The countdown goes on through a seek, however near the end of the track; when playback stops after a play that ended before the scrobble point, the slot says that play wasn't scrobbled. It also says when scrobbles wait for Last.fm or one failed. When Last.fm can't be reached or is busy, scrobbles stay queued and are sent again, after 30 seconds and then at doubling intervals of up to 30 minutes, until Last.fm takes them. Last.fm takes no scrobble older than 14 days, so when Ferrous starts or queues a scrobble, it discards the queued ones that reached that age, and the oldest beyond 10,000 queued ones; the Last.fm preferences count those discarded since Ferrous started, and the diagnostics log says why. The slot says that scrobbles wait (a scrobble that is just being sent doesn't), the Last.fm preferences show when the next retry is, and the diagnostics log records each failure. The diagnostics log also records each Now Playing update and scrobble submission Ferrous sends, with the tracks, their play times, and what Last.fm did with them. When Last.fm asks Ferrous to slow down, nothing is sent until the wait it asks for is over, for at most a day, unless you reconnect the account. Recent Issues lists only what needs you, such as reconnecting the account, or scrobbles that Last.fm refused or that could not be saved. Clicking the slot pauses scrobbling until it is clicked again or Ferrous quits, and strikes the glyph through: a track that plays while scrobbling is paused, before it reached its scrobble point, is never scrobbled, and Ferrous sends Last.fm no Now Playing updates or scrobbles until scrobbling resumes; queued scrobbles wait for it. The Last.fm preferences can hide the slot.
+**The spectrogram and the waveform.** Follow the playhead or roam the track, compare channels, and inspect any moment under the crosshair.
 
-## Design priorities
+![The spectrogram in its fullscreen viewer](docs/assets/screenshots/spectrogram-fullscreen-dark.png)
 
-Ferrous treats UI responsiveness as a correctness requirement. Playback, analysis, metadata extraction, library indexing, and search use background workers. Smooth visualization and immediately responsive interaction are development goals; if something feels sluggish, it's a bug.
+**Tags and album art.** Edit the tags of many files at once, rename files from their tags, and find full-size album art in the iTunes catalog, previewed beside what you have before anything is replaced.
 
-## Supported Formats
+**Last.fm.** Scrobbling that stays out of the way, with a small progress bar in the status bar and a pause for when you'd rather not.
 
-MP3, FLAC, M4A/AAC, Ogg Vorbis, Opus, WAV, AC-3, DTS, and M3U/M3U8 playlists. Actual codec support depends on the GStreamer plugins installed on the host system.
+**Keyboard and accessibility.** Shortcuts you can change, keyboard use throughout, and names and states for screen readers.
 
-On Fedora, the base, good, and bad-free GStreamer plugins that the RPM requires play every format above except AC-3 and DTS. Those need `gstreamer1-plugin-libav`, which the RPM recommends, so dnf installs it unless weak dependencies are turned off. Fedora builds that plugin against `ffmpeg-free`, which leaves out some codecs, such as E-AC-3. Replacing `ffmpeg-free` with the full FFmpeg from [RPM Fusion](https://rpmfusion.org/Howto/Multimedia) (`sudo dnf swap ffmpeg-free ffmpeg --allowerasing`) adds them. Ferrous does not require RPM Fusion.
+The [feature guide](docs/FEATURES.md) goes into each part in more detail, with the supported formats.
+
+## Where it stands
+
+Ferrous is developed by one person, for Fedora with KDE Plasma first, and its direction follows my own priorities. I use it every day, and it is stable enough for that, but it is still growing: it lacks some features many players have, such as ReplayGain, an equalizer and a choice of output device. The [roadmap](docs/ROADMAP.md) lists what's missing and what I'd like to add. Feedback and contributions are welcome.
 
 ## Installation
 
-Prebuilt Fedora RPM packages are available from [GitHub Releases](https://github.com/Tiaxi/ferrous/releases).
+Fedora RPM packages are on the [releases page](https://github.com/Tiaxi/ferrous/releases).
 
 To build from source, install the prerequisites in the [installation guide](docs/INSTALL.md), then:
 
@@ -46,32 +50,18 @@ cd ferrous
 ./scripts/run-ui.sh
 ```
 
-See the [installation guide](docs/INSTALL.md) for full dependency lists, manual build steps, and local package builds.
-
-## Status
-
-Ferrous is a personal project tailored for my specific needs and workflow. It is usable for daily listening but still under active development. Contributions and feedback are welcome, though the project direction follows my own priorities.
-
-See the [backlog](docs/ROADMAP.md) for open ideas.
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|------------|
-| Backend | Rust (playback, metadata, library, search, analysis) |
-| Frontend | Qt6/QML + KDE Kirigami |
-| Audio | GStreamer |
-| Storage | SQLite |
-
 ## Documentation
 
-- [Installation guide](docs/INSTALL.md) — dependencies, build options, data locations
-- [Keyboard and mouse](docs/SHORTCUTS.md) — shortcuts, scrolling, and zooming
-- [Development guide](docs/DEVELOPMENT.md) — building, testing, debugging, profiling
-- [UI design rules](docs/UI_DESIGN.md) — tokens, dialogs, states, motion, and what was rejected
-- [Backlog](docs/ROADMAP.md) — open feature and maintenance ideas
-- [Contributing](CONTRIBUTING.md) — proposing and submitting changes
+- [Feature guide](docs/FEATURES.md): each part in detail, and supported formats
+- [Installation guide](docs/INSTALL.md): dependencies, build options, data locations
+- [Keyboard and mouse](docs/SHORTCUTS.md): shortcuts, scrolling and zooming
+- [Search](docs/SEARCH.md): what search matches and how it ranks results
+- [Development guide](docs/DEVELOPMENT.md): building, testing, debugging, profiling
+- [UI design rules](docs/UI_DESIGN.md) and [visualization architecture](docs/VISUALIZATION_ARCHITECTURE.md)
+- [Roadmap](docs/ROADMAP.md) and [contributing](CONTRIBUTING.md)
+
+Under the hood, Ferrous pairs a Rust backend for playback, the library, search and analysis with a Qt 6 and KDE Kirigami interface, on GStreamer and SQLite.
 
 ## License
 
-This project is licensed under the [GNU General Public License v3.0](LICENSE).
+[GNU General Public License v3.0](LICENSE).
