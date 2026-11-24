@@ -1796,10 +1796,12 @@ void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges() {
 
     // Along the way, as the fade stands at each point of it, and as the
     // window draws it there: held there, a frame comes whatever the load.
+    // The test asks for it, as a point can draw what the one before drew.
     QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
     for (const double at : {0.25, 0.5, 0.75}) {
         const int framesBefore = frames;
         panel->setProperty("handover", at);
+        window->update();
         checkFrame();
         QVERIFY(QTest::qWaitFor([&]() { return frames > framesBefore; }));
         QVERIFY2(failure.isEmpty(), qPrintable(failure));
@@ -2423,10 +2425,16 @@ void UiMotionTest::nowPlayingOnlyTheNumberThatChangesFades() {
     // In tabular figures, in the same place.
     QCOMPARE(metrics.horizontalAdvance(prefix + is), to);
     QCOMPARE(metrics.horizontalAdvance(after), metrics.horizontalAdvance(before));
+    // At each point of the fade, held there, and as the window draws it.
+    // The test asks for that frame: a point can draw what the one before
+    // drew, and then nothing else asks for one (a new year comes with a new
+    // album, whose fade is long; its lines have faded by 0.75 of it, and
+    // the cover stays).
     QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
     for (const double at : {0.0, 0.25, 0.5, 0.75}) {
         const int framesBefore = frames;
         panel->setProperty("handover", at);
+        window->update();
         const QString each = onlyTheWord(at);
         QVERIFY2(each.isEmpty(), qPrintable(each));
         QVERIFY(QTest::qWaitFor([&]() { return frames > framesBefore; }));
