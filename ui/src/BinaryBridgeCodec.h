@@ -32,8 +32,10 @@ enum SnapshotSection : quint16 {
     SectionMetadata = 1u << 4,
     SectionSettings = 1u << 5,
     // An error for the user: a u8 ErrorCategory, a u8 ErrorSeverity, the
-    // subject (a file or folder path, or empty), the message, and the
-    // system's text (or empty), which Recent Issues shows apart.
+    // subject (a file or folder path, or empty), the message, the system's
+    // text (or empty), which Recent Issues shows apart, and a u8, 1 if the
+    // subject is a track that failed to play. Laid out by
+    // encode_error_section in src/frontend_bridge/ffi.rs.
     SectionError = 1u << 6,
     SectionStopped = 1u << 7,
     SectionLastFm = 1u << 8,
@@ -611,6 +613,8 @@ struct DecodedSnapshot {
     QString errorSubject;
     // The system's text for the error, shown apart from its message.
     QString errorDetail;
+    // Whether the error's subject is a track that failed to play.
+    bool errorFailedToPlay{false};
     bool hasStateSaved{false};
     quint32 stateSaveRequestId{0};
     bool stateSaved{false};

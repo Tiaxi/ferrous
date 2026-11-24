@@ -547,13 +547,15 @@ void forEachDialogWithButtons(QQuickWindow *window,
     }
 }
 
-// The window's issue history, with an entry reported.
+// The window's issue history, with an entry reported, about no track that
+// failed to play.
 void report(QQuickWindow *window, int category, int severity, const QString &subject, const QString &message,
             const QString &detail = {}) {
     QObject *errors = object(window, QStringLiteral("errorController"));
     QVERIFY(errors != nullptr);
     QVERIFY(QMetaObject::invokeMethod(errors, "report", Q_ARG(QVariant, category), Q_ARG(QVariant, severity),
-                                      Q_ARG(QVariant, subject), Q_ARG(QVariant, message), Q_ARG(QVariant, detail)));
+                                      Q_ARG(QVariant, subject), Q_ARG(QVariant, message), Q_ARG(QVariant, detail),
+                                      Q_ARG(QVariant, false)));
 }
 
 // The window's issue history, emptied.
@@ -4430,7 +4432,8 @@ void UiDialogsTest::thePanesEndsEarlyLinkOpensItsIssue() {
     QVERIFY(bridge->setProperty("queueLength", 2));
     // The backend's warning for a cut-off file, as the analysis reports it.
     QVERIFY(QMetaObject::invokeMethod(bridge, "bridgeError", Q_ARG(QString, kEndsEarly), Q_ARG(int, 1),
-                                      Q_ARG(int, 0), Q_ARG(QString, kStaticPath), Q_ARG(QString, QString())));
+                                      Q_ARG(int, 0), Q_ARG(QString, kStaticPath), Q_ARG(QString, QString()),
+                                      Q_ARG(bool, false)));
     // The pane's message after the cut, and its way to Recent Issues.
     QVERIFY(bridge->setProperty("currentTrackPath", kStaticPath));
     QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Playing")));

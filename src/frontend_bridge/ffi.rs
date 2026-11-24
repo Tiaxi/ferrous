@@ -2842,19 +2842,18 @@ fn encode_queue_undo_section(undo: &QueueUndoState) -> Vec<u8> {
     out
 }
 
-/// The error section: the category, the severity, the subject, and the
-/// message. `decodeErrorSection` in `ui/src/BinaryBridgeCodec.cpp` reads it.
 /// An error for the user: its category, its severity, then the subject,
-/// the message and the system's text. `BinaryBridgeCodec`'s `SectionError`
-/// reads it.
+/// the message and the system's text, and a u8, 1 if the subject is a track
+/// that failed to play. `BinaryBridgeCodec`'s `SectionError` reads it.
 fn encode_error_section(error: &BridgeError) -> Vec<u8> {
     let mut payload =
-        Vec::with_capacity(14 + error.subject.len() + error.message.len() + error.detail.len());
+        Vec::with_capacity(15 + error.subject.len() + error.message.len() + error.detail.len());
     push_u8(&mut payload, error.category as u8);
     push_u8(&mut payload, error.severity as u8);
     push_string(&mut payload, &error.subject);
     push_string(&mut payload, &error.message);
     push_string(&mut payload, &error.detail);
+    push_u8(&mut payload, u8::from(error.failed_to_play));
     payload
 }
 
@@ -3704,11 +3703,23 @@ mod error_packet_tests {
         message: &str,
         detail: &str,
     ) -> Vec<u8> {
+        error_section_of(category, severity, [subject, message, detail], false)
+    }
+
+    /// The error section of `category` and `severity`, with the subject, the
+    /// message and the system's text, and whether the subject failed to play.
+    fn error_section_of(
+        category: u8,
+        severity: u8,
+        texts: [&str; 3],
+        failed_to_play: bool,
+    ) -> Vec<u8> {
         let mut section = vec![category, severity];
-        for text in [subject, message, detail] {
+        for text in texts {
             section.extend_from_slice(&u32::try_from(text.len()).unwrap().to_le_bytes());
             section.extend_from_slice(text.as_bytes());
         }
+        section.push(u8::from(failed_to_play));
         section
     }
 
@@ -3777,7 +3788,8 @@ mod error_packet_tests {
         // Mirrored by BridgeClientTest::playbackErrorPacketReachesBridgeError.
         let message = "Couldn't play \u{201c}bad.flac\u{201d} (Resource not found); skipped it.";
         let subject = "/music/bad.flac";
-        let section = error_section(1, 0, subject, message);
+        // A skipped track: a warning, about a track that failed to play.
+        let section = error_section_of(1, 0, [subject, message, ""], true);
         let mut expected = Vec::new();
         expected.extend_from_slice(&0xFE55_0001_u32.to_le_bytes());
         expected.extend_from_slice(&u32::try_from(16 + section.len()).unwrap().to_le_bytes());
@@ -3785,7 +3797,10 @@ mod error_packet_tests {
         expected.extend_from_slice(&0_u16.to_le_bytes());
         expected.extend_from_slice(&u32::try_from(section.len()).unwrap().to_le_bytes());
         expected.extend_from_slice(&section);
-        let error = BridgeError::warning(ErrorCategory::Playback, message).about(subject);
+        let error = BridgeError {
+            failed_to_play: true,
+            ..BridgeError::warning(ErrorCategory::Playback, message).about(subject)
+        };
         assert_eq!(encode_error_event(&error), expected);
     }
 
@@ -3831,6 +3846,7 @@ mod error_packet_tests {
                     subject: "s".to_string(),
                     message: "m".to_string(),
                     detail: String::new(),
+                    failed_to_play: false,
                 };
                 let packet = encode_error_event(&error);
                 assert_eq!(
@@ -8307,13 +8323,19 @@ mod tests {
         let subject = read_string(payload, &mut offset);
         let message = read_string(payload, &mut offset);
         let detail = read_string(payload, &mut offset);
-        assert_eq!(offset, payload.len(), "nothing follows the system's text");
+        let failed_to_play = match payload[offset] {
+            0 => false,
+            1 => true,
+            other => panic!("unknown failed-to-play flag {other}"),
+        };
+        assert_eq!(offset + 1, payload.len(), "nothing follows the flag");
         BridgeError {
             category,
             severity,
             subject,
             message,
             detail,
+            failed_to_play,
         }
     }
 

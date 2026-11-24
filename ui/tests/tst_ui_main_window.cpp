@@ -1239,6 +1239,7 @@ private slots:
     void unreadableRowsTellWhatFailedNotWhatPlaybackDid();
     void unreadableRowsReasonOpensBelowClearOfThePlayingRow();
     void unreadableRowsHaveTheErrorMarkNotTheWarnings();
+    void rowsAreMarkedForATrackThatFailedNotForTheSeverity();
     void queueStopMarkWeighsNoMoreThanPause_data();
     void queueStopMarkWeighsNoMoreThanPause();
     void queueHeaderLabelsOnlyArtistAlbumAndLength();
@@ -6633,22 +6634,23 @@ void UiMainWindowTest::unreadableTracksAreMarkedFromTheIssueHistory() {
     QTRY_VERIFY((track = libraryRow(window, QStringLiteral("track"))) != nullptr);
     const auto unreadablePaths = [errors]() { return errors->property("unreadablePaths").toMap(); };
 
-    // A warning, or an error about another kind of thing, marks nothing.
-    // Category 1 is playback, 2 the library; severity 0 a warning, 1 an error.
-    QVERIFY(QMetaObject::invokeMethod(errors, "report", Q_ARG(QVariant, 1), Q_ARG(QVariant, 0),
+    // A playback error about the file that did not fail to play, or an
+    // error about another kind of thing, marks nothing. Category 1 is
+    // playback, 2 the library; severity 0 a warning, 1 an error.
+    QVERIFY(QMetaObject::invokeMethod(errors, "report", Q_ARG(QVariant, 1), Q_ARG(QVariant, 1),
                                       Q_ARG(QVariant, kTrackPath), Q_ARG(QVariant, QStringLiteral("Slow")),
-                                      Q_ARG(QVariant, QString())));
+                                      Q_ARG(QVariant, QString()), Q_ARG(QVariant, false)));
     QVERIFY(QMetaObject::invokeMethod(errors, "report", Q_ARG(QVariant, 2), Q_ARG(QVariant, 1),
                                       Q_ARG(QVariant, kTrackPath), Q_ARG(QVariant, QStringLiteral("Scan")),
-                                      Q_ARG(QVariant, QString())));
+                                      Q_ARG(QVariant, QString()), Q_ARG(QVariant, true)));
     QVERIFY(unreadablePaths().isEmpty());
-    // A playback error about the file marks its rows: the status bar's
-    // error mark at its size, in the negative colour, centred where the
-    // other marks are, and the title in the secondary colour.
+    // A track that failed to play marks its rows: the status bar's error
+    // mark at its size, in the negative colour, centred where the other
+    // marks are, and the title in the secondary colour.
     QVERIFY(QMetaObject::invokeMethod(errors, "report", Q_ARG(QVariant, 1), Q_ARG(QVariant, 1),
                                       Q_ARG(QVariant, kTrackPath),
                                       Q_ARG(QVariant, QStringLiteral("The file cannot be read.")),
-                                      Q_ARG(QVariant, QString())));
+                                      Q_ARG(QVariant, QString()), Q_ARG(QVariant, true)));
     QCOMPARE(unreadablePaths().value(kTrackPath).toString(), QStringLiteral("The file cannot be read."));
     QQuickItem *treeGlyph = itemNamed(track, QStringLiteral("libraryRowState"));
     QTRY_VERIFY(shown(treeGlyph));
@@ -6770,7 +6772,8 @@ void UiMainWindowTest::aTrackThatFailsToPlayShowsTheWarningWhileCurrent() {
     QVERIFY(QMetaObject::invokeMethod(bridge, "bridgeError",
                                       Q_ARG(QString, QStringLiteral("Couldn't play “02.flac”; playback stopped.")),
                                       Q_ARG(int, 1), Q_ARG(int, 1), Q_ARG(QString, kTrackPath),
-                                      Q_ARG(QString, QStringLiteral("No valid frames found before end of stream"))));
+                                      Q_ARG(QString, QStringLiteral("No valid frames found before end of stream")),
+                                      Q_ARG(bool, true)));
     const QString reason = QStringLiteral("Couldn't play “02.flac” (No valid frames found before end of stream).");
     bridge->setProperty("playbackState", QStringLiteral("Stopped"));
     QTRY_COMPARE(queueGlyph(3), QStringLiteral("status-error"));
@@ -6844,7 +6847,7 @@ void UiMainWindowTest::unreadableRowsHaveTheErrorMarkNotTheWarnings() {
     QVERIFY(QMetaObject::invokeMethod(bridge, "bridgeError",
                                       Q_ARG(QString, QStringLiteral("Couldn't play “02.flac”; playback stopped.")),
                                       Q_ARG(int, 1), Q_ARG(int, 1), Q_ARG(QString, kTrackPath),
-                                      Q_ARG(QString, QStringLiteral("Resource not found"))));
+                                      Q_ARG(QString, QStringLiteral("Resource not found")), Q_ARG(bool, true)));
     QQuickItem *statusGlyph = nullptr;
     QTRY_VERIFY(shown(statusGlyph = itemNamed(window->contentItem(), QStringLiteral("statusBarErrorsGlyph"))));
     QVERIFY(statusGlyph->property("source").toString().endsWith(QStringLiteral("/assets/status-error.svg")));
@@ -6869,6 +6872,68 @@ void UiMainWindowTest::unreadableRowsHaveTheErrorMarkNotTheWarnings() {
     QTRY_VERIFY(rowTinted(queueView, 1));
     QCOMPARE(stateGlyphName(queueGlyph), QStringLiteral("status-error"));
     QCOMPARE(colorOf(queueGlyph), tokenHex(window, "negativeSelected"));
+}
+
+// A file's rows are marked unreadable when the track failed to play, as
+// the bridge tells, whatever the severity: a failed track that was skipped
+// is a warning, as playback went on, and its rows were left unmarked; a
+// file that played but whose drive was slow to close it is an error, and
+// its rows were marked unreadable. Recent Issues keeps both as they came.
+// Mirrored by events::tests::a_track_that_failed_to_play_is_marked_whatever_its_severity.
+void UiMainWindowTest::rowsAreMarkedForATrackThatFailedNotForTheSeverity() {
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
+    QQuickItem *queueView = named(window, "playlistView");
+    QVERIFY(bridge && errors && queueView);
+    showTree(fixture.libraryModel, kAllExpanded);
+    QVariantList rows = sampleQueueRows(3);
+    QVariantMap file = rows.at(1).toMap();
+    file.insert(QStringLiteral("path"), kTrackPath);
+    rows[1] = file;
+    setQueue(bridge, rows);
+    QTRY_COMPARE(queueView->property("count").toInt(), 3);
+    QQuickItem *track = nullptr;
+    QTRY_VERIFY((track = libraryRow(window, QStringLiteral("track"))) != nullptr);
+    const auto queueRowUnreadable = [queueView]() {
+        QQuickItem *row = viewRowAt(queueView, 1);
+        return row != nullptr && row->property("unreadable").toBool();
+    };
+    const auto treeRowMarked = [track]() {
+        QQuickItem *glyph = itemNamed(track, QStringLiteral("libraryRowState"));
+        return shown(glyph) && stateGlyphName(glyph) == QStringLiteral("status-error");
+    };
+    // Category 1 is playback; severity 0 a warning, 1 an error.
+    const auto send = [bridge](const QString &message, int severity, const QString &detail,
+                               bool failedToPlay) {
+        return QMetaObject::invokeMethod(bridge, "bridgeError", Q_ARG(QString, message), Q_ARG(int, 1),
+                                         Q_ARG(int, severity), Q_ARG(QString, kTrackPath),
+                                         Q_ARG(QString, detail), Q_ARG(bool, failedToPlay));
+    };
+
+    // The file played, but its drive has yet to close it: an error about
+    // the file, in Recent Issues, that marks no row.
+    const QString notReleased = QStringLiteral("Can't release “%1”: the drive does not answer.").arg(kTrackPath);
+    QVERIFY(send(notReleased, 1, QString(), false));
+    QTRY_COMPARE(errors->property("count").toInt(), 1);
+    QCOMPARE(qvariant_cast<QObject *>(errors->property("latest"))->property("message").toString(), notReleased);
+    QCOMPARE(errors->property("unseenErrorCount").toInt(), 1);
+    QVERIFY(errors->property("unreadablePaths").toMap().isEmpty());
+    QVERIFY(!queueRowUnreadable());
+    QVERIFY(!treeRowMarked());
+
+    // The file failed, and playback went on to the next track: a warning
+    // that marks the file's rows in the queue and in the library.
+    QVERIFY(send(QStringLiteral("Couldn't play “02.flac”; skipped it."), 0,
+                 QStringLiteral("Resource not found"), true));
+    QTRY_COMPARE(errors->property("count").toInt(), 2);
+    QCOMPARE(errors->property("unseenErrorCount").toInt(), 1);
+    QTRY_VERIFY(queueRowUnreadable());
+    QTRY_VERIFY(treeRowMarked());
+    QCOMPARE(errors->property("unreadablePaths").toMap().value(kTrackPath).toString(),
+             QStringLiteral("Couldn't play “02.flac” (Resource not found)."));
 }
 
 // The tooltip that says why the row `row` of a list is marked unreadable,
@@ -6921,7 +6986,7 @@ void UiMainWindowTest::anUnreadableRowTellsWhyToThePointerAndTheKeyboard() {
     const QString why = QStringLiteral("The file cannot be read.");
     QVERIFY(QMetaObject::invokeMethod(errors, "report", Q_ARG(QVariant, 1), Q_ARG(QVariant, 1),
                                       Q_ARG(QVariant, kTrackPath), Q_ARG(QVariant, why),
-                                      Q_ARG(QVariant, QString())));
+                                      Q_ARG(QVariant, QString()), Q_ARG(QVariant, true)));
     QQuickItem *row = viewRowAt(queueView, 3);
     QTRY_VERIFY(row != nullptr && row->property("unreadable").toBool());
     QObject *reason = nullptr;
@@ -7045,7 +7110,8 @@ void UiMainWindowTest::unreadableRowsTellWhatFailedNotWhatPlaybackDid() {
     QVERIFY(QMetaObject::invokeMethod(bridge, "bridgeError",
                                       Q_ARG(QString, QStringLiteral("Couldn't play “02.flac”; playback stopped.")),
                                       Q_ARG(int, 1), Q_ARG(int, 1), Q_ARG(QString, kTrackPath),
-                                      Q_ARG(QString, QStringLiteral("No valid frames found before end of stream"))));
+                                      Q_ARG(QString, QStringLiteral("No valid frames found before end of stream")),
+                                      Q_ARG(bool, true)));
     bridge->setProperty("currentTrackPath", QStringLiteral("/music/2.flac"));
     bridge->setProperty("playingQueueIndex", 2);
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
@@ -7113,7 +7179,7 @@ void UiMainWindowTest::unreadableRowsReasonOpensBelowClearOfThePlayingRow() {
     QVERIFY(QMetaObject::invokeMethod(errors, "report", Q_ARG(QVariant, 1), Q_ARG(QVariant, 1),
                                       Q_ARG(QVariant, kTrackPath),
                                       Q_ARG(QVariant, QStringLiteral("Couldn't play “02.flac”; playback stopped.")),
-                                      Q_ARG(QVariant, detail)));
+                                      Q_ARG(QVariant, detail), Q_ARG(QVariant, true)));
     QQuickItem *row = nullptr;
     QTRY_VERIFY((row = viewRowAt(queueView, 3)) != nullptr && row->property("unreadable").toBool());
     QObject *reason = nullptr;
@@ -7153,7 +7219,7 @@ void UiMainWindowTest::unreadableRowsReasonOpensBelowClearOfThePlayingRow() {
         return QMetaObject::invokeMethod(errors, "report", Q_ARG(QVariant, 1), Q_ARG(QVariant, 1),
                                          Q_ARG(QVariant, kTrackPath),
                                          Q_ARG(QVariant, QStringLiteral("Couldn't play “02.flac”; playback stopped.")),
-                                         Q_ARG(QVariant, why));
+                                         Q_ARG(QVariant, why), Q_ARG(QVariant, true));
     };
     QVERIFY(reportWhy(detail.repeated(4)));
     QTRY_VERIFY(label->property("lineCount").toInt() > 2);
@@ -7294,7 +7360,8 @@ void UiMainWindowTest::libraryRowShowsItsCutTitleWholeInItsToolTip() {
     // An unreadable row cut short: its reason, not its title.
     const QString why = QStringLiteral("The file cannot be read.");
     QVERIFY(QMetaObject::invokeMethod(errors, "report", Q_ARG(QVariant, 1), Q_ARG(QVariant, 1),
-                                      Q_ARG(QVariant, kTrackPath), Q_ARG(QVariant, why), Q_ARG(QVariant, QString())));
+                                      Q_ARG(QVariant, kTrackPath), Q_ARG(QVariant, why), Q_ARG(QVariant, QString()),
+                                      Q_ARG(QVariant, true)));
     QObject *reason = nullptr;
     QTRY_VERIFY((reason = rowReasonOf(track, QStringLiteral("libraryRowReason"))) != nullptr);
     QTest::mouseMove(window, sceneRect(track).center().toPoint());

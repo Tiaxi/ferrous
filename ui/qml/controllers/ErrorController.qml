@@ -14,7 +14,8 @@ QtObject {
     // How many different errors the history keeps.
     property int historyLimit: 20
     // Newest first: category, severity, subject, message, the system's text
-    // for it (detail, or empty), count, and the times it was first and last
+    // for it (detail, or empty), whether the subject is a track that failed
+    // to play (failedToPlay), count, and the times it was first and last
     // reported, in ms since the epoch.
     property ListModel entries: ListModel {}
     readonly property int count: entries.count
@@ -54,17 +55,18 @@ QtObject {
         return root.entries.count > 0 ? root.entries.get(0) : null
     }
 
-    // The files the playback could not read, from the history: each
-    // playback error's file and why it failed (ErrorUtils.unreadableReason).
-    // The queue and the library mark their rows; they stay marked while the
-    // history keeps the error.
+    // The files the playback could not read, from the history: each track
+    // that failed to play and why (ErrorUtils.unreadableReason), whether
+    // playback skipped it, a warning, or stopped on it. An error about a
+    // file that played, such as one its drive has yet to close, marks
+    // nothing. The queue and the library mark their rows; they stay marked
+    // while the history keeps the error.
     readonly property var unreadablePaths: {
         root.revision
         const paths = ({})
         for (let i = root.entries.count - 1; i >= 0; --i) {
             const entry = root.entries.get(i)
-            if (entry.category === ErrorUtils.CategoryPlayback
-                    && entry.severity === ErrorUtils.SeverityError
+            if (entry.category === ErrorUtils.CategoryPlayback && entry.failedToPlay
                     && entry.subject.length > 0) {
                 paths[entry.subject] = ErrorUtils.unreadableReason(entry.subject, entry.message, entry.detail)
             }
@@ -79,7 +81,9 @@ QtObject {
 
     // `detail` is the system's text for the error, which the history shows
     // apart from its message; an error repeats one only with the same text.
-    function report(category, severity, subject, message, detail) {
+    // `failedToPlay` tells that the subject is a track that failed to play,
+    // which unreadablePaths marks; false when left out.
+    function report(category, severity, subject, message, detail, failedToPlay) {
         const text = String(message || "").trim()
         if (text.length === 0) {
             return
@@ -90,6 +94,7 @@ QtObject {
             ? ErrorUtils.SeverityWarning
             : ErrorUtils.SeverityError
         const about = String(subject || "")
+        const failed = failedToPlay === true
         const now = Date.now()
         for (let i = 0; i < root.entries.count; ++i) {
             const entry = root.entries.get(i)
@@ -98,6 +103,7 @@ QtObject {
                 root.entries.setProperty(i, "count", entry.count + 1)
                 root.entries.setProperty(i, "lastSeenMs", now)
                 root.entries.setProperty(i, "severity", level)
+                root.entries.setProperty(i, "failedToPlay", failed)
                 root.entries.setProperty(i, "unseen", true)
                 if (i > 0) {
                     root.entries.move(i, 0, 1)
@@ -114,6 +120,7 @@ QtObject {
             subject: about,
             message: text,
             detail: system,
+            failedToPlay: failed,
             count: 1,
             firstSeenMs: now,
             lastSeenMs: now,

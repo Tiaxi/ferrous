@@ -1214,16 +1214,19 @@ bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QStrin
             QString subject;
             QString message;
             QString detail;
+            quint8 failedToPlay = 0;
             ok = sectionReader.readU8(&category) && category <= ErrorCategoryLast
                 && sectionReader.readU8(&severity) && severity <= ErrorSeverityError
                 && sectionReader.readUtf8(&subject) && sectionReader.readUtf8(&message)
-                && sectionReader.readUtf8(&detail) && sectionReader.atEnd();
+                && sectionReader.readUtf8(&detail) && sectionReader.readU8(&failedToPlay)
+                && failedToPlay <= 1 && sectionReader.atEnd();
             if (ok) {
                 out->errorCategory = category;
                 out->errorSeverity = severity;
                 out->errorSubject = subject;
                 out->errorMessage = message;
                 out->errorDetail = detail;
+                out->errorFailedToPlay = failedToPlay != 0;
             }
             break;
         }
