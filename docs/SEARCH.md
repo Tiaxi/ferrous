@@ -25,7 +25,7 @@ When a search finds nothing and a misspelled word has a close match in the libra
 | Return to the query | Ctrl+F |
 | Close search | Esc |
 
-Search runs in a background worker. While a new query is pending, playback actions on old results are disabled.
+Search runs in a background worker. Enter, Ctrl+Enter or Alt+Enter pressed while a query runs acts on the selection once its results arrive, never on an older query's results; editing the query, another key, Esc or closing the palette drops it. Clicks on an older query's results do nothing.
 
 ## Phrases and filters
 

@@ -16,7 +16,10 @@ labels: bug
 3.
 
 **Environment**
+- Ferrous version (**Help › About Ferrous › Copy Version Information** copies it with the Qt and KDE versions):
 - Distro/version:
 - Qt version:
 - GStreamer version:
 - Installed from: source / RPM
+
+**Diagnostics log** (optional: **Help › Diagnostics… › Copy Without Paths** leaves out your folder and file names)
