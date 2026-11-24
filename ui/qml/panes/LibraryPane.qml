@@ -332,7 +332,37 @@ Rectangle {
                     }
                 }
 
-                Component.onCompleted: root.controller.registerView(libraryAlbumView)
+                // The row the keyboard is on is the view's current item,
+                // which the view gives the focus within it, so Tab into the
+                // library lands on that row, and a screen reader reads its
+                // title and kind (its first row had the focus, wherever the
+                // ring was). The controller moves and scrolls to it; the
+                // view does neither of itself.
+                keyNavigationEnabled: false
+                highlightFollowsCurrentItem: false
+                function followCurrentRow() {
+                    const index = root.libraryModel.indexForSelectionKey(root.controller.currentRowKey)
+                    if (libraryAlbumView.currentIndex !== index) {
+                        libraryAlbumView.currentIndex = index
+                    }
+                }
+                Connections {
+                    target: root.controller
+                    function onCurrentRowKeyChanged() {
+                        libraryAlbumView.followCurrentRow()
+                    }
+                }
+                // The view keeps its current item through rows that open
+                // and close around it; when that row leaves, as a new tree
+                // moves it, the view picks another, and the row's place
+                // is found again, as it is when the row's tree arrives.
+                onCurrentItemChanged: libraryAlbumView.followCurrentRow()
+                onCountChanged: libraryAlbumView.followCurrentRow()
+
+                Component.onCompleted: {
+                    root.controller.registerView(libraryAlbumView)
+                    libraryAlbumView.followCurrentRow()
+                }
                 // The keyboard comes in: a row shows where it is.
                 onActiveFocusChanged: {
                     if (libraryAlbumView.activeFocus) {

@@ -1231,6 +1231,7 @@ private slots:
     void transportIsWindowChromeInTheHeaderColours();
     void listsRingARowAsTheKeyboardComesIn();
     void tabIntoTheQueueFocusesItsCurrentRow();
+    void tabIntoTheLibraryFocusesItsCurrentRow();
     void listsRingTheCurrentRowOnlyForTheKeyboard();
     void unreadableTracksAreMarkedFromTheIssueHistory();
     void aTrackThatFailsToPlayShowsTheWarningWhileCurrent();
@@ -6294,6 +6295,166 @@ void UiMainWindowTest::tabIntoTheQueueFocusesItsCurrentRow() {
     QTRY_COMPARE(ringedRowsOf(queueView), QList<int>{0});
     QTRY_COMPARE(window->activeFocusItem(), viewRowAt(queueView, 0));
     QCOMPARE(focusedName(), QStringLiteral("1., Track 0, Artist 0, Album, 1:00"));
+}
+
+// Tab into the library gives the focus to the row the keyboard is on, the
+// one with the ring, so a screen reader reads its title and kind, and the
+// keys go on from it. Its first row had the focus wherever the ring was:
+// on the playing track's row, a clicked row, or one Show in Library chose.
+// The focus stays with the row as rows above it open and close, as the row
+// moves in a new tree, and through Collapse All.
+void UiMainWindowTest::tabIntoTheLibraryFocusesItsCurrentRow() {
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    const bool accessibilityWasActive = QAccessible::isActive();
+    QAccessible::setActive(true);
+    const auto restoreAccessibility = qScopeGuard([accessibilityWasActive] {
+        QAccessible::setActive(accessibilityWasActive);
+    });
+    QObject *bridge = bridgeOf(window);
+    LibraryTreeModel &model = fixture.libraryModel;
+    QQuickItem *view = named(window, "libraryView");
+    QObject *library = window->findChild<QObject *>(QStringLiteral("libraryController"));
+    QVERIFY(view && library);
+    // What the focus is on, as a screen reader is told: the item with the
+    // keyboard's focus, or the nearest item above it with a role.
+    const auto focused = [window]() -> QAccessibleInterface * {
+        for (QQuickItem *item = window->activeFocusItem(); item != nullptr; item = item->parentItem()) {
+            QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(item);
+            if (accessible != nullptr && accessible->role() != QAccessible::NoRole
+                && accessible->role() != QAccessible::Client) {
+                return accessible;
+            }
+        }
+        return nullptr;
+    };
+    // Empty when the focus is on row `index`, whose title is `title`, and
+    // it has the ring; else what is wrong.
+    const auto focusIsOn = [&](int index, const QString &title) -> QString {
+        QQuickItem *row = viewRowAt(view, index);
+        if (row == nullptr) {
+            return QStringLiteral("no row %1").arg(index);
+        }
+        if (window->activeFocusItem() != row) {
+            const QQuickItem *item = window->activeFocusItem();
+            return QStringLiteral("the focus is on %1 (%2), not row %3")
+                .arg(item != nullptr ? item->property("rowTitle").toString() : QStringLiteral("nothing"),
+                     item != nullptr ? QString::fromLatin1(item->metaObject()->className()) : QString())
+                .arg(index);
+        }
+        QAccessibleInterface *accessible = focused();
+        if (accessible == nullptr || accessible->role() != QAccessible::TreeItem) {
+            return QStringLiteral("not a tree item");
+        }
+        if (accessible->text(QAccessible::Name) != title) {
+            return QStringLiteral("read as \"%1\"").arg(accessible->text(QAccessible::Name));
+        }
+        if (!accessible->state().focused) {
+            return QStringLiteral("not read as focused");
+        }
+        if (ringedRowsOf(view) != QList<int>{index}) {
+            return QStringLiteral("the ring is elsewhere");
+        }
+        return {};
+    };
+
+    // Two library folders, each an artist with an album of one track.
+    const QString first = QStringLiteral("/music/Artist A/Album A/01.flac");
+    const QString second = QStringLiteral("/shelf/Artist B/Album B/01.flac");
+    const QString shelfKey = QStringLiteral("root|/shelf");
+    const QString artistB = QStringLiteral("artist|Artist B");
+    const QString albumB = QStringLiteral("album|Artist B|Album B");
+    const QString firstKey = QStringLiteral("track|") + first;
+    const QList<TreeRow> music{
+        {0, 0, 0, 1, 0, QStringLiteral("Music"), kRootKey, QString(), QStringLiteral("/music"), {}},
+        {1, 1, 0, 1, 0, QStringLiteral("Artist A (1)"), kArtistKey, QStringLiteral("Artist A"),
+         QStringLiteral("/music/Artist A"), {}},
+        {2, 2, 0, 1, 2005, QStringLiteral("Album A"), kAlbumKey, QStringLiteral("Artist A"),
+         QStringLiteral("/music/Artist A/Album A"), {}},
+        {4, 3, 1, 0, 0, QStringLiteral("First"), firstKey, QStringLiteral("Artist A"), first, first},
+    };
+    const QList<TreeRow> shelf{
+        {0, 0, 0, 1, 0, QStringLiteral("Shelf"), shelfKey, QString(), QStringLiteral("/shelf"), {}},
+        {1, 1, 0, 1, 0, QStringLiteral("Artist B (1)"), artistB, QStringLiteral("Artist B"),
+         QStringLiteral("/shelf/Artist B"), {}},
+        {2, 2, 0, 1, 2010, QStringLiteral("Album B"), albumB, QStringLiteral("Artist B"),
+         QStringLiteral("/shelf/Artist B/Album B"), {}},
+        {4, 3, 1, 0, 0, QStringLiteral("Other"), QStringLiteral("track|") + second, QStringLiteral("Artist B"), second,
+         second},
+    };
+    const QStringList allExpanded{kRootKey, shelfKey, kArtistKey, kAlbumKey, artistB, albumB};
+    bridge->setProperty("libraryRoots", QStringList{QStringLiteral("/music"), QStringLiteral("/shelf")});
+    model.setExpandedKeys(allExpanded);
+    model.setLibraryTreeFromBinary(treeOf(music + shelf));
+    QTRY_COMPARE(view->property("count").toInt(), 8);
+
+    // The second folder's track plays: Tab lands on its row.
+    bridge->setProperty("currentTrackPath", second);
+    bridge->setProperty("currentTrackTreeKeys", QStringList{shelfKey, artistB, albumB});
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    tabInto(window, view);
+    QTRY_COMPARE(focusIsOn(7, QStringLiteral("Other")), QString());
+    // Up goes on from it, and the focus with the ring.
+    QTest::keyClick(window, Qt::Key_Up);
+    QTRY_COMPARE(library->property("selectedSelectionKey").toString(), albumB);
+    QTRY_COMPARE(focusIsOn(6, QStringLiteral("Album B")), QString());
+
+    // Rows above it close and open: the focus stays on it.
+    model.toggleKey(kArtistKey);
+    QTRY_COMPARE(view->property("count").toInt(), 6);
+    QTRY_COMPARE(focusIsOn(4, QStringLiteral("Album B")), QString());
+    model.toggleKey(kArtistKey);
+    QTRY_COMPARE(view->property("count").toInt(), 8);
+    QTRY_COMPARE(focusIsOn(6, QStringLiteral("Album B")), QString());
+
+    // A clicked row, Tab coming back to the library.
+    QQuickItem *clicked = viewRowAt(view, 2);
+    QVERIFY(clicked != nullptr);
+    const QRectF clickedRect = sceneRect(clicked);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                      QPointF(clickedRect.right() - 48, clickedRect.center().y()).toPoint());
+    QTRY_COMPARE(library->property("selectedSelectionKey").toString(), kAlbumKey);
+    tabInto(window, view);
+    QTRY_COMPARE(focusIsOn(2, QStringLiteral("Album A")), QString());
+
+    // Show in Library, from elsewhere.
+    named(window, "transportButton_playPause")->forceActiveFocus(Qt::TabFocusReason);
+    QVERIFY(QMetaObject::invokeMethod(bridge, "libraryRevealRequested",
+                                      Q_ARG(QVariant, QVariant(QStringList{kRootKey, kArtistKey, kAlbumKey})),
+                                      Q_ARG(QString, firstKey)));
+    QTRY_COMPARE(library->property("selectedSelectionKey").toString(), firstKey);
+    tabInto(window, view);
+    QTRY_COMPARE(focusIsOn(3, QStringLiteral("First")), QString());
+
+    // New trees: the shelf gains an album, then comes first. Its rows
+    // stay, and the music folder's leave and come back after them, the
+    // row with the focus among them.
+    const QString third = QStringLiteral("/shelf/Artist B/Album C/01.flac");
+    const QString albumC = QStringLiteral("album|Artist B|Album C");
+    QList<TreeRow> largerShelf = shelf;
+    largerShelf[1].childCount = 2;
+    largerShelf.push_back({2, 2, 0, 1, 2012, QStringLiteral("Album C"), albumC, QStringLiteral("Artist B"),
+                           QStringLiteral("/shelf/Artist B/Album C"), {}});
+    largerShelf.push_back({4, 3, 1, 0, 0, QStringLiteral("Third"), QStringLiteral("track|") + third,
+                           QStringLiteral("Artist B"), third, third});
+    model.setExpandedKeys(allExpanded + QStringList{albumC});
+    model.setLibraryTreeFromBinary(treeOf(music + largerShelf));
+    QTRY_COMPARE(view->property("count").toInt(), 10);
+    QTRY_COMPARE(focusIsOn(3, QStringLiteral("First")), QString());
+    model.setLibraryTreeFromBinary(treeOf(largerShelf + music));
+    QTRY_COMPARE(model.indexForSelectionKey(firstKey), 9);
+    QTRY_COMPARE(focusIsOn(9, QStringLiteral("First")), QString());
+
+    // Collapse All leaves the folders' rows; the row went with its
+    // folder's children, so Tab rings one of them, and the focus is on it.
+    QVERIFY(QMetaObject::invokeMethod(library, "collapseAll"));
+    QTRY_COMPARE(view->property("count").toInt(), 2);
+    library->setProperty("focusSelectionKey", QString());
+    tabInto(window, view);
+    QTRY_COMPARE(ringedRowsOf(view).size(), 1);
+    const int ringed = ringedRowsOf(view).constFirst();
+    QTRY_COMPARE(focusIsOn(ringed, viewRowAt(view, ringed)->property("rowTitle").toString()), QString());
 }
 
 // Tab into the library or the queue with no row selected: a row it shows

@@ -402,8 +402,10 @@ Item {
 
     ListModel {
         id: sidebarModel
-        // LibraryTreeModel's, for the library's Collapse All.
+        // LibraryTreeModel's, for the library's Collapse All,
         property bool hasExpandedRows: false
+        // and for the view's current row: it has none.
+        function indexForSelectionKey(selectionKey) { return -1 }
     }
 
     Components.UiPalette {
