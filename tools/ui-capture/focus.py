@@ -779,7 +779,7 @@ SCOPES.update({
                           (("context-library-artist", "On an artist"), ("context-library-root", "On a folder's root row")))]
              # (the pane with no library folder yet: the queue beside it holds the first-run prompt, in the full shot)
              + [[("main", "first-run-empty-library", (0, 0.075, 0.23, 0.45),
-                  "No library folder yet (first run; the queue's prompt is in shots/main_first-run-empty-library_dark_1x_1600x1000.png)",
+                  "No library folder yet (first run)",
                   dict(lh=16, gap=6))]]),
             ("search-states", "The search palette (Ctrl+F) at 1:1; dark", "dark",
              [[("search", "empty", "popup", "Empty (its footer keys)", dict(margin=4, lh=16, gap=6))],
@@ -827,7 +827,8 @@ SCOPES.update({
             ("sheet", "lib-density", "dark", "320 artists, a row focused beside the scrollbar; two folders; 24 pt at 1920x1200",
              "density and scanning; the root rows; the focused row's right edge against the scrollbar's lane"),
             ("sheet", "lib-menus", "dark", "The library's keyboard menus on a track, album, artist and root row; the empty library",
-             "where each opens against its row; the items and their order; what the empty pane says"),
+             "where each opens against its row; the items and their order; what the empty pane says (the queue's first-run "
+             "prompt beside it: shots/main_first-run-empty-library_dark_1x_1600x1000.png)"),
             ("strip", "pair:library-expand-collapse", "dark", "An artist expanded (left) and collapsed (right) with the keyboard",
              "the rows' motion; content cuts"),
             ("sheet", "search-states", "dark", "The search palette: empty, results, keyboard selection, no results",
