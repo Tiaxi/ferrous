@@ -1191,6 +1191,7 @@ private slots:
     void nowPlayingCoverIsAKeyboardStop();
     void libraryFoldersAreFolderHeaders();
     void libraryFoldersAfterTheFirstHaveARuleOnTop();
+    void libraryCollapseAllIsEnabledOnlyWithAnExpandedRow();
     void regionHeadersNameTheRegionAndItsTotals();
     void selectedRowsDrawTheirMarksForTheSelection();
     void libraryTreeHasOneIndentStep();
@@ -4701,6 +4702,53 @@ void UiMainWindowTest::libraryFoldersAfterTheFirstHaveARuleOnTop() {
     QTRY_VERIFY(rowTinted(view, 3));
     const QColor tint = itemNamed(shelf, QStringLiteral("rowBackgroundTint"))->property("color").value<QColor>();
     QTRY_VERIFY2(near(Drawn(window).at(onRule), tint), qPrintable(Drawn(window).at(onRule).name()));
+}
+
+// The library's Collapse All is enabled only while a row shows expanded: an
+// artist's, an album's or a library folder's, which shows expanded unless
+// it was collapsed. With every row collapsed, or none, it would do nothing
+// (it was enabled whenever the tree had rows).
+void UiMainWindowTest::libraryCollapseAllIsEnabledOnlyWithAnExpandedRow() {
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    LibraryTreeModel &model = fixture.libraryModel;
+    QObject *item = window->findChild<QObject *>(QStringLiteral("libraryCollapseAllItem"));
+    QObject *controller = window->findChild<QObject *>(QStringLiteral("libraryController"));
+    QVERIFY(item && controller);
+    const auto enabled = [item]() { return item->property("enabled").toBool(); };
+    QVERIFY(!model.hasExpandedRows());
+    QVERIFY(!enabled());
+
+    QSignalSpy changes(&model, &LibraryTreeModel::hasExpandedRowsChanged);
+    showTree(model, kAllExpanded);
+    QTRY_COMPARE(model.rowCount(), 3);
+    QVERIFY(model.hasExpandedRows());
+    QVERIFY(enabled());
+    QCOMPARE(changes.count(), 1);
+    QVERIFY(QMetaObject::invokeMethod(controller, "collapseAll"));
+    QTRY_COMPARE(model.rowCount(), 1);
+    QVERIFY(!model.hasExpandedRows());
+    QVERIFY(!enabled());
+    // One row opened, and closed again.
+    model.toggleKey(kArtistKey);
+    QTRY_COMPARE(model.rowCount(), 2);
+    QVERIFY(enabled());
+    model.toggleKey(kArtistKey);
+    QTRY_COMPARE(model.rowCount(), 1);
+    QVERIFY(!enabled());
+    QCOMPARE(changes.count(), 4);
+
+    // Library folders show expanded until collapsed, the rows under them
+    // collapsed.
+    model.setExpandedKeys({});
+    model.setLibraryTreeFromBinary(artistAlbumTrackTree(QStringLiteral("/music/Artist A"), QStringLiteral("Album A"),
+                                                        QStringLiteral("Music")));
+    QTRY_COMPARE(model.rowCount(), 2);
+    QVERIFY(enabled());
+    QVERIFY(QMetaObject::invokeMethod(controller, "collapseAll"));
+    QTRY_COMPARE(model.rowCount(), 1);
+    QVERIFY(!enabled());
 }
 
 void UiMainWindowTest::regionHeadersNameTheRegionAndItsTotals() {

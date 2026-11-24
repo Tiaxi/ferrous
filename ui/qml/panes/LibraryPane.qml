@@ -1027,7 +1027,8 @@ Rectangle {
                         objectName: "libraryCollapseAllItem"
                         text: I18n.i18nc("@action:inmenu", "Collapse All")
                         icon.name: "collapse-all"
-                        enabled: root.libraryModel.count > 0
+                        // Only while a row shows expanded.
+                        enabled: root.libraryModel.hasExpandedRows
                         onTriggered: root.controller.collapseAll()
                     }
                 }

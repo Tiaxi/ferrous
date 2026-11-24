@@ -401,6 +401,10 @@ bool LibraryTreeModel::revealPending() const {
     return !m_revealKey.isEmpty();
 }
 
+bool LibraryTreeModel::hasExpandedRows() const {
+    return m_hasExpandedRows;
+}
+
 void LibraryTreeModel::setLibraryTreeFromBinary(const QByteArray &treeBytes) {
     if (!m_parseInFlight && treeBytes.size() <= 16 * 1024) {
         ++m_parseGeneration;
@@ -1370,6 +1374,12 @@ void LibraryTreeModel::rebuildRows() {
     pruneSelection();
     if (oldCount != count()) {
         emit countChanged();
+    }
+    const bool hasExpanded = std::any_of(m_rows.cbegin(), m_rows.cend(),
+                                         [](const FlatRow &row) { return row.expanded; });
+    if (hasExpanded != m_hasExpandedRows) {
+        m_hasExpandedRows = hasExpanded;
+        emit hasExpandedRowsChanged();
     }
     emit treeApplied();
     // After the views took the rows and their positions.
