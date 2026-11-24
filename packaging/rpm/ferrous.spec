@@ -111,6 +111,10 @@ DESTDIR=%{buildroot} cmake --install ui/build
 desktop-file-validate %{buildroot}%{_datadir}/applications/ferrous.desktop
 appstreamcli validate --no-net %{buildroot}%{_metainfodir}/io.github.tiaxi.ferrous.metainfo.xml
 # Keep the tests away from the builder's own settings, library, and caches.
+# The tests run as many at a time as the build compiles on, as in CI: they
+# mostly wait on animations and timers, so one at a time takes several times
+# longer. Each test program gets directories of its own from the launcher,
+# ui/tests/own_directories.sh, so the tests that run at once share none.
 test_state="$(mktemp -d "$PWD/ui/build/test-state.XXXXXX")"
 mkdir -p "${test_state}/tmp"
 TMPDIR="${test_state}/tmp" \
@@ -118,7 +122,7 @@ XDG_CONFIG_HOME="${test_state}/config" \
 XDG_DATA_HOME="${test_state}/data" \
 XDG_CACHE_HOME="${test_state}/cache" \
 FERROUS_TEST_REQUIRE_DECODERS=1 \
-    ctest --test-dir ui/build --output-on-failure
+    ctest --test-dir ui/build --output-on-failure --parallel %{?_smp_build_ncpus}
 rm -rf "${test_state}"
 
 %posttrans
