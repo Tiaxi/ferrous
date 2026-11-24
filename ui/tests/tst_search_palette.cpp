@@ -499,6 +499,8 @@ private slots:
     void matchesAreEmphasisedInTheTitleOnly();
     void contextSaysWhyARowMatched();
     void selectedHoveredAndPlayingRowsAreDrawn();
+    void selectedRowsSecondaryMarksStepUp_data();
+    void selectedRowsSecondaryMarksStepUp();
     void footerNamesTheKeysForEachState();
     void suggestionIsASelectableRow();
     void recentSearchesShowBeforeTyping();
@@ -1282,6 +1284,105 @@ void SearchPaletteTest::selectedHoveredAndPlayingRowsAreDrawn() {
 // text colour, the action in the secondary one; 6 px from a key to its
 // action, more than a word space, and 18 px between pairs (at 4 px, a word
 // space, each pair ran together into one phrase).
+void SearchPaletteTest::selectedRowsSecondaryMarksStepUp_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("dark") << true;
+    QTest::newRow("light") << false;
+}
+
+// On the selected result, the context, the length and the artist's glyph
+// step up to the selected secondary colour, and a playing title to the
+// selected amber, as on the library's and the queue's selected rows, and
+// hold their contrast on every selection tint (in the view's colours they
+// read weaker there than the track number of a selected queue row). The
+// other rows keep the view's colours.
+void SearchPaletteTest::selectedRowsSecondaryMarksStepUp() {
+    QFETCH(bool, dark);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(dark ? kBreezeDark : kBreezeLight, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    harness.bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/drift.flac"));
+    harness.bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    int drift = -1;
+    int line = -1;
+    int artist = -1;
+    for (int i = 0; i < harness.model.rowCount(); ++i) {
+        const QString label = harness.model.rowDataAt(i).value(QStringLiteral("label")).toString();
+        if (label == QStringLiteral("Meridian Drift")) drift = i;
+        if (label == QStringLiteral("Meridian Line")) line = i;
+        if (label == QStringLiteral("The Quiet Meridian")) artist = i;
+    }
+    QVERIFY(drift >= 0 && line >= 0 && artist >= 0);
+    QCOMPARE(harness.selection(), drift);
+
+    const qreal secondaryContrast = harness.tokens->property("rowSecondaryContrast").toReal();
+    QCOMPARE(secondaryContrast, 6.0);
+    const QColor view = harness.token("view");
+    QStringList failures;
+    const auto onSelection = [&](const QString &what, const QColor &color, double minimum) {
+        for (const char *tint : {"selection", "selectionInactive", "selectionHovered", "selectionInactiveHovered",
+                                 "selectionPressed"}) {
+            const QColor background = drawnOver(harness.token(tint), view);
+            if (contrastRatio(color, background) < minimum) {
+                failures << describeContrast(what + QLatin1Char(' ') + QLatin1String(tint), color, background);
+            }
+        }
+    };
+    const auto secondaryOf = [&](QQuickItem *row) {
+        QList<QQuickItem *> marks = contextTexts(row) + visibleNamed(row, QStringLiteral("globalSearchResultLength"))
+            + visibleNamed(row, QStringLiteral("globalSearchArtistGlyph"));
+        return marks;
+    };
+
+    // The selected playing track.
+    QQuickItem *selected = harness.row(drift);
+    QVERIFY(selected != nullptr);
+    const auto selectedMarks = secondaryOf(selected);
+    QCOMPARE(selectedMarks.size(), 2);
+    for (QQuickItem *mark : selectedMarks) {
+        QCOMPARE(hex(colorOf(mark)), hex(harness.token("textSecondarySelected")));
+        onSelection(mark->objectName(), colorOf(mark), secondaryContrast);
+    }
+    QVERIFY(hex(harness.token("textSecondarySelected")) != hex(harness.token("textSecondary")));
+    const auto titles = visibleNamed(selected, QStringLiteral("globalSearchResultTitle"));
+    QVERIFY(!titles.isEmpty());
+    for (QQuickItem *run : titles) {
+        QCOMPARE(hex(colorOf(run)), hex(harness.token("nowSelected")));
+        onSelection(QStringLiteral("playing title"), colorOf(run), 4.5);
+    }
+    // Another track keeps the view's colours.
+    for (QQuickItem *mark : secondaryOf(harness.row(line))) {
+        QCOMPARE(hex(colorOf(mark)), hex(harness.token("textSecondary")));
+    }
+
+    // The artist selected: its glyph steps up, and the playing track,
+    // no longer selected, has the view's amber.
+    QMetaObject::invokeMethod(harness.controller, "selectDisplayIndex", Q_ARG(QVariant, artist));
+    QCOMPARE(harness.selection(), artist);
+    QQuickItem *artistRow = harness.row(artist);
+    QQuickItem *glyph = visibleChildNamed(artistRow, QStringLiteral("globalSearchArtistGlyph"));
+    QVERIFY(glyph != nullptr);
+    QCOMPARE(hex(colorOf(glyph)), hex(harness.token("textSecondarySelected")));
+    onSelection(QStringLiteral("artist glyph"), colorOf(glyph), 3.0);
+    for (QQuickItem *mark : contextTexts(artistRow)) {
+        QCOMPARE(hex(colorOf(mark)), hex(harness.token("textSecondarySelected")));
+    }
+    for (QQuickItem *run : visibleNamed(harness.row(drift), QStringLiteral("globalSearchResultTitle"))) {
+        QCOMPARE(hex(colorOf(run)), hex(harness.token("now")));
+    }
+    for (QQuickItem *mark : secondaryOf(harness.row(drift))) {
+        QCOMPARE(hex(colorOf(mark)), hex(harness.token("textSecondary")));
+    }
+    // Back on the track, the artist's glyph steps down again.
+    QMetaObject::invokeMethod(harness.controller, "selectDisplayIndex", Q_ARG(QVariant, drift));
+    QCOMPARE(hex(colorOf(glyph)), hex(harness.token("textSecondary")));
+
+    QVERIFY2(failures.isEmpty(), qPrintable(failures.join(QLatin1Char('\n'))));
+}
+
 void SearchPaletteTest::footerNamesTheKeysForEachState() {
     Harness harness;
     QString errorText;

@@ -750,6 +750,13 @@ Dialog {
                         && model.trackPath === (root.controller.uiBridge.currentTrackPath || "")
                         && (root.controller.uiBridge.playbackState || "Stopped") !== "Stopped"
                     readonly property var titleRuns: isResult ? root.titleRuns(model.label, isNow) : []
+                    // On the selection the secondary marks and the amber
+                    // step up to hold their contrast on its tint, as the
+                    // library's and the queue's do.
+                    readonly property color titleColor: !isNow ? root.uiPalette.text
+                        : (selected ? root.uiPalette.nowSelected : root.uiPalette.now)
+                    readonly property color secondaryColor: selected
+                        ? root.uiPalette.textSecondarySelected : root.uiPalette.textSecondary
                     readonly property string context: isResult ? root.rowContext(model, false) : ""
                     readonly property string matchedContext: isResult ? root.matchedContext(model) : ""
                     // The context's room: up to the length's column, or the
@@ -848,10 +855,19 @@ Dialog {
                     // file up again on the GUI thread whenever its source
                     // changes, which recycled rows would do on every query.
                     Loader {
+                        id: artistGlyphLoader
                         x: root.sideInset + (root.leadSize - root.glyphSize) / 2
                         y: Math.round((parent.height - root.glyphSize) / 2)
                         active: resultRow.isResult && resultRow.rowType === "artist"
                         sourceComponent: artistGlyph
+                    }
+                    // The artist's glyph in the row's secondary colour,
+                    // selected too.
+                    Binding {
+                        target: artistGlyphLoader.item
+                        property: "color"
+                        value: resultRow.secondaryColor
+                        when: artistGlyphLoader.status === Loader.Ready
                     }
                     Loader {
                         x: root.sideInset
@@ -923,7 +939,7 @@ Dialog {
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.basePointSize
                         font.weight: run && run.match ? Font.DemiBold : Font.Normal
-                        color: resultRow.isNow ? root.uiPalette.now : root.uiPalette.text
+                        color: resultRow.titleColor
                     }
                     Text {
                         readonly property var run: resultRow.titleRuns.length > 1 ? resultRow.titleRuns[1] : null
@@ -939,7 +955,7 @@ Dialog {
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.basePointSize
                         font.weight: run && run.match ? Font.DemiBold : Font.Normal
-                        color: resultRow.isNow ? root.uiPalette.now : root.uiPalette.text
+                        color: resultRow.titleColor
                     }
                     Text {
                         readonly property var run: resultRow.titleRuns.length > 2 ? resultRow.titleRuns[2] : null
@@ -955,7 +971,7 @@ Dialog {
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.basePointSize
                         font.weight: run && run.match ? Font.DemiBold : Font.Normal
-                        color: resultRow.isNow ? root.uiPalette.now : root.uiPalette.text
+                        color: resultRow.titleColor
                     }
                     Text {
                         readonly property var run: resultRow.titleRuns.length > 3 ? resultRow.titleRuns[3] : null
@@ -971,7 +987,7 @@ Dialog {
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.basePointSize
                         font.weight: run && run.match ? Font.DemiBold : Font.Normal
-                        color: resultRow.isNow ? root.uiPalette.now : root.uiPalette.text
+                        color: resultRow.titleColor
                     }
                     Text {
                         readonly property var run: resultRow.titleRuns.length > 4 ? resultRow.titleRuns[4] : null
@@ -987,7 +1003,7 @@ Dialog {
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.basePointSize
                         font.weight: run && run.match ? Font.DemiBold : Font.Normal
-                        color: resultRow.isNow ? root.uiPalette.now : root.uiPalette.text
+                        color: resultRow.titleColor
                     }
                     // The context, whole and regular; where the title has
                     // no match, its matches are in the text colour.
@@ -1007,7 +1023,7 @@ Dialog {
                         elide: Text.ElideRight
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.smallPointSize
-                        color: root.uiPalette.textSecondary
+                        color: resultRow.secondaryColor
                     }
                     Text {
                         id: lengthText
@@ -1024,7 +1040,7 @@ Dialog {
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.smallPointSize
                         font.features: root.uiPalette.tabularFigures
-                        color: root.uiPalette.textSecondary
+                        color: resultRow.secondaryColor
                     }
 
                     MouseArea {
