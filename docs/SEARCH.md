@@ -25,7 +25,7 @@ When a search finds nothing and a misspelled word has a close match in the libra
 | Return to the query | Ctrl+F |
 | Close search | Esc |
 
-Search runs in a background worker. Enter, Ctrl+Enter or Alt+Enter pressed while a query runs acts on the selection once its results arrive, never on an older query's results; editing the query, another key, Esc or closing the palette drops it. Clicks on an older query's results do nothing.
+Search runs in a background worker. Enter, Ctrl+Enter or Alt+Enter pressed in the search field while a query runs acts on the selection once that query's results arrive, never on an older query's results. Editing the query, Up, Down, Page Up, Page Down, Esc or closing the palette cancels it. Clicks on an older query's results do nothing.
 
 ## Phrases and filters
 

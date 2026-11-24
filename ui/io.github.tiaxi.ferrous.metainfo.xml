@@ -18,11 +18,11 @@
       listen to it.
     </p>
     <ul>
-      <li>Gapless playback, with a queue that comes back where you left it and changes you can undo</li>
+      <li>Gapless playback, with a queue that comes back where you left it</li>
       <li>A spectrogram inspired by Adobe Audition's spectral view, a zoomable waveform and fullscreen viewers</li>
       <li>A folder-first library that follows your folders as files change, with ranked search as you type</li>
       <li>A tag editor for many files at once, with renames from tags that you see before anything changes</li>
-      <li>Full-size album art from the iTunes catalog, previewed beside yours before it is applied</li>
+      <li>Full-size album art from the iTunes catalog, to preview and compare with yours before applying it</li>
       <li>Last.fm scrobbling, MPRIS media controls and media keys</li>
     </ul>
     <p>

@@ -22,4 +22,4 @@ labels: bug
 - GStreamer version:
 - Installed from: source / RPM
 
-**Diagnostics log** (optional: **Help › Diagnostics… › Copy Without Paths** leaves out your folder and file names)
+**Diagnostics log** (optional: **Help › Diagnostics… › Copy Without Paths** replaces the paths of your music with placeholders; it keeps artist and track names in Last.fm lines, so read it before you post it)

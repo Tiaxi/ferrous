@@ -18,7 +18,7 @@ Ferrous started as the player I wanted for my own music: one that feels at home 
 
 ## A look around
 
-**Playback and the queue.** Gapless playback, repeat and shuffle, and a queue that comes back where you left it. Changes to the queue can be undone.
+**Playback and the queue.** Gapless playback, repeat and shuffle, and a queue that comes back where you left it. Clearing, removing, moving and replacing tracks can be undone.
 
 **Library and search.** The library follows your music folders as files come and go. [Search](docs/SEARCH.md) finds artists, albums and tracks as you type.
 
@@ -26,7 +26,7 @@ Ferrous started as the player I wanted for my own music: one that feels at home 
 
 ![The spectrogram in its fullscreen viewer](docs/assets/screenshots/spectrogram-fullscreen-dark.png)
 
-**Tags and album art.** Edit the tags of many files at once, rename files from their tags, and find full-size album art in the iTunes catalog, previewed beside what you have before anything is replaced.
+**Tags and album art.** Edit the tags of many files at once, rename files from their tags, and find full-size album art in the iTunes catalog, which you can preview and compare with your current cover before applying it.
 
 **Last.fm.** Scrobbling that stays out of the way, with a small progress bar in the status bar and a pause for when you'd rather not.
 
