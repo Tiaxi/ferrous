@@ -525,6 +525,7 @@ private slots:
     void transportToolTipsNameTheShortcut();
     void transportButtonsAreOffWhereTheyCannotAct();
     void transportToolTipsClearTheFocusRings();
+    void transportToolTipsPassAlongTheRowAtOnce();
     void seekWaveformMeetsItsContrastAsDrawn_data();
     void seekWaveformMeetsItsContrastAsDrawn();
     void seekViewBandMarksTheViewBehindTheWaveform_data();
@@ -1122,6 +1123,63 @@ void TransportStatusTest::transportToolTipsClearTheFocusRings() {
         harness.root->property("startButton").value<QQuickItem *>()->forceActiveFocus(Qt::TabFocusReason);
         QTRY_VERIFY2(!inLane.tip->property("visible").toBool(), qPrintable(name));
     }
+}
+
+// The transport's tooltips pass along the row: with one shown, the next
+// control's opens at once, in its place, as the pointer goes on to it,
+// the seek bar's time box's too, while the last one still fades out (each
+// waited the style's delay, and the lane stood empty between them, the
+// menu's titles back over it). Once the lane is empty, the next one waits
+// the delay again.
+void TransportStatusTest::transportToolTipsPassAlongTheRowAtOnce() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QObject *seekTip = harness.root->findChild<QObject *>(QStringLiteral("seekTimeBox"));
+    QVERIFY(transport && seek && seekTip);
+    Kirigami::Platform::Units *units = unitsOf(transport);
+    QVERIFY(units != nullptr);
+    units->setToolTipDelay(400);
+    units->setLongDuration(300);
+    QList<QQuickItem *> buttons;
+    for (const QString &name : {QStringLiteral("transportButton_previous"), QStringLiteral("transportButton_playPause"),
+                                QStringLiteral("transportButton_stop"), QStringLiteral("transportButton_next")}) {
+        QQuickItem *button = harness.item(name);
+        QVERIFY2(button != nullptr, qPrintable(name));
+        // Hover as on the desktop, which the offscreen platform's hints leave off.
+        button->setProperty("hoverEnabled", true);
+        buttons.append(button);
+    }
+    // The keyboard's focus off the transport, so the pointer alone shows
+    // the tooltips.
+    harness.root->property("startButton").value<QQuickItem *>()->forceActiveFocus(Qt::TabFocusReason);
+    QElapsedTimer timer;
+    timer.start();
+    QTest::mouseMove(harness.window, sceneCentre(buttons.constFirst()));
+    QTRY_VERIFY(buttonToolTip(buttons.constFirst())->property("opened").toBool());
+    QVERIFY2(timer.elapsed() >= 350, qPrintable(QString::number(timer.elapsed())));
+    for (int i = 1; i < buttons.size(); ++i) {
+        QObject *last = buttonToolTip(buttons.at(i - 1));
+        QTest::mouseMove(harness.window, sceneCentre(buttons.at(i)));
+        QVERIFY2(buttonToolTip(buttons.at(i))->property("visible").toBool(), qPrintable(buttons.at(i)->objectName()));
+        QVERIFY(!last->property("opened").toBool());
+        QVERIFY(last->property("background").value<QQuickItem *>()->isVisible());
+        QTRY_VERIFY(buttonToolTip(buttons.at(i))->property("opened").toBool());
+    }
+    const QRectF bar = sceneRect(seek);
+    QTest::mouseMove(harness.window, QPointF(bar.left() + 2, bar.center().y()).toPoint());
+    QVERIFY(seekTip->property("visible").toBool());
+
+    // Off the transport, the lane empties; then the next one waits.
+    QTest::mouseMove(harness.window, QPointF(bar.center().x(), sceneRect(transport).bottom() + 60).toPoint());
+    QTRY_VERIFY(!transport->property("laneWarm").toBool());
+    timer.restart();
+    QTest::mouseMove(harness.window, sceneCentre(buttons.at(2)));
+    QTest::qWait(150);
+    QVERIFY(!buttonToolTip(buttons.at(2))->property("visible").toBool());
+    QTRY_VERIFY(buttonToolTip(buttons.at(2))->property("opened").toBool());
+    QVERIFY2(timer.elapsed() >= 350, qPrintable(QString::number(timer.elapsed())));
 }
 
 void TransportStatusTest::seekWaveformMeetsItsContrastAsDrawn_data() {

@@ -306,8 +306,18 @@ ToolBar {
     // as the lane needs beyond the room above the row.
     readonly property real laneGrowth: Math.max(0, Math.ceil(root.laneBoxHeight + root.laneClearance
         + root.laneWindowTopMargin - root.rowHeight / 2 - root.popupHeadroomAbove))
-    // The lane's bottom, in the transport's coordinates.
-    readonly property real laneBottom: root.snapped(root.laneGrowth + root.rowHeight / 2 - root.laneClearance)
+    // The lane's bottom, in the transport's coordinates: laneClearance over
+    // the row's centre line, or, in the menu bar's row, higher where that
+    // centres the box on the row, its text on the titles' line (over the
+    // rings, it sat 4 px under their line at 10 pt and 2 px at 24 pt, as a
+    // row of its own).
+    readonly property real laneBottom: {
+        const overTheRings = root.laneGrowth + root.rowHeight / 2 - root.laneClearance
+        const onTheMenuRow = root.popupHeadroomAbove > 0
+            ? root.laneGrowth - root.popupHeadroomAbove / 2 + root.laneBoxHeight / 2
+            : overTheRings
+        return root.snapped(Math.min(overTheRings, onTheMenuRow))
+    }
     // The y of a box in the lane, `boxHeight` tall, whose parent is
     // `rowItem`, an item of the row or of a group in it.
     function laneY(rowItem, boxHeight) {
@@ -471,13 +481,20 @@ ToolBar {
     // and the waveform (light), and its edge, measured against the box's
     // fill, was lost on the lighter Header chrome around it, so the light
     // box read as a white card with a shadow and the dark one as a framed
-    // readout. The edge is the style's, at least 1.8:1 on both the fill and
-    // the chrome: as the style draws it in Breeze Dark (1.9:1), whose
-    // tooltip fill is the chrome; in Breeze Light, whose fill is lighter
-    // than the chrome, the style's edge was 1.5:1 on the chrome and soft
-    // without the shadow. #a6a7a8 / #535659.
+    // readout. A dark fill, Breeze Dark's, which is the chrome, is a step
+    // towards the text, so that over the menu bar's row the box reads as a
+    // popup rather than a menu title (#3a3d40 on #292c30, its text 10.7:1);
+    // a light one is the style's. The edge is the style's, at least 1.8:1
+    // on both the fill and the chrome, as the style draws it in Breeze Dark
+    // (1.9:1); in Breeze Light, whose fill is lighter than the chrome, the
+    // style's edge was 1.5:1 on the chrome and soft without the shadow.
+    // #a6a7a8 / #616366.
     readonly property real laneBoxEdgeContrast: 1.8
-    readonly property color laneBoxFill: laneBoxColors.Kirigami.Theme.backgroundColor
+    readonly property real laneBoxDarkLift: 0.08
+    readonly property color toolTipFill: laneBoxColors.Kirigami.Theme.backgroundColor
+    readonly property color laneBoxFill: ColorUtils.colorLuma(root.toolTipFill) < 0.45
+        ? ColorUtils.mixColor(root.toolTipFill, laneBoxColors.Kirigami.Theme.textColor, root.laneBoxDarkLift)
+        : root.toolTipFill
     readonly property color laneBoxEdge: root.uiPalette.readableOn(
         ColorUtils.mixColor(root.laneBoxFill, laneBoxColors.Kirigami.Theme.textColor,
             laneBoxColors.Kirigami.Theme.frameContrast),
@@ -488,31 +505,87 @@ ToolBar {
         Kirigami.Theme.inherit: false
     }
     component LaneBox: Rectangle {
-        id: laneBox
         objectName: "transportLaneBox"
         radius: Kirigami.Units.cornerRadius
         color: root.laneBoxFill
         border.width: root.devicePixelLine
         border.color: root.laneBoxEdge
-
-        // Over the menu bar's row, the titles the box covers or comes near
-        // go under a backdrop in the menu bar's colour, whole: part of a
-        // title beside the box read as a fragment of a word joined to it
-        // ("Edit[Next · Ctrl+Right]k", "Pla[0:04]k"). It is the box's, so
-        // it fades and goes with it and follows it along the bar; over
-        // empty chrome there is none. It takes no input.
-        Rectangle {
-            objectName: "transportLaneBackdrop"
-            z: -1
-            readonly property rect span: root.laneBackdropSpan(laneBox)
-            visible: span.width > 0
-            x: span.x
-            y: span.y
-            width: span.width
-            height: span.height
-            color: root.menuBarFill
-        }
     }
+
+    // The popups of the lane.
+    readonly property var lanePopups: [seekTimeBox, previousButton.laneToolTip, playPauseButton.laneToolTip,
+        stopButton.laneToolTip, nextButton.laneToolTip, muteToolTip, volumeToolTip]
+    // Whether a box of the lane is drawn, fading out included. The next
+    // box then opens at once, the lane passing from one to the other as
+    // the pointer moves along the row: with the tooltip's delay between
+    // them, the lane stood empty for most of a second at each button, and
+    // the menu's titles came back in between.
+    readonly property bool laneWarm: root.lanePopups.some(popup => popup.background.visible)
+    // The delay of a tooltip in the lane: the style's, or none while the
+    // lane is warm.
+    readonly property int laneToolTipDelay: root.laneWarm ? 0 : Kirigami.Units.toolTipDelay
+
+    // Over the menu bar's row, while a box of the lane covers or comes
+    // within laneBackdropReach of a menu title, all of the titles go under
+    // a backdrop in the menu bar's colour, together: with only the titles
+    // near the box hidden, the others stood beside it ("File [Next ·
+    // Ctrl+Right] Settings Help") and dropped out one at a time as the box
+    // went along the bar, and with part of one hidden, a fragment of a
+    // word joined the box ("Edit[Next · Ctrl+Right]k"). The lane has one
+    // backdrop, which stays while one box takes over from another; it
+    // comes in with the boxes, goes after them, gives way to the menu bar
+    // at once, and takes no input, so a click there opens the menu under
+    // it. Over empty chrome there is none.
+    readonly property Rectangle laneBackdrop: Rectangle {
+        id: laneBackdrop
+        objectName: "transportLaneBackdrop"
+        parent: root.Overlay.overlay
+        // Under every popup.
+        z: -1
+        readonly property rect span: root.menuTitlesSpan(laneBackdrop.parent)
+        readonly property bool held: root.laneBackdropHeld
+        x: span.x
+        y: span.y
+        width: span.width
+        height: span.height
+        color: root.menuBarFill
+        opacity: 0
+        visible: opacity > 0 && span.width > 0 && !root.windowMenuActive
+        states: State {
+            name: "held"
+            when: laneBackdrop.held
+            PropertyChanges {
+                laneBackdrop.opacity: 1
+            }
+        }
+        // In as quickly as the time box comes in, and out over the style's
+        // tooltips' fade, slowly at first, so that it stays while the
+        // pointer crosses the gap between two buttons.
+        transitions: [
+            Transition {
+                to: "held"
+                enabled: Kirigami.Units.shortDuration > 0
+                NumberAnimation {
+                    property: "opacity"
+                    duration: Kirigami.Units.shortDuration
+                    easing.type: Easing.OutCubic
+                }
+            },
+            Transition {
+                from: "held"
+                enabled: Kirigami.Units.longDuration > 0
+                NumberAnimation {
+                    property: "opacity"
+                    duration: Kirigami.Units.longDuration
+                    easing.type: Easing.InOutCubic
+                }
+            }
+        ]
+    }
+    // Whether a box of the lane, shown and not on its way out, reaches a
+    // menu title.
+    readonly property bool laneBackdropHeld: root.lanePopups.some(
+        popup => popup.wanted && root.reachesMenuTitle(popup.background))
     // How near the box a title goes under the backdrop.
     readonly property int laneBackdropReach: 4
     // What the menu bar paints under its titles: its background's colour,
@@ -520,35 +593,56 @@ ToolBar {
     readonly property color menuBarFill: root.windowMenuBar && root.windowMenuBar.background
         && root.windowMenuBar.background.color !== undefined
         ? root.windowMenuBar.background.color : root.chromeColor
-    // The backdrop of `box`, a lane box, in its coordinates: the menu bar's
-    // height, across the titles within laneBackdropReach of it, or nothing.
-    // Mapped from the places of the box in its popup, of the popup and of
-    // the titles, which a binding of it then follows.
-    function laneBackdropSpan(box) {
+    // The menu bar's titles, shown.
+    function menuTitles() {
+        const bar = root.windowMenuBar
+        const titles = []
+        if (!bar || !bar.visible) {
+            return titles
+        }
+        for (let i = 0; i < bar.count; ++i) {
+            const title = bar.itemAt(i)
+            if (title && title.parent && title.visible && title.width > 0) {
+                titles.push(title)
+            }
+        }
+        return titles
+    }
+    // Whether `box`, a lane box, covers or comes within laneBackdropReach
+    // of a menu title. Mapped from the places of the box in its popup, of
+    // the popup and of the titles, which a binding of it then follows.
+    function reachesMenuTitle(box) {
         const bar = root.windowMenuBar
         const popupItem = box.parent
-        if (!bar || !bar.visible || !box.visible || !popupItem || !popupItem.parent) {
-            return Qt.rect(0, 0, 0, 0)
+        if (!bar || !box.visible || !popupItem || !popupItem.parent) {
+            return false
         }
         const origin = popupItem.parent.mapToItem(bar, popupItem.x + box.x, popupItem.y + box.y)
         const reach = root.laneBackdropReach
+        return root.menuTitles().some(title => {
+            const at = title.parent.mapToItem(bar, title.x, title.y)
+            return at.x < origin.x + box.width + reach && at.x + title.width > origin.x - reach
+                && at.y < origin.y + box.height + reach && at.y + title.height > origin.y - reach
+        })
+    }
+    // The menu bar's height across its titles, from the first one's left
+    // edge to the last one's right edge, in the coordinates of `item`, or
+    // nothing.
+    function menuTitlesSpan(item) {
+        const bar = root.windowMenuBar
+        const titles = root.menuTitles()
+        if (!item || titles.length === 0) {
+            return Qt.rect(0, 0, 0, 0)
+        }
         let left = Infinity
         let right = -Infinity
-        for (let i = 0; i < bar.count; ++i) {
-            const title = bar.itemAt(i)
-            if (!title || !title.parent || !title.visible || title.width <= 0) {
-                continue
-            }
+        for (const title of titles) {
             const at = title.parent.mapToItem(bar, title.x, title.y)
-            if (at.x < origin.x + box.width + reach && at.x + title.width > origin.x - reach
-                    && at.y < origin.y + box.height + reach && at.y + title.height > origin.y - reach) {
-                left = Math.min(left, at.x)
-                right = Math.max(right, at.x + title.width)
-            }
+            left = Math.min(left, at.x)
+            right = Math.max(right, at.x + title.width)
         }
-        return right > left
-            ? Qt.rect(left - origin.x, -origin.y, right - left, bar.height)
-            : Qt.rect(0, 0, 0, 0)
+        const origin = bar.mapToItem(item, left, 0)
+        return Qt.rect(origin.x, origin.y, right - left, bar.height)
     }
 
     // A tooltip in the lane over the row, the menu bar's row, borrowed
@@ -560,6 +654,9 @@ ToolBar {
     component LaneToolTip: Components.PlainToolTip {
         id: laneToolTip
         required property Item rowItem
+        // Whether it is to show, as its delay begins, and to hide, as its
+        // fade out begins: a popup is `visible` until it has faded out.
+        property bool wanted: false
         parent: rowItem
         y: root.laneY(rowItem, height)
         topMargin: 0
@@ -638,12 +735,15 @@ ToolBar {
         Accessible.name: transportButton.label
         readonly property string toolTipText: root.actionToolTip(transportButton.label, transportButton.shortcutText)
         // In the lane, and not while the button is held down.
+        readonly property alias laneToolTip: buttonToolTip
         LaneToolTip {
+            id: buttonToolTip
             objectName: "transportButtonToolTip"
             rowItem: transportButton
-            visible: (transportButton.hovered || transportButton.visualFocus) && !transportButton.down
+            wanted: (transportButton.hovered || transportButton.visualFocus) && !transportButton.down
                 && root.laneFreeFor(transportButton)
-            delay: Kirigami.Units.toolTipDelay
+            visible: wanted
+            delay: root.laneToolTipDelay
             message: transportButton.toolTipText
         }
         // Space presses the focused button rather than playing or pausing;
@@ -1371,6 +1471,8 @@ ToolBar {
                 closePolicy: Popup.NoAutoClose
                 readonly property bool shown: (seekSlider.adjusting || seekSlider.hoverTimeShown)
                     && seekSlider.seekAllowed && !root.windowMenuActive
+                // As a tooltip of the lane's says it.
+                readonly property bool wanted: seekTimeBox.shown
                 // Whether the time it shows, or last showed, is the hover's
                 // rather than a gesture's: the hover line then shows, and
                 // fades out, with it.
@@ -1384,8 +1486,8 @@ ToolBar {
                 }
                 // A hover's time comes after a moment, so a pointer that
                 // crosses the bar on its way elsewhere shows none; a
-                // gesture's at once, as does a hover's that comes back
-                // while the last one still fades out.
+                // gesture's at once, as does a hover's while a box of the
+                // lane, this one's or a tooltip's, still fades out.
                 readonly property int hoverDelay: 80
                 // Set together with the delay, which the tooltip reads when
                 // it is made visible: a binding of each could see the other
@@ -1393,7 +1495,7 @@ ToolBar {
                 visible: false
                 delay: 0
                 function showOrHide() {
-                    delay = seekSlider.gestureHeld() || contentItem.visible ? 0 : hoverDelay
+                    delay = seekSlider.gestureHeld() || root.laneWarm ? 0 : hoverDelay
                     visible = shown
                 }
                 onShownChanged: showOrHide()
@@ -1599,11 +1701,13 @@ ToolBar {
                 root.muteAction && root.muteAction.shortcut ? String(root.muteAction.shortcut) : "")
             // In the lane, as the other buttons' are, not while held down.
             LaneToolTip {
+                id: muteToolTip
                 objectName: "transportButtonToolTip"
                 rowItem: muteButton
-                visible: (muteButton.hovered || muteButton.visualFocus) && !muteButton.down
+                wanted: (muteButton.hovered || muteButton.visualFocus) && !muteButton.down
                     && root.laneFreeFor(muteButton)
-                delay: Kirigami.Units.toolTipDelay
+                visible: wanted
+                delay: root.laneToolTipDelay
                 message: muteButton.toolTipText
             }
             focusPolicy: Qt.TabFocus
@@ -1685,7 +1789,7 @@ ToolBar {
                 id: volumeToolTip
                 objectName: "volumeToolTip"
                 rowItem: volumeSlider
-                readonly property bool wanted: (volumeSlider.hovered || volumeSlider.visualFocus
+                wanted: (volumeSlider.hovered || volumeSlider.visualFocus
                     || volumeSlider.pressed) && root.laneFreeFor(volumeSlider)
                 // Set together with the delay, which the tooltip reads as it
                 // is made visible: a binding of each could see the other
@@ -1694,7 +1798,7 @@ ToolBar {
                 visible: false
                 delay: 0
                 function showOrHide() {
-                    delay = volumeSlider.pressed ? 0 : Kirigami.Units.toolTipDelay
+                    delay = volumeSlider.pressed ? 0 : root.laneToolTipDelay
                     visible = wanted
                 }
                 onWantedChanged: showOrHide()
