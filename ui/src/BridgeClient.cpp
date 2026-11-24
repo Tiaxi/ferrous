@@ -2154,6 +2154,10 @@ bool BridgeClient::libraryScanInProgress() const {
     return m_libraryScanInProgress;
 }
 
+bool BridgeClient::libraryLoaded() const {
+    return m_libraryLoaded;
+}
+
 int BridgeClient::libraryRootCount() const {
     return m_libraryRootCount;
 }
@@ -6627,6 +6631,13 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         m_libraryScanInProgress = scanInProgress;
         changed = true;
         libraryScanSignalChanged = true;
+    }
+
+    const bool loaded = snapshot.library.present ? snapshot.library.loaded : m_libraryLoaded;
+    if (m_libraryLoaded != loaded) {
+        m_libraryLoaded = loaded;
+        changed = true;
+        librarySignalChanged = true;
     }
 
     const int roots = snapshot.library.present ? snapshot.library.rootCount : m_libraryRootCount;

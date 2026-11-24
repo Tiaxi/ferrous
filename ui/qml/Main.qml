@@ -331,6 +331,7 @@ ApplicationWindow {
         property var libraryTreeBinary: ""
         property int libraryVersion: 0
         property bool libraryScanInProgress: false
+        property bool libraryLoaded: true
         property int libraryRootCount: 0
         property int libraryTrackCount: 0
         property int libraryArtistCount: 0

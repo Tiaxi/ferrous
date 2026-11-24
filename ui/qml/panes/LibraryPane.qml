@@ -155,6 +155,11 @@ Rectangle {
     Component.onCompleted: root.followNowTrack()
 
     readonly property string totalsText: {
+        // Nothing until the backend has read the library: its counts are
+        // not known yet.
+        if (root.uiBridge.libraryLoaded !== true) {
+            return ""
+        }
         // Without a library folder, the totals' place says so; the queue
         // has the first steps (QueuePane's firstRun).
         if (root.uiBridge.libraryRootCount === 0) {

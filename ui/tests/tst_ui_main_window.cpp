@@ -1250,6 +1250,7 @@ private slots:
     void visualizationTakesNearlyHalfTheRightColumn_data();
     void visualizationTakesNearlyHalfTheRightColumn();
     void firstRunShowsOneMessage();
+    void nothingSaysFirstRunBeforeTheLibraryLoads();
     void tabGoesFromTheLibraryToTheQueueRowsBeforeItsHandles();
     void focusedColumnHandleHasAFrameAndSaysItsKeys_data();
     void focusedColumnHandleHasAFrameAndSaysItsKeys();
@@ -7684,6 +7685,49 @@ void UiMainWindowTest::visualizationTakesNearlyHalfTheRightColumn() {
                                       Q_ARG(QVariant, split->height())));
     QTRY_COMPARE(queue->height(), offGrid);
     QCOMPARE(list->height(), gridRows * rowHeight + 7);
+}
+
+// The window opens before the backend has read the library, whose counts
+// are zero until then: neither the queue's first-run message nor its empty
+// line, and no "No folders", flash at the start of a library that has
+// folders. Once the library is loaded, a new install's first run shows.
+void UiMainWindowTest::nothingSaysFirstRunBeforeTheLibraryLoads() {
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    bridge->setProperty("libraryLoaded", false);
+    QCOMPARE(bridge->property("libraryRootCount").toInt(), 0);
+    QCOMPARE(bridge->property("queueLength").toInt(), 0);
+    QQuickItem *firstRun = named(window, "queueFirstRunMessage");
+    QQuickItem *queueEmpty = named(window, "queueEmptyMessage");
+    QQuickItem *totals = itemNamed(named(window, "libraryHeader"),
+                                   QStringLiteral("regionHeaderTotals"));
+    QVERIFY(firstRun && queueEmpty && totals);
+    QTRY_VERIFY(!firstRun->isVisible());
+    QVERIFY(!queueEmpty->isVisible());
+    QCOMPARE(totals->property("text").toString(), QString());
+    QVERIFY(!named(window, "libraryEmptyStateLabel")->isVisible());
+    // A restored queue as well: nothing over its rows.
+    bridge->setProperty("queueLength", 3);
+    QVERIFY(!firstRun->isVisible());
+    QVERIFY(!queueEmpty->isVisible());
+    bridge->setProperty("queueLength", 0);
+
+    // A new install: the library is loaded and has no folders.
+    bridge->setProperty("libraryLoaded", true);
+    QTRY_VERIFY(shown(firstRun));
+    QVERIFY(!queueEmpty->isVisible());
+    QCOMPARE(totals->property("text").toString(), QStringLiteral("No folders"));
+
+    // A library with folders, loaded with them: the empty queue's line.
+    bridge->setProperty("libraryLoaded", false);
+    bridge->setProperty("libraryRootCount", 1);
+    QTRY_VERIFY(!firstRun->isVisible());
+    QVERIFY(!queueEmpty->isVisible());
+    bridge->setProperty("libraryLoaded", true);
+    QTRY_VERIFY(shown(queueEmpty));
+    QVERIFY(!firstRun->isVisible());
 }
 
 void UiMainWindowTest::firstRunShowsOneMessage() {

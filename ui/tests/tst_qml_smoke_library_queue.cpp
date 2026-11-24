@@ -3379,7 +3379,10 @@ void LibraryQueueSmokeTest::emptyLibraryAndFileMenuAddALibraryFolder() {
     engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
     QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
-    QTRY_COMPARE(bridge.property("libraryRootCount").toInt(), 0);
+    // The backend tells the UI when it has read the library, also an empty
+    // one; only then is no root a first run.
+    QTRY_VERIFY_WITH_TIMEOUT(bridge.property("libraryLoaded").toBool(), 10000);
+    QCOMPARE(bridge.property("libraryRootCount").toInt(), 0);
 
     QObject *folderDialog = window->findChild<QObject *>(QStringLiteral("scanFolderDialog"));
     QObject *nameDialog = window->findChild<QObject *>(QStringLiteral("libraryRootNameDialog"));

@@ -28,9 +28,9 @@ use crate::profile_logging::heartbeat_trace_enabled;
 
 use super::{
     send_error, ApplyAlbumArtEvent, BridgeError, BridgeEvent, BridgeLoopFlags, BridgeState,
-    EndedEarlyPlay, ErrorCategory, ErrorSeverity, LastFmPlaybackTracker, PendingWaveformTrack,
-    PlayScrobble, ScrobbleIndicator, ScrobbleIndicatorState, ScrobbleIneligibility,
-    SettingsSaveTiming, SnapshotUrgency,
+    EndedEarlyPlay, ErrorCategory, ErrorSeverity, LastFmPlaybackTracker, LibraryLoad,
+    PendingWaveformTrack, PlayScrobble, ScrobbleIndicator, ScrobbleIndicatorState,
+    ScrobbleIneligibility, SettingsSaveTiming, SnapshotUrgency,
 };
 
 #[cfg(feature = "profiling-logs")]
@@ -1072,11 +1072,15 @@ pub(super) fn apply_library_events(
     let Some(status) = status else {
         return LibraryEventsApplied::default();
     };
+    // The worker's first event has the library, also an empty one, which the
+    // UI is told of even when nothing else changed.
     let mut applied = LibraryEventsApplied {
         rows_changed: 0,
-        status_changed: state.library_status != status,
+        status_changed: state.library_status != status
+            || state.library_load == LibraryLoad::Pending,
     };
     state.library_status = status;
+    state.library_load = LibraryLoad::Loaded;
     note_reported_playing_file(state, &changes.changed_files);
     // Files reported changed with their rows as they were leave the
     // library alone, so it is not copied for them.
@@ -3042,6 +3046,34 @@ mod tests {
         assert!(!state
             .library_index
             .contains(&state.library, Path::new("/music/Artist 3/Album/3.flac")));
+    }
+
+    #[test]
+    fn the_worker_s_first_event_marks_the_library_loaded_also_when_it_is_empty() {
+        // A new install: the worker's first event has no roots and no rows,
+        // and the status the bridge starts with.
+        let mut state = BridgeState::default();
+        assert_eq!(
+            state.library_load,
+            LibraryLoad::Pending,
+            "the empty start is not the library"
+        );
+        assert!(!state.snapshot(false).library_loaded);
+
+        let applied = apply_library_events([LibraryEvent::default()], &mut state);
+
+        assert_eq!(state.library_load, LibraryLoad::Loaded);
+        assert!(state.snapshot(false).library_loaded);
+        assert_eq!(
+            applied.urgency(),
+            SnapshotUrgency::Immediate,
+            "the UI hears that the library has no folders"
+        );
+        assert_eq!(
+            apply_library_events([LibraryEvent::default()], &mut state).urgency(),
+            SnapshotUrgency::None,
+            "only the first event tells it"
+        );
     }
 
     #[test]

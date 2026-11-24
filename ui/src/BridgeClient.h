@@ -184,6 +184,9 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QByteArray libraryTreeBinary READ libraryTreeBinary NOTIFY libraryChanged)
     Q_PROPERTY(int libraryVersion READ libraryVersion NOTIFY libraryChanged)
     Q_PROPERTY(bool libraryScanInProgress READ libraryScanInProgress NOTIFY libraryScanChanged)
+    // Whether the library counts and roots are the backend's library, not
+    // the empty start: until then, no roots is not yet a first run.
+    Q_PROPERTY(bool libraryLoaded READ libraryLoaded NOTIFY libraryChanged)
     Q_PROPERTY(int libraryRootCount READ libraryRootCount NOTIFY libraryChanged)
     Q_PROPERTY(int libraryTrackCount READ libraryTrackCount NOTIFY libraryChanged)
     Q_PROPERTY(int libraryArtistCount READ libraryArtistCount NOTIFY libraryChanged)
@@ -365,6 +368,7 @@ public:
     QByteArray libraryTreeBinary() const;
     int libraryVersion() const;
     bool libraryScanInProgress() const;
+    bool libraryLoaded() const;
     int libraryRootCount() const;
     int libraryTrackCount() const;
     int libraryArtistCount() const;
@@ -1079,6 +1083,7 @@ private:
     QList<QStringList> m_libraryAlbumTrackPaths;
     mutable QHash<QString, QString> m_libraryThumbnailSourceCache;
     bool m_libraryScanInProgress{false};
+    bool m_libraryLoaded{false};
     int m_libraryRootCount{0};
     int m_libraryTrackCount{0};
     int m_libraryArtistCount{0};
