@@ -60,18 +60,19 @@ pub(super) fn handle_queue_command(
     let keeps_undo = matches!(cmd, BridgeQueueCommand::Clear) && state.queue.is_empty();
     let undoable = undoable_change(&cmd, state);
     let outcome = apply_queue_command_state(cmd, &mut state.queue, &mut state.selected_queue_index);
+    let revision = state.queue_sync.revision();
     match outcome.row_change.clone() {
         Some(QueueRowChange::Edit(edit)) => state.queue_sync.record(edit, state.queue.len()),
         Some(QueueRowChange::Reset) => state.queue_sync.reset(),
         None => {}
     }
-    if let Some(QueueRowChange::Edit(QueueEdit::Insert { at, paths })) = &outcome.row_change {
-        // Until the engine reports it, the playing row moves with its row.
-        if let Some(row) = state.playback.current_queue_index.as_mut() {
-            if *row >= *at {
-                *row += paths.len();
-            }
-        }
+    if outcome.row_change.is_some() {
+        // Until the engine reports it, the playing row moves with its row;
+        // an edit that took the row out, or replaced the queue, leaves none.
+        state.playback.current_queue_index = state
+            .playback
+            .current_queue_index
+            .and_then(|row| state.queue_sync.follow(revision, row));
     }
     if outcome.row_change.is_some() && !keeps_undo {
         state.queue_undo.record(undoable);

@@ -6047,6 +6047,13 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         trackIdentitySignalChanged = true;
     }
 
+    // The playing row holds the current track. An index the engine sent
+    // before a queue edit reached it can name another row, which neither
+    // shows the mark nor gives the transport its length.
+    const QueueRowData *indexedRow = m_queueRowsModel.rowAt(playing);
+    if (indexedRow != nullptr && indexedRow->path != currentPath) {
+        playing = -1;
+    }
     if (playing < 0 && !currentPath.isEmpty() && m_queueLength > 0) {
         playing = queuePathFirstIndex(currentPath);
     }

@@ -6020,6 +6020,65 @@ mod tests {
             .collect()
     }
 
+    /// Until the engine reports where its track went, the snapshot sent
+    /// with a queue edit keeps the playing row on the row it was: moved
+    /// with it, or none when the edit took it out.
+    #[test]
+    fn a_queue_edit_takes_the_playing_row_with_it() {
+        let _guard = test_guard();
+        let (mut runtime, _engine_rx, event_tx, _album) = queue_order_runtime();
+        let (a, b, c, d) = (
+            p("/music/a.flac"),
+            p("/music/b.flac"),
+            p("/music/c.flac"),
+            p("/music/d.flac"),
+        );
+        let playing_row = |runtime: &BridgeLoopRuntime| {
+            runtime.state.snapshot(false).playback.current_queue_index
+        };
+        replace_queue(&mut runtime, &[a, b, c.clone(), d.clone()], &event_tx);
+        runtime.state.playback.current = Some(c.clone());
+        runtime.state.playback.current_queue_index = Some(2);
+
+        let edits = [
+            (BridgeQueueCommand::Remove(0), Some(1), "a row before it"),
+            (
+                BridgeQueueCommand::RemoveMany(vec![2]),
+                Some(1),
+                "a row after it",
+            ),
+            (
+                BridgeQueueCommand::Move { from: 1, to: 0 },
+                Some(0),
+                "its own row moved",
+            ),
+            (
+                BridgeQueueCommand::Move { from: 1, to: 0 },
+                Some(1),
+                "a row moved past it",
+            ),
+            (BridgeQueueCommand::Remove(1), None, "its own row"),
+        ];
+        for (edit, row, case) in edits {
+            runtime.handle_command(BridgeCommand::Queue(edit), &event_tx);
+            assert_eq!(playing_row(&runtime), row, "{case}");
+            if let Some(row) = row {
+                assert_eq!(runtime.state.queue.get(row), Some(&c), "{case}");
+            }
+        }
+
+        replace_queue(&mut runtime, &[c.clone(), d.clone()], &event_tx);
+        runtime.state.playback.current_queue_index = Some(0);
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::Replace {
+                tracks: vec![d, c],
+                autoplay: true,
+            }),
+            &event_tx,
+        );
+        assert_eq!(playing_row(&runtime), None, "a replaced queue");
+    }
+
     #[test]
     fn moving_rows_moves_them_all_one_undo_puts_them_back_and_a_redo_moves_them_again() {
         let _guard = test_guard();
@@ -7177,7 +7236,9 @@ mod tests {
                         snapshot.playback.state,
                         snapshot.play_serial,
                     );
-                    if shown == old {
+                    // The track before, also on no row once a new queue
+                    // replaced its own, until the engine switches.
+                    if shown == old || shown == (old.0.clone(), None, old.2, old.3) {
                         continue;
                     }
                     assert_eq!(

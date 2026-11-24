@@ -304,6 +304,7 @@ private slots:
     void rowCommandsCarryTheQueueRevision();
     void aLargeQueueEditDecodesOnlyTheChangedRows();
     void gaplessAndRepeatOneMoveOnlyThePlayingRow();
+    void aPlayingIndexFromBeforeAnEditMarksOnlyTheCurrentTracksRow();
     void playingQueueLengthFollowsTheCurrentRow();
     void snapshotWorkerDecodesPacketsInTheirOrder();
     void snapshotWorkerDropsPacketsOfAnEarlierGeneration();
@@ -5433,6 +5434,41 @@ void BridgeClientTest::gaplessAndRepeatOneMoveOnlyThePlayingRow() {
     QCOMPARE(rowSignals.resets.count(), 0);
     QCOMPARE(rowSignals.updates.count(), 0);
     QCOMPARE(rowSignals.removes.count(), 1);
+}
+
+// A queue edit can reach the client with the playing index from before it,
+// which then names another row: the current track's own row is marked
+// playing and gives the transport its length.
+void BridgeClientTest::aPlayingIndexFromBeforeAnEditMarksOnlyTheCurrentTracksRow() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    const QStringList paths = numberedPaths(3);
+    auto queue = fullQueueSnapshot(1, paths);
+    queue.queue.tracks[0].lengthSeconds = 61.0f;
+    queue.queue.tracks[1].lengthSeconds = 62.0f;
+    queue.queue.tracks[2].lengthSeconds = 63.0f;
+    QVERIFY(client.processBinarySnapshot(queue));
+    auto playing = playbackSnapshot(paths.at(1), 1.0, 1);
+    playing.playback.currentQueueIndex = 1;
+    QVERIFY(client.processBinarySnapshot(playing));
+    QCOMPARE(client.playingQueueIndex(), 1);
+    QCOMPARE(client.playingQueueLengthText(), QStringLiteral("1:02"));
+
+    // Row 0 goes, and the index still says row 1, which is the last
+    // track's now.
+    auto edit = queueDeltaSnapshot(1, 2, 2, {queueOp(BinaryBridgeCodec::QueueOpRemove, 0, 1)});
+    edit.playback = playing.playback;
+    QVERIFY(client.processBinarySnapshot(edit));
+    QCOMPARE(client.queuePathAt(0), paths.at(1));
+    QCOMPARE(client.playingQueueIndex(), 0);
+    QCOMPARE(client.playingQueueLengthText(), QStringLiteral("1:02"));
+
+    // A new queue without the track marks no row and gives no length.
+    auto replaced = fullQueueSnapshot(3, {paths.at(2), paths.at(0)});
+    replaced.playback = playing.playback;
+    QVERIFY(client.processBinarySnapshot(replaced));
+    QCOMPARE(client.playingQueueIndex(), -1);
+    QCOMPARE(client.playingQueueLengthText(), QString());
 }
 
 // The current track's length from its queue row, which stays while it is
