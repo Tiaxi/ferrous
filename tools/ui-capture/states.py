@@ -7880,8 +7880,9 @@ STATES += [
     ("showcase", "dialog", "showcase-edit-tags", "macro tagedit 6 | js root.tagEditorApi.selectAllRows() | wait 0.5",
      "Showcase: Edit Tags with six tracks selected (the fields they differ in show Mixed)"),
     ("showcase", "dialog", "showcase-itunes",
-     "esc | macro itunes showcase | js root.openItunesArtworkDialog() | settle 1 | macro itunes showcase | wait 0.6 | away",
-     "Showcase: Replace from iTunes with five results (stand-ins: no network)"),
+     "esc | macro itunes showcase | js itunesArtworkDialog.open() | settle 1 | wait 0.6 | away",
+     "Showcase: Replace from iTunes with five results (stand-ins; opened over them directly, so no search starts: "
+     "openItunesArtworkDialog() would start one through the real bridge)"),
     ("showcase", "_", "_close", "esc", ""),
     ("showcase-fs", "_", "_play", _SC_PLAY, ""),
     ("showcase-fs", "viewer", "showcase-spectrogram-fullscreen",
