@@ -3557,8 +3557,9 @@ void SearchPaletteTest::noCoverTileIsTheLibrarys_data() {
 // An album or a track without a cover has the library's tile in a cover's
 // place, at its size: the floor, its edge and the quiet mark, as drawn, so
 // it reads at 24 pt too (the track's glyph became a grey blob there, the
-// album's a green one). While its track plays it has the amber glyph over a
-// scrim, as a cover has.
+// album's a green one). In a light theme the tile is light indigo with a
+// darker rim and mark, as the library's. While its track plays it has the
+// amber glyph over a scrim, as a cover has.
 void SearchPaletteTest::noCoverTileIsTheLibrarys() {
     QFETCH(bool, dark);
     QFETCH(qreal, points);
@@ -3578,8 +3579,11 @@ void SearchPaletteTest::noCoverTileIsTheLibrarys() {
     QTest::mouseMove(harness.window, QPoint(2, 2));
 
     const qreal lead = harness.dialog->property("leadSize").toReal();
-    const QColor floor = harness.token("plotFloor");
-    const QColor mark = QColor::fromRgb(0x8c, 0x82, 0xa3);
+    const QColor floor = harness.token("noCoverTile");
+    const QColor edge = harness.token("noCoverTileEdge");
+    QCOMPARE(hex(floor), dark ? hex(harness.token("plotFloor")) : QStringLiteral("#ffebe7f4"));
+    QCOMPARE(hex(edge), dark ? hex(harness.token("plotFloorEdge")) : QStringLiteral("#ffc9c2dc"));
+    const QColor mark = dark ? QColor::fromRgb(0x8c, 0x82, 0xa3) : QColor::fromRgb(0x57, 0x4a, 0x7a);
     QVERIFY2(contrastRatio(mark, floor) >= 4.5, qPrintable(describeContrast(QStringLiteral("mark"), mark, floor)));
     QStringList types;
     QQuickItem *trackRow = nullptr;
@@ -3596,8 +3600,7 @@ void SearchPaletteTest::noCoverTileIsTheLibrarys() {
         QCOMPARE(box.left() - sceneRect(harness.palette()).left(), 16.0);
         QCOMPARE(tile->property("radius").toReal(), 2.0);
         QCOMPARE(hex(colorOf(tile)), hex(floor));
-        QCOMPARE(hex(tile->property("border").value<QObject *>()->property("color").value<QColor>()),
-                 hex(harness.token("plotFloorEdge")));
+        QCOMPARE(hex(tile->property("border").value<QObject *>()->property("color").value<QColor>()), hex(edge));
         const auto problem = [&]() -> QString {
             const QImage image = harness.window->grabWindow();
             const qreal scale = qreal(image.width()) / harness.window->width();

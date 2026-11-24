@@ -153,8 +153,11 @@ private:
     qreal m_scale;
 };
 
-// The no-cover mark's one colour at a list's size (no-art-mark.svg).
+// The no-cover mark's one colour at a list's size: a quiet violet grey on
+// the plot's floor in a dark theme (no-art-mark.svg), a darker indigo on
+// the light tile in a light one (no-art-mark-light.svg).
 const QColor kNoCoverMark = QColor::fromRgb(0x8c, 0x82, 0xa3);
+const QColor kNoCoverMarkLight = QColor::fromRgb(0x57, 0x4a, 0x7a);
 
 // Whether two drawn colours are the same, give or take the rounding of
 // blending.
@@ -4979,7 +4982,9 @@ void UiMainWindowTest::libraryAlbumWithoutACoverShowsAPlaceholderTile() {
     QVERIFY(album->property("coverPath").toString().isEmpty());
     QQuickItem *glyph = itemNamed(album, QStringLiteral("libraryRowCoverPlaceholder"));
     QVERIFY(glyph != nullptr);
-    const QColor floor = tokenOf(window, "plotFloor");
+    // The app's default palette is light: the light tile.
+    QVERIFY(!paletteOf(window)->property("themeIsDark").toBool());
+    const QColor floor = tokenOf(window, "noCoverTile");
 
     // The thumbnail's place and size, and the name after it, with a cover
     // or without: 6 px after the chevron, centred in the row, the name
@@ -5002,26 +5007,26 @@ void UiMainWindowTest::libraryAlbumWithoutACoverShowsAPlaceholderTile() {
     QVERIFY(shown(glyph));
     QCOMPARE(sceneRect(glyph), sceneRect(thumbnail));
     QCOMPARE(glyph->property("radius").toReal(), 2.0);
-    QCOMPARE(colorOf(glyph), tokenHex(window, "plotFloor"));
+    QCOMPARE(colorOf(glyph), tokenHex(window, "noCoverTile"));
     QCOMPARE(QQmlProperty(glyph, QStringLiteral("border.width")).read().toReal(), 1.0);
     QCOMPARE(hex(QQmlProperty(glyph, QStringLiteral("border.color")).read().value<QColor>()),
-             tokenHex(window, "plotFloorEdge"));
+             tokenHex(window, "noCoverTileEdge"));
     QQuickItem *mark = itemNamed(glyph, QStringLiteral("noCoverTileMark"));
     QVERIFY(shown(mark));
     QCOMPARE(mark->size(), QSizeF(20, 20));
-    QVERIFY(mark->property("source").toUrl().toString().endsWith(QStringLiteral("/no-art-mark-20.svg")));
+    QVERIFY(mark->property("source").toUrl().toString().endsWith(QStringLiteral("/no-art-mark-20-light.svg")));
     QTRY_COMPARE(mark->property("status").toInt(), 1); // Image.Ready
     // As drawn: the edge, the floor inside it, the glide and the harmonic
     // in the mark's colour, on their pixels (no-art-mark-20.svg); both run
     // out to the tile's inner edge, as the app icon's traces run out to
     // its tile's: the column inside the edge has them, crisp, on their
     // rows.
-    const QColor edge = tokenOf(window, "plotFloorEdge");
+    const QColor edge = tokenOf(window, "noCoverTileEdge");
     const auto markProblem = [&]() -> QString {
         const Drawn drawn(window);
         const QPointF origin = sceneRect(thumbnail).topLeft();
         const auto at = [&](qreal x, qreal y) { return drawn.at(origin + QPointF(x, y)); };
-        const auto marked = [](const QColor &c) { return channelDistance(c, kNoCoverMark) <= 3; };
+        const auto marked = [](const QColor &c) { return channelDistance(c, kNoCoverMarkLight) <= 3; };
         const struct {
             qreal x;
             qreal y;
@@ -5063,29 +5068,56 @@ void UiMainWindowTest::libraryAlbumWithoutACoverShowsAPlaceholderTile() {
 
 void UiMainWindowTest::libraryNoCoverMarkIsOneQuietColour_data() {
     QTest::addColumn<qreal>("points");
-    QTest::newRow("10 pt, the stepped mark") << 10.0;
-    QTest::newRow("24 pt, the curved mark") << 24.0;
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("dark, 10 pt, the stepped mark") << 10.0 << true;
+    QTest::newRow("dark, 24 pt, the curved mark") << 24.0 << true;
+    QTest::newRow("light, 10 pt, the stepped mark") << 10.0 << false;
+    QTest::newRow("light, 24 pt, the curved mark") << 24.0 << false;
 }
 
 // At a list's size the no-cover mark is one quiet colour on its floor, at
 // full strength and at least 4.5:1 on it, in both drawings: no amber, which
 // is only what is playing, and no magenta (repeated down a run of albums
 // without covers, the two outshone everything in the tree). Every pixel
-// inside the tile's edge is the floor, the mark or a blend of them.
+// inside the tile's edge is the floor, the mark or a blend of them. In
+// Breeze Dark the floor is the plot's, with its edge; in a light theme a
+// light indigo tile with a darker rim (the plot's floor there made a run of
+// albums without covers a column of near-black squares down a white list).
 void UiMainWindowTest::libraryNoCoverMarkIsOneQuietColour() {
     QFETCH(qreal, points);
+    QFETCH(bool, dark);
+    const auto palette = useDarkPalette(dark);
     const ScopedApplicationFont font(points);
     MainWindowFixture fixture(sized());
     QQuickWindow *window = fixture.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QCOMPARE(paletteOf(window)->property("themeIsDark").toBool(), dark);
     showTree(fixture.libraryModel, kAllExpanded);
     QQuickItem *album = nullptr;
     QTRY_VERIFY((album = libraryRow(window, QStringLiteral("album"))) != nullptr);
     QQuickItem *tile = itemNamed(album, QStringLiteral("libraryRowCoverPlaceholder"));
     QVERIFY(shown(tile));
-    const QColor floor = tokenOf(window, "plotFloor");
-    QVERIFY2(contrastRatio(kNoCoverMark, floor) >= 4.5,
-             qPrintable(describeContrast(QStringLiteral("mark"), kNoCoverMark, floor)));
+    const QColor floor = tokenOf(window, "noCoverTile");
+    const QColor edge = QQmlProperty(tile, QStringLiteral("border.color")).read().value<QColor>();
+    const QColor view = tokenOf(window, "view");
+    if (dark) {
+        // As it was: the plot's floor and edge.
+        QCOMPARE(hex(floor), tokenHex(window, "plotFloor"));
+        QCOMPARE(hex(edge), tokenHex(window, "plotFloorEdge"));
+    } else {
+        QCOMPARE(hex(floor), QStringLiteral("#ffebe7f4"));
+        QCOMPARE(hex(edge), QStringLiteral("#ffc9c2dc"));
+        // A light tile on the light view, its rim darker than it.
+        QVERIFY2(contrastRatio(floor, view) < 1.5, qPrintable(describeContrast(QStringLiteral("tile"), floor, view)));
+        QVERIFY(relativeLuminance(edge) < relativeLuminance(floor));
+    }
+    const QColor markColor = dark ? kNoCoverMark : kNoCoverMarkLight;
+    QVERIFY2(contrastRatio(markColor, floor) >= 4.5,
+             qPrintable(describeContrast(QStringLiteral("mark"), markColor, floor)));
+    QQuickItem *mark = itemNamed(tile, QStringLiteral("noCoverTileMark"));
+    QVERIFY(shown(mark));
+    QVERIFY2(mark->property("source").toUrl().toString().endsWith(dark ? QStringLiteral(".svg") : QStringLiteral("-light.svg")),
+             qPrintable(mark->property("source").toUrl().toString()));
 
     const auto problem = [&]() -> QString {
         const Drawn drawn(window);
@@ -5095,11 +5127,11 @@ void UiMainWindowTest::libraryNoCoverMarkIsOneQuietColour() {
             for (qreal x = 2.5; x < box.width() - 2; ++x) {
                 const QColor pixel = drawn.at(box.topLeft() + QPointF(x, y));
                 const double amount =
-                    std::clamp((pixel.greenF() - floor.greenF()) / double(kNoCoverMark.greenF() - floor.greenF()), 0.0, 1.0);
-                if (channelDistance(pixel, mixed(floor, kNoCoverMark, amount)) > 6) {
+                    std::clamp((pixel.greenF() - floor.greenF()) / double(markColor.greenF() - floor.greenF()), 0.0, 1.0);
+                if (channelDistance(pixel, mixed(floor, markColor, amount)) > 6) {
                     return QStringLiteral("%1 at %2, %3").arg(pixel.name()).arg(x).arg(y);
                 }
-                marked += channelDistance(pixel, kNoCoverMark) <= 3 ? 1 : 0;
+                marked += channelDistance(pixel, markColor) <= 3 ? 1 : 0;
             }
         }
         return marked >= box.width() / 2 ? QString() : QStringLiteral("%1 pixels of the mark").arg(marked);
@@ -5281,7 +5313,8 @@ void UiMainWindowTest::libraryThumbnailsFollowTheFont() {
     // The mark is drawn at its size: on its 20 px grid, crisp, and in
     // smooth curves above it, where the grid's steps made a staircase.
     const QString drawing = mark->property("source").toUrl().toString();
-    QVERIFY2(drawing.endsWith(size == 20.0 ? QStringLiteral("/no-art-mark-20.svg") : QStringLiteral("/no-art-mark.svg")),
+    // The app's default palette is light: the light drawings.
+    QVERIFY2(drawing.endsWith(size == 20.0 ? QStringLiteral("/no-art-mark-20-light.svg") : QStringLiteral("/no-art-mark-light.svg")),
              qPrintable(drawing));
     QTRY_COMPARE(mark->property("status").toInt(), 1); // Image.Ready
     QCOMPARE(mark->size(), QSizeF(size, size));
@@ -7935,9 +7968,6 @@ void UiMainWindowTest::viewersInTheWindowFadeAsTheStylesPopupsDo() {
         QCOMPARE(fadeDuration(popup, "exit"), exitDuration);
     }
 }
-
-
-
 
 int main(int argc, char **argv) {
     useOffscreenPlatformByDefault(argc, argv);

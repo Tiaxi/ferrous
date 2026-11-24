@@ -349,7 +349,9 @@ qt_add_qml_module(ferrous_ui_qml
         qml/assets/transport-previous.svg
         qml/assets/transport-stop.svg
         qml/assets/no-art-mark-20.svg
+        qml/assets/no-art-mark-20-light.svg
         qml/assets/no-art-mark.svg
+        qml/assets/no-art-mark-light.svg
         qml/assets/spectrogram-symbolic.svg
         qml/assets/waveform-symbolic.svg
         qml/assets/ferrous-mark-small-symbolic.svg
