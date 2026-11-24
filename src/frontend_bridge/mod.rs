@@ -554,10 +554,6 @@ pub struct BridgeSnapshot {
     pub analysis: AnalysisSnapshot,
     pub metadata: TrackMetadata,
     pub library: Arc<LibrarySnapshot>,
-    /// Whether `library` is the library worker's, rather than the empty one
-    /// the bridge starts with: until then, no root is not yet known to mean
-    /// none.
-    pub library_loaded: bool,
     pub library_status: LibraryStatus,
     pub(crate) queue_details: Arc<HashMap<PathBuf, IndexedTrack>>,
     pub library_artist_count: usize,
@@ -802,15 +798,6 @@ impl Default for BridgeSettings {
     }
 }
 
-/// Whether the bridge's library is the library worker's yet, or still the
-/// empty one it starts with.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-enum LibraryLoad {
-    #[default]
-    Pending,
-    Loaded,
-}
-
 #[derive(Debug, Clone, Default)]
 pub(super) struct BridgeState {
     queue_detail_generation: u64,
@@ -819,9 +806,6 @@ pub(super) struct BridgeState {
     analysis: AnalysisSnapshot,
     metadata: TrackMetadata,
     library: Arc<LibrarySnapshot>,
-    /// Whether the library worker's first event has been applied; see
-    /// [`BridgeSnapshot::library_loaded`].
-    library_load: LibraryLoad,
     library_status: LibraryStatus,
     /// Finds `library`'s tracks by path.
     library_index: library_index::LibraryPathIndex,
@@ -1067,7 +1051,6 @@ impl BridgeState {
             analysis: self.analysis.clone(),
             metadata,
             library: self.library.clone(),
-            library_loaded: self.library_load == LibraryLoad::Loaded,
             library_status: self.library_status.clone(),
             queue_details: self.queue_details.clone(),
             library_artist_count: self.library_artist_count,

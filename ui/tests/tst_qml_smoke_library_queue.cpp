@@ -4,6 +4,7 @@
 
 #include <QFontInfo>
 
+#include <algorithm>
 #include <optional>
 #include <utility>
 
@@ -43,6 +44,7 @@ private slots:
     void queueMovesAndDropsActOnEveryHighlightedRow();
     void queueSelectionFollowsRowRangeMoves();
     void emptyLibraryAndFileMenuAddALibraryFolder();
+    void aLibraryThatCannotBeOpenedOffersNoFirstRun();
     void draggingAHighlightedQueueRowMovesEveryHighlightedRow();
     void queueRowsShowTheirStatesInThePaletteColours();
     void queueStateGlyphGrowsWithTheFont_data();
@@ -3433,6 +3435,51 @@ void LibraryQueueSmokeTest::emptyLibraryAndFileMenuAddALibraryFolder() {
     QVERIFY(queueItemFound);
     // The offscreen platform says so for the folder dialog's widget window.
     dropCapturedMessages(QStringLiteral("This plugin does not support propagateSizeHints()"));
+}
+
+// A library database that cannot be opened is an error the user sees, not
+// a library without folders: nothing offers the first run for it (#759).
+void LibraryQueueSmokeTest::aLibraryThatCannotBeOpenedOffersNoFirstRun() {
+    // The bridge runs with the test's own data directories; see init(). A
+    // folder where the database should be cannot be opened as one.
+    const QString database = QDir(qEnvironmentVariable("XDG_DATA_HOME"))
+        .filePath(QStringLiteral("ferrous/library.sqlite3"));
+    QVERIFY(QDir().mkpath(database));
+
+    BridgeClient bridge;
+    QSignalSpy reported(&bridge, &BridgeClient::bridgeError);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+
+    // Recent Issues and the status bar have the failure.
+    const auto openFailureReported = [&reported]() {
+        return std::any_of(reported.cbegin(), reported.cend(), [](const QList<QVariant> &error) {
+            return error.value(0).toString().contains(QStringLiteral("could not open the library database"))
+                && error.value(1).toInt() == BinaryBridgeCodec::ErrorCategoryLibrary;
+        });
+    };
+    QTRY_VERIFY_WITH_TIMEOUT(openFailureReported(), 10000);
+    QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
+    QVERIFY(errors != nullptr);
+    QTRY_VERIFY(errors->property("unseenErrorCount").toInt() > 0);
+    QQuickItem *statusButton = window->findChild<QQuickItem *>(QStringLiteral("statusBarErrorsButton"));
+    QVERIFY(statusButton != nullptr);
+    QTRY_VERIFY(statusButton->isVisible());
+
+    // The library is not known, so nothing says it has no folders.
+    QVERIFY(!bridge.property("libraryLoaded").toBool());
+    QQuickItem *queuePane = window->findChild<QQuickItem *>(QStringLiteral("mainQueuePane"));
+    QQuickItem *header = window->findChild<QQuickItem *>(QStringLiteral("libraryHeader"));
+    QVERIFY(queuePane != nullptr && header != nullptr);
+    QVERIFY(shownItemNamed(queuePane, QStringLiteral("firstRunAddFolderButton")) == nullptr);
+    QQuickItem *firstRun = itemNamed(queuePane, QStringLiteral("queueFirstRunMessage"));
+    QQuickItem *totals = itemNamed(header, QStringLiteral("regionHeaderTotals"));
+    QVERIFY(firstRun != nullptr && totals != nullptr);
+    QVERIFY(!firstRun->isVisible());
+    QCOMPARE(totals->property("text").toString(), QString());
 }
 
 void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {

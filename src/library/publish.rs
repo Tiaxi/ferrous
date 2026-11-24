@@ -393,6 +393,7 @@ impl WorkerLibrary {
     pub(super) fn reload(&mut self, conn: &Connection) {
         let mut fresh = LibrarySnapshot::default();
         load_snapshot(conn, &mut fresh);
+        self.status.loaded = true;
         self.set_roots(fresh.roots);
         let present: HashSet<PathBuf> = fresh
             .tracks

@@ -234,6 +234,10 @@ pub(crate) fn shared_tracks(tracks: Vec<LibraryTrack>) -> Vec<Arc<LibraryTrack>>
 /// What the library worker is doing, apart from the rows.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LibraryStatus {
+    /// Whether the worker has read the library from its database, also an
+    /// empty one. Not while it opens the database, nor once it failed to:
+    /// a library that was not read is not known to have no folders.
+    pub loaded: bool,
     pub scan_in_progress: bool,
     pub scan_progress: Option<LibraryScanProgress>,
     pub last_error: Option<String>,
@@ -361,7 +365,10 @@ impl LibraryEvent {
                 removed: Vec::new(),
                 changed_files: Vec::new(),
             },
-            status: LibraryStatus::default(),
+            status: LibraryStatus {
+                loaded: true,
+                ..LibraryStatus::default()
+            },
             read_after: 0,
         }
     }
