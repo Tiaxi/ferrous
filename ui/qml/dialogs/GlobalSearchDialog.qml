@@ -1375,7 +1375,7 @@ Dialog {
             MenuSeparator {}
             Components.KeyHintMenuItem {
                 text: I18n.i18nc("@action:inmenu", "Show in Library")
-                icon.name: "go-jump"
+                icon.name: "view-list-tree"
                 keyHint: I18n.i18nc("@info:shortcut key name", "Alt+Enter")
                 onTriggered: root.controller.navigateSelectionToLibrary()
             }

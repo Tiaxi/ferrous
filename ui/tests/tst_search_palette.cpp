@@ -1842,7 +1842,7 @@ void SearchPaletteTest::mouseSelectsAndActs() {
     // Show in Library has the queue menu's icon.
     QQmlExpression showInLibraryIcon(qmlContext(harness.field()), harness.field(),
                                      QStringLiteral("resultMenu.itemAt(3).text + '|' + resultMenu.itemAt(3).icon.name"));
-    QCOMPARE(showInLibraryIcon.evaluate().toString(), QStringLiteral("Show in Library|go-jump"));
+    QCOMPARE(showInLibraryIcon.evaluate().toString(), QStringLiteral("Show in Library|view-list-tree"));
     QTest::keyClick(harness.window, Qt::Key_Escape);
     settle();
     QTRY_VERIFY(!menuOpened.evaluate().toBool());
@@ -1967,7 +1967,7 @@ void SearchPaletteTest::resultMenuNamesWhatItActsOn() {
                      kind.play + QStringLiteral("|Enter|media-playback-start"),
                      kind.add + QStringLiteral("|Ctrl+Enter|media-playlist-append"),
                      QStringLiteral("sep"),
-                     QStringLiteral("Show in Library|Alt+Enter|go-jump"),
+                     QStringLiteral("Show in Library|Alt+Enter|view-list-tree"),
                      kind.type == QStringLiteral("track") ? QStringLiteral("Open Containing Folder||folder-open")
                                                           : QStringLiteral("Open Folder||folder-open"),
                  }));

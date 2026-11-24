@@ -31,6 +31,7 @@
 #include <QRegularExpression>
 #include <QScopeGuard>
 #include <QSignalSpy>
+#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QtEndian>
 #include <QtMath>
@@ -600,6 +601,7 @@ private slots:
     void menuItemGlyphsGrowWithTheFont_data();
     void menuItemGlyphsGrowWithTheFont();
     void everyMenuItemIsAnAppMenuItem();
+    void showInLibraryShowsTheLibraryTree();
     void menusReadInKdesWordsAndOrder();
     void libraryFolderMenuNamesTheFolder();
     void menusAnswerThePointerAndTheKeyboard();
@@ -1508,6 +1510,34 @@ ApplicationWindow {
     QTRY_VERIFY(!menu->property("visible").toBool());
 }
 
+// Show in Library shows the library's tree, not a jump arrow, in the
+// queue's menu and the search result's (tst_search_palette), from Breeze
+// and Breeze Dark alike.
+void UiMenusTest::showInLibraryShowsTheLibraryTree() {
+    const QString icon = QStringLiteral("view-list-tree");
+    for (const QString &theme : {QStringLiteral("breeze"), QStringLiteral("breeze-dark")}) {
+        const QString file = QStringLiteral("icons/%1/actions/16/%2.svg").arg(theme, icon);
+        QVERIFY2(!QStandardPaths::locate(QStandardPaths::GenericDataLocation, file).isEmpty(), qPrintable(file));
+    }
+
+    const auto iconsNamed = [](const char *file) {
+        QFile source(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/") + QLatin1String(file));
+        if (!source.open(QIODevice::ReadOnly)) {
+            return QStringList();
+        }
+        const QString text = QString::fromUtf8(source.readAll());
+        const QRegularExpression item(
+            QStringLiteral("\"Show in Library\"\\)\\s*\\n(?:\\s*//[^\\n]*\\n)*\\s*icon\\.name:\\s*\"([^\"]+)\""));
+        QStringList names;
+        for (const QRegularExpressionMatch &match : item.globalMatch(text)) {
+            names << match.captured(1);
+        }
+        return names;
+    };
+    QCOMPARE(iconsNamed("panes/QueuePane.qml"), QStringList{icon});
+    QCOMPARE(iconsNamed("dialogs/GlobalSearchDialog.qml"), QStringList{icon});
+}
+
 void UiMenusTest::checkMenusListTheirItemsInOrder(QQuickWindow *window) {
 
     QCOMPARE(rowsOf(menuNamed(window, "fileMenu")),
@@ -2221,7 +2251,7 @@ void UiMenusTest::checkQueueContextMenuShowsKeysItDoesNotTake(QQuickWindow *wind
              (QStringList{
                  QStringLiteral("hint|Play|Enter|media-playback-start"),
                  QStringLiteral("sep"),
-                 QStringLiteral("item|Show in Library||go-jump"),
+                 QStringLiteral("item|Show in Library||view-list-tree"),
                  QStringLiteral("item|Open Containing Folder||folder-open"),
                  QStringLiteral("item|Edit Tags…||document-edit"),
                  QStringLiteral("sep"),

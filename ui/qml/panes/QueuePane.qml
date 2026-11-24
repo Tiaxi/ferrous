@@ -1191,7 +1191,8 @@ Rectangle {
                     Components.AppMenuItem {
                         objectName: "queueShowInLibraryItem"
                         text: I18n.i18nc("@action:inmenu", "Show in Library")
-                        icon.name: "go-jump"
+                        // The library's tree, as the search result's item.
+                        icon.name: "view-list-tree"
                         enabled: playlistContextMenu.rowIndex >= 0
                         onTriggered: {
                             const path = root.uiBridge.queuePathAt(playlistContextMenu.rowIndex)
