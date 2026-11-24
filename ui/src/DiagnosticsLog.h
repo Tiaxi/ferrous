@@ -34,43 +34,63 @@ QStringList stampedLines(const QString &tag, const QStringList &messages);
 
 // The lines logged on any thread on their way to the log, in the order of
 // their stamps: a line is stamped as it is queued, under the queue's lock,
-// so a line stamped earlier never comes after it. The app's BridgeClient
-// takes them on the GUI thread, for the log and Diagnostics, and logs its
-// own lines through it; ConsoleTee queues the console's on its threads.
-// Lines wait until a consumer takes them, from the first.
+// so a line stamped earlier never comes after it. The app's BridgeClient,
+// its consumer, logs its own lines through it and takes everyone's on the
+// GUI thread for Diagnostics; ConsoleTee queues the console's on its
+// threads. The log takes them through the consumer's sink: the
+// consumer's own a batch at a time (flush), the others' at once, so that it
+// has them while the GUI thread hangs. Lines wait until the
+// consumer comes, from the first.
 class LineQueue {
 public:
-    // Asks the consumer to take what waits. Called, under the queue's lock,
+    // Asks the consumer to take what waits for it. Called under the lock,
     // on the thread that queued, so it must only post, as
     // QMetaObject::invokeMethod does with a queued connection.
     using Wake = std::function<void()>;
+    // Hands lines to the log, under the lock, so it must only queue them,
+    // as Writer::post does.
+    using Sink = std::function<void(const QStringList &lines)>;
     using Rest = std::function<void(const QStringList &lines)>;
 
-    // Queues `messages` with `tag`, stamped now, and wakes the consumer if
-    // nothing waited. False, queuing nothing, once the queue is closed: the
-    // caller writes them itself.
+    // Queues `messages` with `tag`, stamped now, for the consumer, and hands
+    // them to the sink with the lines that waited for it. Wakes the consumer
+    // if nothing waited for it. False, queuing nothing, once the queue is
+    // closed: the caller writes them itself.
     bool post(const QString &tag, const QStringList &messages);
-    // What waits, in order.
+    // What waits for the consumer, in order.
     QStringList take();
-    // What waits, then `message` with `tag`, stamped now, as the consumer
-    // logs a line of its own.
+    // What waits for the consumer, then its own `message` with `tag`,
+    // stamped now, which waits for the log until the next flush or post.
     QStringList takeWith(const QString &tag, const QString &message);
-    // Wakes the consumer with `wake` from now on, and now if lines wait.
-    void setWake(Wake wake);
+    // Hands what waits for the log to the sink.
+    void flush();
+    // As flush, then takes what waits for the consumer and gives it to
+    // `then`, under the lock, as reading the log needs: the read has those
+    // lines and nothing queued after them.
+    void flushAndTake(const std::function<void(QStringList lines)> &then);
+    // Drops what waits, for the consumer and for the log, then runs `then`
+    // under the lock, so that no line queued later goes with them.
+    void discard(const std::function<void()> &then);
+    // Starts taking lines: hands what waited for the log to `sink`, and
+    // wakes the consumer with `wake`, now if lines wait for it.
+    void setConsumer(Wake wake, Sink sink);
     // Closes the queue, once, as the consumer stops: hands what still waits
-    // to `rest` under the lock, so a line queued meanwhile waits for `rest`
-    // to return and is then refused, and stops waking the consumer.
+    // for the log to `rest` under the lock, so a line queued meanwhile waits
+    // for `rest` to return and is then refused.
     void close(const Rest &rest);
-    // Closes the queue as close does, unless a consumer has set a wake: it
-    // takes the lines and closes the queue itself.
+    // Closes the queue as close does, unless a consumer has come: it hands
+    // the lines to the log and closes the queue itself.
     void closeUnlessConsumed(const Rest &rest);
 
 private:
+    void flushLocked();
     void closeLocked(const Rest &rest);
 
     std::mutex m_mutex;
-    QStringList m_lines;
+    QStringList m_consumerLines;
+    QStringList m_logLines;
     Wake m_wake;
+    Sink m_sink;
     bool m_closed{false};
 };
 

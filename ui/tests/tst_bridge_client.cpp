@@ -6148,7 +6148,7 @@ void BridgeClientTest::diagnosticsWritesBatchOffHotPath() {
 
     client.m_diagnosticsFlushTimer.stop();
     client.m_diagnosticsLogPath = logPath;
-    client.m_pendingDiagnosticsDiskLines.clear();
+    client.m_diagnosticsQueue->m_logLines.clear();
     client.m_diagnosticsLines.clear();
     QFile::remove(logPath);
 
@@ -6156,10 +6156,10 @@ void BridgeClientTest::diagnosticsWritesBatchOffHotPath() {
     client.logDiagnostic(QStringLiteral("ui"), QStringLiteral("second line"));
 
     QVERIFY(client.m_diagnosticsFlushTimer.isActive());
-    QCOMPARE(client.m_pendingDiagnosticsDiskLines.size(), 2);
+    QCOMPARE(client.m_diagnosticsQueue->m_logLines.size(), 2);
     QVERIFY(!QFileInfo::exists(logPath));
 
-    QTRY_COMPARE_WITH_TIMEOUT(client.m_pendingDiagnosticsDiskLines.size(), 0, 1000);
+    QTRY_COMPARE_WITH_TIMEOUT(client.m_diagnosticsQueue->m_logLines.size(), 0, 1000);
     client.m_diagnosticsWriter->waitUntilWritten();
 
     QFile file(logPath);
@@ -6181,7 +6181,7 @@ void BridgeClientTest::loggingDoesNotWaitForAStalledDisk() {
     client.m_sendCommandOverride = [](const QByteArray &) { return true; };
     client.m_diagnosticsFlushTimer.stop();
     client.m_diagnosticsLogPath = logPath;
-    client.m_pendingDiagnosticsDiskLines.clear();
+    client.m_diagnosticsQueue->m_logLines.clear();
     // A disk that does not answer until the test lets it.
     client.m_diagnosticsWriter = std::make_unique<DiagnosticsLog::Writer>(
         [&writing, &diskAnswers](const QString &path, const QStringList &lines) {
@@ -6233,7 +6233,7 @@ void BridgeClientTest::readingTheLogDoesNotWaitForAStalledDisk() {
     client.m_sendCommandOverride = [](const QByteArray &) { return true; };
     client.m_diagnosticsFlushTimer.stop();
     client.m_diagnosticsLogPath = dir.filePath(QStringLiteral("diagnostics.log"));
-    client.m_pendingDiagnosticsDiskLines.clear();
+    client.m_diagnosticsQueue->m_logLines.clear();
     client.m_diagnosticsWriter = std::make_unique<DiagnosticsLog::Writer>(
         [&writing, &diskAnswers](const QString &path, const QStringList &lines) {
             writing.release();
@@ -6408,7 +6408,7 @@ void BridgeClientTest::reportedErrorsAreLoggedWithTheirCategoryAndSeverity() {
     const QString logPath = dir.filePath(QStringLiteral("diagnostics.log"));
     client.m_diagnosticsFlushTimer.stop();
     client.m_diagnosticsLogPath = logPath;
-    client.m_pendingDiagnosticsDiskLines.clear();
+    client.m_diagnosticsQueue->m_logLines.clear();
     client.m_diagnosticsLines.clear();
     QSignalSpy errors(&client, &BridgeClient::bridgeError);
 
@@ -6439,7 +6439,7 @@ void BridgeClientTest::reportedErrorsAreLoggedWithTheirCategoryAndSeverity() {
     QCOMPARE(errors[2][2].toInt(), int(BinaryBridgeCodec::ErrorSeverityError));
 
     // The diagnostics log has each too, one line each, with what it is about.
-    QTRY_COMPARE_WITH_TIMEOUT(client.m_pendingDiagnosticsDiskLines.size(), 0, 1000);
+    QTRY_COMPARE_WITH_TIMEOUT(client.m_diagnosticsQueue->m_logLines.size(), 0, 1000);
     client.m_diagnosticsWriter->waitUntilWritten();
     QFile file(logPath);
     QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
@@ -6515,12 +6515,12 @@ void BridgeClientTest::diagnosticsKeepsTheConsoleAndTheAppInTheOrderTheyLogged()
         }
         writer.join();
 
-        // Copy Without Paths has a console line whose wake is still to
-        // come.
+        // A console line that the GUI thread has yet to take: the file has
+        // it without it, as when it hangs, and Copy Without Paths has it.
         QVERIFY(writeConsole("logged before the copy\n"));
         const auto queued = [&queue]() {
             const std::lock_guard<std::mutex> lock(queue->m_mutex);
-            return queue->m_lines.join(QLatin1Char('\n')).contains(QStringLiteral("logged before the copy"));
+            return queue->m_consumerLines.join(QLatin1Char('\n')).contains(QStringLiteral("logged before the copy"));
         };
         QElapsedTimer waited;
         waited.start();
@@ -6528,6 +6528,8 @@ void BridgeClientTest::diagnosticsKeepsTheConsoleAndTheAppInTheOrderTheyLogged()
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         QVERIFY(queued());
+        client.m_diagnosticsWriter->waitUntilWritten();
+        QVERIFY(readLog().join(QLatin1Char('\n')).contains(QStringLiteral("[stderr] logged before the copy")));
         QGuiApplication::clipboard()->clear();
         client.copyDiagnosticsWithoutPaths();
         QVERIFY(QGuiApplication::clipboard()->text().contains(QStringLiteral("[stderr] logged before the copy")));
@@ -6585,13 +6587,13 @@ void BridgeClientTest::profileDiagnosticsBypassUiThreadDiskQueue() {
     isolateBridgeClient(client);
 
     client.m_profileUiEnabled = true;
-    client.m_pendingDiagnosticsDiskLines.clear();
+    client.m_diagnosticsQueue->m_logLines.clear();
 
     client.logProfileDiagnostic(
         QStringLiteral("ui-prof"),
         QStringLiteral("event_loop_stall ms=42 timer_ms=8 connected=1 snapshot_pending=0"));
 
-    QCOMPARE(client.m_pendingDiagnosticsDiskLines.size(), 0);
+    QCOMPARE(client.m_diagnosticsQueue->m_logLines.size(), 0);
 }
 
 void BridgeClientTest::clearDiagnosticsDropsPendingDiskWrites() {
@@ -6604,20 +6606,20 @@ void BridgeClientTest::clearDiagnosticsDropsPendingDiskWrites() {
 
     client.m_diagnosticsFlushTimer.stop();
     client.m_diagnosticsLogPath = logPath;
-    client.m_pendingDiagnosticsDiskLines.clear();
+    client.m_diagnosticsQueue->m_logLines.clear();
     client.m_diagnosticsLines.clear();
     QFile::remove(logPath);
 
     client.logDiagnostic(QStringLiteral("ui"), QStringLiteral("stale line"));
     client.logDiagnostic(QStringLiteral("ui"), QStringLiteral("stale line 2"));
-    QCOMPARE(client.m_pendingDiagnosticsDiskLines.size(), 2);
+    QCOMPARE(client.m_diagnosticsQueue->m_logLines.size(), 2);
 
     client.clearDiagnostics();
 
-    QCOMPARE(client.m_pendingDiagnosticsDiskLines.size(), 1);
+    QCOMPARE(client.m_diagnosticsQueue->m_logLines.size(), 1);
     QVERIFY(client.m_diagnosticsFlushTimer.isActive());
 
-    QTRY_COMPARE_WITH_TIMEOUT(client.m_pendingDiagnosticsDiskLines.size(), 0, 1000);
+    QTRY_COMPARE_WITH_TIMEOUT(client.m_diagnosticsQueue->m_logLines.size(), 0, 1000);
     client.m_diagnosticsWriter->waitUntilWritten();
 
     QFile file(logPath);

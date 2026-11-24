@@ -7,6 +7,7 @@
 #include <QtTest/QtTest>
 
 #include <atomic>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -245,7 +246,14 @@ void DiagnosticsLogTest::writerKeepsTheOrderAndWritesWhatWaitsWhenDestroyed() {
 void DiagnosticsLogTest::lineQueueKeepsTheStampsInOrderAcrossThreads() {
     DiagnosticsLog::LineQueue queue;
     std::atomic<int> wakes{0};
-    queue.setWake([&wakes]() { ++wakes; });
+    // What the consumer hands its log, on the threads that queue.
+    std::mutex sunkMutex;
+    QStringList sunk;
+    queue.setConsumer([&wakes]() { ++wakes; },
+                      [&sunkMutex, &sunk](const QStringList &lines) {
+                          const std::lock_guard<std::mutex> lock(sunkMutex);
+                          sunk += lines;
+                      });
     constexpr int kLines = 500;
     std::atomic<int> refused{0};
     std::vector<std::thread> writers;
@@ -266,8 +274,11 @@ void DiagnosticsLogTest::lineQueueKeepsTheStampsInOrderAcrossThreads() {
         writer.join();
     }
     taken += queue.take();
+    queue.flush();
     QCOMPARE(refused.load(), 0);
     QVERIFY(wakes.load() > 0);
+    // The log has the same lines in the same order.
+    QCOMPARE(sunk, taken);
 
     const QRegularExpression pattern(QStringLiteral("^\\[([^\\]]+)\\] \\[([^\\]]+)\\] (\\d+)$"));
     QDateTime previous;
@@ -286,12 +297,24 @@ void DiagnosticsLogTest::lineQueueKeepsTheStampsInOrderAcrossThreads() {
     QCOMPARE(next.value(QStringLiteral("thread 0")), kLines);
     QCOMPARE(next.value(QStringLiteral("thread 1")), kLines);
 
-    // Closed, it hands over what waits, then refuses lines and wakes no one.
-    QVERIFY(queue.post(QStringLiteral("thread 0"), QStringList{QStringLiteral("left")}));
+    // A line of the consumer's own waits for the log until a flush or the
+    // next line another thread queues.
+    sunk.clear();
+    (void)queue.takeWith(QStringLiteral("own"), QStringLiteral("waits"));
+    QVERIFY(sunk.isEmpty());
+    QVERIFY(queue.post(QStringLiteral("thread 0"), QStringList{QStringLiteral("posted")}));
+    QCOMPARE(sunk.size(), 2);
+    QVERIFY(sunk.at(0).endsWith(QStringLiteral("[own] waits")));
+    QVERIFY(sunk.at(1).endsWith(QStringLiteral("[thread 0] posted")));
+    (void)queue.take();
+
+    // Closed, it hands over what waits for the log, then refuses lines and
+    // wakes no one.
+    (void)queue.takeWith(QStringLiteral("own"), QStringLiteral("left"));
     QStringList rest;
     queue.close([&rest](const QStringList &lines) { rest = lines; });
     QCOMPARE(rest.size(), 1);
-    QVERIFY(rest.first().endsWith(QStringLiteral("[thread 0] left")));
+    QVERIFY(rest.first().endsWith(QStringLiteral("[own] left")));
     const int wakesBefore = wakes.load();
     QVERIFY(!queue.post(QStringLiteral("thread 0"), QStringList{QStringLiteral("too late")}));
     QCOMPARE(wakes.load(), wakesBefore);

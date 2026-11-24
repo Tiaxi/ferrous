@@ -919,10 +919,12 @@ private:
     bool processSearchResultsFrame(const BinaryBridgeCodec::DecodedSearchResults &frame);
     void flushGlobalSearchQuery();
     void logProfileDiagnostic(const QString &category, const QString &message) const;
-    // Logs `lines`, taken from the queue in order, to the log and
-    // Diagnostics, a batch at a time.
+    // Adds `lines`, taken from the queue in order, to Diagnostics.
     void addDiagnosticLines(const QStringList &lines);
     void takeQueuedDiagnosticLines();
+    // Starts the flush timer for a line that waits for the log, or for the
+    // lines that wait for Diagnostics.
+    void scheduleDiagnosticsFlush(bool forTheLog);
     void appendDiagnosticLine(const QString &line);
     // Shows `lines`, the log as read for the reload numbered `generation`
     // from `logPath`, with the lines logged since `loggedBefore`, unless a
@@ -1187,13 +1189,13 @@ private:
     QSet<QString> m_pendingImageFileDetailsPaths;
     QString m_diagnosticsLogPath;
     QStringList m_diagnosticsLines;
-    QStringList m_pendingDiagnosticsDiskLines;
     // Logged while Diagnostics is shown, for its next diagnosticsLinesAdded.
     QStringList m_pendingDiagnosticsShownLines;
     // The lines Diagnostics shows that the log dropped since the last batch.
     int m_pendingDiagnosticsShownDrops{0};
-    // Every line on its way to the log, the app's and the console's, in
-    // the order of their stamps.
+    // Every line on its way to the log and Diagnostics, the app's and the
+    // console's, in the order of their stamps; the app's wait in it for the
+    // log until the next flush.
     std::shared_ptr<DiagnosticsLog::LineQueue> m_diagnosticsQueue;
     // Writes the log's lines off the GUI thread. Destroyed after the
     // destructor's last flush, it writes what still waits.

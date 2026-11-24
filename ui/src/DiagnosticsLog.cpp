@@ -567,9 +567,13 @@ bool LineQueue::post(const QString &tag, const QStringList &messages) {
     if (m_closed) {
         return false;
     }
-    const bool waited = !m_lines.isEmpty();
-    m_lines += stampedLines(tag, messages);
-    // Under the lock, so that close stops it for good.
+    const QStringList lines = stampedLines(tag, messages);
+    const bool waited = !m_consumerLines.isEmpty();
+    m_consumerLines += lines;
+    m_logLines += lines;
+    // Under the lock, so that the log has the lines in their order and close
+    // stops both for good.
+    flushLocked();
     if (!waited && m_wake) {
         m_wake();
     }
@@ -578,23 +582,47 @@ bool LineQueue::post(const QString &tag, const QStringList &messages) {
 
 QStringList LineQueue::take() {
     const std::lock_guard<std::mutex> lock(m_mutex);
-    return std::exchange(m_lines, {});
+    return std::exchange(m_consumerLines, {});
 }
 
 QStringList LineQueue::takeWith(const QString &tag, const QString &message) {
     const std::lock_guard<std::mutex> lock(m_mutex);
-    QStringList lines = std::exchange(m_lines, {});
-    lines += stampedLines(tag, QStringList{message});
+    const QStringList own = stampedLines(tag, QStringList{message});
+    if (!m_closed) {
+        m_logLines += own;
+    }
+    QStringList lines = std::exchange(m_consumerLines, {});
+    lines += own;
     return lines;
 }
 
-void LineQueue::setWake(Wake wake) {
+void LineQueue::flush() {
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    flushLocked();
+}
+
+void LineQueue::flushAndTake(const std::function<void(QStringList lines)> &then) {
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    flushLocked();
+    then(std::exchange(m_consumerLines, {}));
+}
+
+void LineQueue::discard(const std::function<void()> &then) {
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    m_consumerLines.clear();
+    m_logLines.clear();
+    then();
+}
+
+void LineQueue::setConsumer(Wake wake, Sink sink) {
     const std::lock_guard<std::mutex> lock(m_mutex);
     if (m_closed) {
         return;
     }
     m_wake = std::move(wake);
-    if (!m_lines.isEmpty() && m_wake) {
+    m_sink = std::move(sink);
+    flushLocked();
+    if (!m_consumerLines.isEmpty() && m_wake) {
         m_wake();
     }
 }
@@ -606,8 +634,14 @@ void LineQueue::close(const Rest &rest) {
 
 void LineQueue::closeUnlessConsumed(const Rest &rest) {
     const std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_wake) {
+    if (!m_sink) {
         closeLocked(rest);
+    }
+}
+
+void LineQueue::flushLocked() {
+    if (m_sink && !m_logLines.isEmpty()) {
+        m_sink(std::exchange(m_logLines, {}));
     }
 }
 
@@ -617,7 +651,9 @@ void LineQueue::closeLocked(const Rest &rest) {
     }
     m_closed = true;
     m_wake = nullptr;
-    rest(std::exchange(m_lines, {}));
+    m_sink = nullptr;
+    m_consumerLines.clear();
+    rest(std::exchange(m_logLines, {}));
 }
 
 Writer::Writer(Append append)

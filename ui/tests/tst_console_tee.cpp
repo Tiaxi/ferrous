@@ -9,7 +9,9 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <mutex>
 #include <thread>
+#include <utility>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -236,6 +238,13 @@ void ConsoleTeeTest::linesGoThroughTheAppsQueueWhileItRuns() {
     QVERIFY(console.fd >= 0);
     const auto queue = std::make_shared<DiagnosticsLog::LineQueue>();
     std::atomic<int> wakes{0};
+    // What the app's sink hands its writer, on the tee's threads.
+    std::mutex sunkMutex;
+    QStringList sunk;
+    const auto takeSunk = [&sunkMutex, &sunk]() {
+        const std::lock_guard<std::mutex> lock(sunkMutex);
+        return std::exchange(sunk, {});
+    };
     const QRegularExpression line(QStringLiteral("^\\[[^\\]]+\\] \\[out\\] (.*)$"));
     const auto messages = [&line](const QStringList &lines) {
         QStringList out;
@@ -249,11 +258,18 @@ void ConsoleTeeTest::linesGoThroughTheAppsQueueWhileItRuns() {
         QVERIFY(tee.install(console.fd, QStringLiteral("out")));
         // Before the app takes them, the lines wait for it.
         writeText(console.fd, QByteArrayLiteral("before the app\n"));
-        queue->setWake([&wakes]() { ++wakes; });
+        queue->setConsumer([&wakes]() { ++wakes; },
+                           [&sunkMutex, &sunk](const QStringList &lines) {
+                               const std::lock_guard<std::mutex> lock(sunkMutex);
+                               sunk += lines;
+                           });
         QTRY_COMPARE(wakes.load(), 1);
         QCOMPARE(messages(queue->take()), QStringList{QStringLiteral("before the app")});
+        QCOMPARE(messages(takeSunk()), QStringList{QStringLiteral("before the app")});
+        // The app's writer has them at once, without the app taking them.
         writeText(console.fd, QByteArrayLiteral("while it runs\n"));
         QTRY_COMPARE(wakes.load(), 2);
+        QCOMPARE(messages(takeSunk()), QStringList{QStringLiteral("while it runs")});
         QCOMPARE(messages(queue->take()), QStringList{QStringLiteral("while it runs")});
         QVERIFY(loggedMessages(console.logPath, QStringLiteral("out")).isEmpty());
 
