@@ -1734,7 +1734,10 @@ void UiMenusTest::checkMenusListTheirItemsInOrder(QQuickWindow *window) {
                  QStringLiteral("item|Add Files to Queue…||media-playlist-append"),
                  QStringLiteral("item|Add Folder to Queue…||folder-add"),
                  QStringLiteral("sep"),
+                 // Adding a folder changes the library; it is not one of
+                 // the two that play it.
                  QStringLiteral("item|Add Library Folder…||folder-music-symbolic"),
+                 QStringLiteral("sep"),
                  QStringLiteral("item|Play Whole Library||media-playback-start"),
                  QStringLiteral("item|Add Whole Library to Queue||media-playlist-append"),
                  QStringLiteral("sep"),

@@ -1415,7 +1415,9 @@ ApplicationWindow {
             Components.AppMenuItem { action: addFilesAction }
             Components.AppMenuItem { action: addFolderAction }
             MenuSeparator {}
+            // A setting of the library, apart from the items that play it.
             Components.AppMenuItem { action: addLibraryFolderAction }
+            MenuSeparator {}
             Components.AppMenuItem { action: playAllLibraryTracksAction }
             Components.AppMenuItem { action: appendAllLibraryTracksAction }
             MenuSeparator {}
