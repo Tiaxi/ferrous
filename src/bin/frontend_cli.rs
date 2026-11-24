@@ -7,7 +7,8 @@ use std::io::{self, BufRead, Write};
 use std::time::Duration;
 
 use ferrous::frontend_bridge::{
-    BridgeCommand, BridgeEvent, BridgePlaybackCommand, BridgeSettingsCommand, FrontendBridgeHandle,
+    BridgeCommand, BridgeError, BridgeEvent, BridgePlaybackCommand, BridgeSettingsCommand,
+    FrontendBridgeHandle,
 };
 use ferrous::playback::RepeatMode;
 use tracing_subscriber::{fmt, EnvFilter};
@@ -179,6 +180,11 @@ fn parse_toggle(value: &str, label: &str) -> Result<bool, String> {
         .map_err(|_| format!("invalid {label} value, expected 0 or 1"))
 }
 
+/// The line the CLI prints for `err`, with why it happened.
+fn error_line(err: &BridgeError) -> String {
+    format!("bridge error: {}", err.logged_message())
+}
+
 fn drain_bridge_events(bridge: &FrontendBridgeHandle) {
     for _ in 0..8 {
         let Some(event) = bridge.recv_timeout(Duration::from_millis(60)) else {
@@ -200,9 +206,7 @@ fn drain_bridge_events(bridge: &FrontendBridgeHandle) {
             }
             // The CLI draws no spectrogram and has no window.
             BridgeEvent::PrecomputedSpectrogramChunk(_) | BridgeEvent::WindowLayout { .. } => {}
-            BridgeEvent::Error(err) => {
-                eprintln!("bridge error: {err}");
-            }
+            BridgeEvent::Error(err) => eprintln!("{}", error_line(&err)),
             BridgeEvent::Stopped => {
                 println!("bridge stopped");
                 return;
@@ -231,6 +235,19 @@ mod tests {
             commands.push(command)
         });
         commands
+    }
+
+    #[test]
+    fn an_error_line_tells_why() {
+        let err = BridgeError::error(
+            ferrous::frontend_bridge::ErrorCategory::Playback,
+            "Couldn't play the track.",
+        )
+        .with_detail("the file is missing");
+        assert_eq!(
+            error_line(&err),
+            "bridge error: Couldn't play the track: the file is missing"
+        );
     }
 
     #[test]

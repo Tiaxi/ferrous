@@ -544,6 +544,25 @@ int LibraryTreeModel::indexForSelectionKey(const QString &selectionKey) const {
     return -1;
 }
 
+QStringList LibraryTreeModel::selectionKeyPath(const QString &selectionKey) const {
+    const int row = indexForSelectionKey(selectionKey);
+    if (row < 0) {
+        return {};
+    }
+    // The rows that hold a row are the nearest rows above it, each less
+    // deep than the one it holds.
+    QStringList path{rowAt(row).selectionKey};
+    int depth = rowAt(row).depth;
+    for (int above = row - 1; above >= 0 && depth > 0; --above) {
+        const FlatRow &holder = rowAt(above);
+        if (holder.depth < depth) {
+            path.prepend(holder.selectionKey);
+            depth = holder.depth;
+        }
+    }
+    return path;
+}
+
 int LibraryTreeModel::sourceIndexForRow(int row) const {
     if (row < 0 || row >= rowTotal()) {
         return -1;

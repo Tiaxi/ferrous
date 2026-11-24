@@ -5164,12 +5164,13 @@ mod tests {
     impl HeldMetadataFixture {
         fn change_track(&mut self, path: &Path, kind: TrackChangeKind) {
             self.runtime.handle_wake(
-                BridgeLoopWake::Playback(PlaybackEvent::TrackChanged {
-                    path: path.to_path_buf(),
-                    queue_index: 0,
+                BridgeLoopWake::Playback(PlaybackEvent::track_change(
+                    path.to_path_buf(),
+                    0,
                     kind,
-                    track_token: 2,
-                }),
+                    2,
+                    &self.runtime.state.playback,
+                )),
                 &self.event_tx,
             );
         }
@@ -6017,6 +6018,65 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Until the engine reports where its track went, the snapshot sent
+    /// with a queue edit keeps the playing row on the row it was: moved
+    /// with it, or none when the edit took it out.
+    #[test]
+    fn a_queue_edit_takes_the_playing_row_with_it() {
+        let _guard = test_guard();
+        let (mut runtime, _engine_rx, event_tx, _album) = queue_order_runtime();
+        let (a, b, c, d) = (
+            p("/music/a.flac"),
+            p("/music/b.flac"),
+            p("/music/c.flac"),
+            p("/music/d.flac"),
+        );
+        let playing_row = |runtime: &BridgeLoopRuntime| {
+            runtime.state.snapshot(false).playback.current_queue_index
+        };
+        replace_queue(&mut runtime, &[a, b, c.clone(), d.clone()], &event_tx);
+        runtime.state.playback.current = Some(c.clone());
+        runtime.state.playback.current_queue_index = Some(2);
+
+        let edits = [
+            (BridgeQueueCommand::Remove(0), Some(1), "a row before it"),
+            (
+                BridgeQueueCommand::RemoveMany(vec![2]),
+                Some(1),
+                "a row after it",
+            ),
+            (
+                BridgeQueueCommand::Move { from: 1, to: 0 },
+                Some(0),
+                "its own row moved",
+            ),
+            (
+                BridgeQueueCommand::Move { from: 1, to: 0 },
+                Some(1),
+                "a row moved past it",
+            ),
+            (BridgeQueueCommand::Remove(1), None, "its own row"),
+        ];
+        for (edit, row, case) in edits {
+            runtime.handle_command(BridgeCommand::Queue(edit), &event_tx);
+            assert_eq!(playing_row(&runtime), row, "{case}");
+            if let Some(row) = row {
+                assert_eq!(runtime.state.queue.get(row), Some(&c), "{case}");
+            }
+        }
+
+        replace_queue(&mut runtime, &[c.clone(), d.clone()], &event_tx);
+        runtime.state.playback.current_queue_index = Some(0);
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::Replace {
+                tracks: vec![d, c],
+                autoplay: true,
+            }),
+            &event_tx,
+        );
+        assert_eq!(playing_row(&runtime), None, "a replaced queue");
     }
 
     #[test]
@@ -7024,6 +7084,175 @@ mod tests {
         std::fs::remove_dir_all(dir).expect("remove fixture");
     }
 
+    /// A WAV file of `millis` milliseconds of a quiet tone at `path`.
+    fn write_tone_wav(path: &Path, millis: u32) {
+        const RATE: u32 = 8_000;
+        let samples: Vec<u8> = (0..RATE * millis / 1_000)
+            .flat_map(|index| {
+                let sample = i16::try_from(index % 64).unwrap_or_default() * 64;
+                sample.to_le_bytes()
+            })
+            .collect();
+        let data = u32::try_from(samples.len()).expect("fixture size");
+        let mut bytes = Vec::with_capacity(samples.len() + 44);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&RATE.to_le_bytes());
+        bytes.extend_from_slice(&(RATE * 2).to_le_bytes());
+        bytes.extend_from_slice(&2_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data.to_le_bytes());
+        bytes.extend_from_slice(&samples);
+        std::fs::write(path, bytes).expect("fixture track");
+    }
+
+    /// Starting a row, or a new queue, from Stop and from Pause publishes
+    /// the row only as playing: the engine's switch reaches the UI whole,
+    /// however the bridge's wakes fall between the engine's events.
+    #[test]
+    fn a_started_row_is_published_only_as_playing() {
+        let _guard = test_guard();
+        let dir = std::env::temp_dir().join(format!(
+            "ferrous-bridge-start-published-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let files: Vec<PathBuf> = ["a.wav", "b.wav", "c.wav"]
+            .iter()
+            .map(|name| {
+                let path = dir.join(name);
+                write_tone_wav(&path, 4_000);
+                path
+            })
+            .collect();
+        let starts = [
+            (BridgeQueueCommand::PlayAt(1), files[1].clone(), 1),
+            (
+                BridgeQueueCommand::Replace {
+                    tracks: vec![files[2].clone(), files[0].clone()],
+                    autoplay: true,
+                },
+                files[2].clone(),
+                0,
+            ),
+        ];
+        for from in [PlaybackState::Stopped, PlaybackState::Paused] {
+            for (start, target, row) in &starts {
+                let case = format!("{start:?} from {from:?}");
+                let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+                let (analysis_tx, _analysis) = unbounded();
+                let (playback, engine_events) =
+                    crate::playback::PlaybackEngine::on_test_output(analysis_tx);
+                runtime.playback = playback;
+                // The engine's events reach the loop one per wake.
+                let (forward, playback_rx) = unbounded();
+                runtime.playback_rx = playback_rx;
+                let (event_tx, event_rx) = unbounded();
+                let deadline = Instant::now() + Duration::from_secs(20);
+                let wake_until =
+                    |runtime: &mut BridgeLoopRuntime,
+                     what: &str,
+                     done: &dyn Fn(&BridgeState) -> bool| {
+                        while !done(&runtime.state) {
+                            runtime.playback.command(PlaybackCommand::Poll);
+                            let event = engine_events
+                                .recv_deadline(deadline)
+                                .unwrap_or_else(|_| panic!("{case}: {what}"));
+                            forward.send(event).expect("forward the event");
+                            runtime.handle_wake(BridgeLoopWake::Tick, &event_tx);
+                        }
+                    };
+                let command = |runtime: &mut BridgeLoopRuntime, cmd: BridgeCommand| {
+                    runtime.handle_wake(BridgeLoopWake::Command(cmd), &event_tx);
+                };
+                command(
+                    &mut runtime,
+                    BridgeCommand::Queue(BridgeQueueCommand::Replace {
+                        tracks: files[..2].to_vec(),
+                        autoplay: false,
+                    }),
+                );
+                wake_until(&mut runtime, "the queue did not open", &|state| {
+                    state.playback.current.as_ref() == Some(&files[0])
+                });
+                if from == PlaybackState::Paused {
+                    command(
+                        &mut runtime,
+                        BridgeCommand::Playback(BridgePlaybackCommand::Play),
+                    );
+                    wake_until(&mut runtime, "the first row did not play", &|state| {
+                        state.playback.state == PlaybackState::Playing
+                            && state.playback.position >= Duration::from_millis(200)
+                    });
+                    command(
+                        &mut runtime,
+                        BridgeCommand::Playback(BridgePlaybackCommand::Pause),
+                    );
+                    wake_until(&mut runtime, "the first row did not pause", &|state| {
+                        state.playback.state == PlaybackState::Paused
+                    });
+                }
+                runtime.flags.pending_snapshot = SnapshotUrgency::Immediate;
+                runtime.maybe_emit_pending_snapshot(&event_tx);
+                let before = event_rx
+                    .try_iter()
+                    .filter_map(|event| match event {
+                        BridgeEvent::Snapshot(snapshot) => Some(*snapshot),
+                        _ => None,
+                    })
+                    .last()
+                    .expect("a published snapshot");
+                let old = (
+                    before.playback.current.clone(),
+                    before.playback.current_queue_index,
+                    before.playback.state,
+                    before.play_serial,
+                );
+
+                command(&mut runtime, BridgeCommand::Queue(start.clone()));
+                wake_until(&mut runtime, "the row did not play", &|state| {
+                    state.playback.current.as_ref() == Some(target)
+                        && state.playback.state == PlaybackState::Playing
+                        && state.playback.position >= Duration::from_millis(300)
+                });
+                let published: Vec<_> = event_rx
+                    .try_iter()
+                    .filter_map(|event| match event {
+                        BridgeEvent::Snapshot(snapshot) => Some(*snapshot),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(!published.is_empty(), "{case}");
+                for snapshot in &published {
+                    let shown = (
+                        snapshot.playback.current.clone(),
+                        snapshot.playback.current_queue_index,
+                        snapshot.playback.state,
+                        snapshot.play_serial,
+                    );
+                    // The track before, also on no row once a new queue
+                    // replaced its own, until the engine switches.
+                    if shown == old || shown == (old.0.clone(), None, old.2, old.3) {
+                        continue;
+                    }
+                    assert_eq!(
+                        (shown.0.as_ref(), shown.1, shown.2),
+                        (Some(target), Some(*row), PlaybackState::Playing),
+                        "{case}: the UI saw the switch in part"
+                    );
+                    assert_ne!(shown.3, old.3, "{case}: a play without its serial");
+                }
+            }
+        }
+        std::fs::remove_dir_all(dir).expect("remove fixture");
+    }
+
     #[test]
     fn queued_files_are_checked_after_events_and_never_while_idle() {
         use crate::playback::{PlaybackEvent, TrackChangeKind};
@@ -7080,12 +7309,13 @@ mod tests {
         idle(&mut runtime, &event_tx);
 
         runtime.handle_wake(
-            BridgeLoopWake::Playback(PlaybackEvent::TrackChanged {
-                path: files[0].clone(),
-                queue_index: 0,
-                kind: TrackChangeKind::Manual,
-                track_token: 1,
-            }),
+            BridgeLoopWake::Playback(PlaybackEvent::track_change(
+                files[0].clone(),
+                0,
+                TrackChangeKind::Manual,
+                1,
+                &runtime.state.playback,
+            )),
             &event_tx,
         );
         assert_eq!(checks(&runtime), 2, "a track change");
@@ -7795,12 +8025,16 @@ mod tests {
     }
 
     fn gapless_change(path: &str, queue_index: usize) -> PlaybackEvent {
-        PlaybackEvent::TrackChanged {
-            path: p(path),
+        PlaybackEvent::track_change(
+            p(path),
             queue_index,
-            kind: crate::playback::TrackChangeKind::Gapless,
-            track_token: 2,
-        }
+            crate::playback::TrackChangeKind::Gapless,
+            2,
+            &PlaybackSnapshot {
+                state: PlaybackState::Playing,
+                ..PlaybackSnapshot::default()
+            },
+        )
     }
 
     #[test]

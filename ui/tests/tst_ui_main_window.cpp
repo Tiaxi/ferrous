@@ -6447,14 +6447,11 @@ void UiMainWindowTest::tabIntoTheLibraryFocusesItsCurrentRow() {
     QTRY_COMPARE(focusIsOn(9, QStringLiteral("First")), QString());
 
     // Collapse All leaves the folders' rows; the row went with its
-    // folder's children, so Tab rings one of them, and the focus is on it.
+    // folder's children, so its folder's row has the focus at once.
     QVERIFY(QMetaObject::invokeMethod(library, "collapseAll"));
     QTRY_COMPARE(view->property("count").toInt(), 2);
-    library->setProperty("focusSelectionKey", QString());
-    tabInto(window, view);
-    QTRY_COMPARE(ringedRowsOf(view).size(), 1);
-    const int ringed = ringedRowsOf(view).constFirst();
-    QTRY_COMPARE(focusIsOn(ringed, viewRowAt(view, ringed)->property("rowTitle").toString()), QString());
+    QTRY_COMPARE(focusIsOn(1, QStringLiteral("Music")), QString());
+    QCOMPARE(library->property("currentRowKey").toString(), kRootKey);
 }
 
 // Tab into the library or the queue with no row selected: a row it shows
