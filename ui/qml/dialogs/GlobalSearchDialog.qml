@@ -89,6 +89,9 @@ Dialog {
     readonly property real footerHeight: Math.max(28, footerHints.implicitHeight + 8)
     // The line under the no-results title.
     readonly property real hintHeight: Math.max(20, Math.round(smallMetrics.height) + 4)
+    // Over the no-results message, and under it or the recent searches:
+    // 8 px, scaled, as the rows' text is.
+    readonly property real messageGap: root.uiPalette.scaledSize(8)
     // The footer's gaps: between a key and its action, half again a word
     // space, so "Ctrl+Enter Add to Queue" reads as a key and an action, not
     // as one phrase; between pairs three times that, so the pairs read
@@ -697,7 +700,7 @@ Dialog {
                 ? body.resultsHeight
                 : (noResultsMessage.visible ? noResultsMessage.y + noResultsMessage.height : 0)
                     + (auxColumn.visible ? auxColumn.implicitHeight : 0)
-                    + (noResultsMessage.visible || auxColumn.visible ? 8 : 0)
+                    + (noResultsMessage.visible || auxColumn.visible ? root.messageGap : 0)
 
             ListView {
                 id: resultsView
@@ -1135,7 +1138,7 @@ Dialog {
                 id: noResultsMessage
                 objectName: "globalSearchNoResults"
                 visible: root.noResults
-                y: 8
+                y: root.messageGap
                 width: parent.width
                 height: root.suggestion.length > 0 ? root.resultHeight : root.resultHeight + root.hintHeight
                 Text {
@@ -1155,6 +1158,8 @@ Dialog {
                     objectName: "globalSearchNoResultsHint"
                     visible: root.suggestion.length === 0
                     x: root.titleX
+                    // Drawn up into the title row's padding, which is 12 px
+                    // at every font, so this stays 6 px.
                     y: root.resultHeight - 6
                     width: parent.width - x - root.sideInset
                     height: root.hintHeight

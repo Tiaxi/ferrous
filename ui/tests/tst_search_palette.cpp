@@ -531,6 +531,8 @@ private slots:
     void selectedRowsSecondaryMarksStepUp();
     void footerNamesTheKeysForEachState();
     void suggestionIsASelectableRow();
+    void noResultsSpacingFollowsTheFont_data();
+    void noResultsSpacingFollowsTheFont();
     void recentSearchesShowBeforeTyping();
     void moreRowShowsTheWholeSectionAndKeepsTheSelection();
     void resultsListEndsOnAWholeRow_data();
@@ -1521,6 +1523,55 @@ void SearchPaletteTest::suggestionIsASelectableRow() {
     QTRY_VERIFY((clickRow = harness.drawn(QStringLiteral("globalSearchSuggestionRow"))) != nullptr);
     QTest::mouseClick(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(clickRow));
     QCOMPARE(harness.field()->property("text").toString(), QStringLiteral("lantern"));
+}
+
+void SearchPaletteTest::noResultsSpacingFollowsTheFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The no-results message keeps its spacing in step with its text: 8 px
+// over it and under it at the default font, and as much more at a larger
+// one, as UiPalette.scaledSize gives (at 24 pt the message sat 8 px under
+// the field, tighter than the results' headings). Its hint stays drawn
+// 6 px up into the title row's padding, which doesn't grow with the font:
+// scaled, it touched the title.
+void SearchPaletteTest::noResultsSpacingFollowsTheFont() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    const qreal scale = pointSize > 0 ? pointSize / 10.0 : 1.0;
+    const auto scaled = [scale](qreal size) { return std::max(size, std::round(size * scale)); };
+    const qreal rowHeight = harness.dialog->property("resultHeight").toReal();
+    harness.search(QStringLiteral("zzzz"), {});
+    QQuickItem *title = harness.item(QStringLiteral("globalSearchNoResultsTitle"));
+    QQuickItem *hint = harness.item(QStringLiteral("globalSearchNoResultsHint"));
+    QTRY_VERIFY(hint->isVisible());
+    QQuickItem *seam = harness.item(QStringLiteral("globalSearchFieldSeam"));
+    QQuickItem *hairline = harness.item(QStringLiteral("globalSearchFooterHairline"));
+    QTRY_COMPARE(sceneRect(title).top() - sceneRect(seam).bottom(), scaled(8));
+    QCOMPARE(sceneRect(title).height(), rowHeight);
+    QCOMPARE(sceneRect(hint).top() - sceneRect(title).top(), rowHeight - 6);
+    // The room the hint was drawn up from stays under it.
+    QTRY_COMPARE(sceneRect(hairline).top() - sceneRect(hint).bottom(), 6 + scaled(8));
+    if (pointSize > 0) QCOMPARE(scaled(8), 19.0);
+
+    // With a correction, its row 8 px, scaled, over the footer.
+    harness.bridge->setProperty("globalSearchSuggestion", QStringLiteral("meridian"));
+    harness.search(QStringLiteral("merdian"), {});
+    QQuickItem *row = nullptr;
+    QTRY_VERIFY((row = harness.drawn(QStringLiteral("globalSearchSuggestionRow"))) != nullptr);
+    QTRY_COMPARE(sceneRect(hairline).top() - sceneRect(row).bottom(), scaled(8));
 }
 
 // The searches whose results were used show before typing, newest first;
