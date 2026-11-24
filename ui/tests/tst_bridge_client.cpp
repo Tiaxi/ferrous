@@ -28,10 +28,12 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <functional>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <thread>
 #include <tuple>
@@ -6512,6 +6514,23 @@ void BridgeClientTest::diagnosticsKeepsTheConsoleAndTheAppInTheOrderTheyLogged()
             QCoreApplication::processEvents();
         }
         writer.join();
+
+        // Copy Without Paths has a console line whose wake is still to
+        // come.
+        QVERIFY(writeConsole("logged before the copy\n"));
+        const auto queued = [&queue]() {
+            const std::lock_guard<std::mutex> lock(queue->m_mutex);
+            return queue->m_lines.join(QLatin1Char('\n')).contains(QStringLiteral("logged before the copy"));
+        };
+        QElapsedTimer waited;
+        waited.start();
+        while (!queued() && waited.elapsed() < 5000) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        QVERIFY(queued());
+        QGuiApplication::clipboard()->clear();
+        client.copyDiagnosticsWithoutPaths();
+        QVERIFY(QGuiApplication::clipboard()->text().contains(QStringLiteral("[stderr] logged before the copy")));
         tee.shutdown();
     }
     ::close(console);

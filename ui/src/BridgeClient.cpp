@@ -4606,6 +4606,8 @@ void BridgeClient::copyDiagnosticsWithoutPaths() {
     if (qobject_cast<QGuiApplication *>(QCoreApplication::instance()) == nullptr) {
         return;
     }
+    // With the lines other threads logged before the click.
+    takeQueuedDiagnosticLines();
     if (QClipboard *clipboard = QGuiApplication::clipboard()) {
         clipboard->setText(diagnosticsTextWithoutPaths());
     }

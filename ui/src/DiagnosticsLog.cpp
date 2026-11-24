@@ -449,13 +449,10 @@ bool appendLine(const QString &logPath, const QString &line) {
     return appendLines(logPath, QStringList{line});
 }
 
-bool appendLines(const QString &logPath, const QStringList &lines) {
-    if (logPath.trimmed().isEmpty() || lines.isEmpty()) {
-        return false;
-    }
+namespace {
 
-    std::lock_guard<std::mutex> lock(logMutex());
-
+// Appends `lines` to the log; the caller holds logMutex.
+bool appendLinesLocked(const QString &logPath, const QStringList &lines) {
     const QFileInfo info(logPath);
     const QString dirPath = info.absolutePath();
     if (!dirPath.isEmpty()) {
@@ -479,6 +476,24 @@ bool appendLines(const QString &logPath, const QStringList &lines) {
         file.write("\n", 1);
     }
     return true;
+}
+
+} // namespace
+
+bool appendLines(const QString &logPath, const QStringList &lines) {
+    if (logPath.trimmed().isEmpty() || lines.isEmpty()) {
+        return false;
+    }
+    const std::lock_guard<std::mutex> lock(logMutex());
+    return appendLinesLocked(logPath, lines);
+}
+
+bool appendStampedLines(const QString &logPath, const QString &tag, const QStringList &messages) {
+    if (logPath.trimmed().isEmpty() || messages.isEmpty()) {
+        return false;
+    }
+    const std::lock_guard<std::mutex> lock(logMutex());
+    return appendLinesLocked(logPath, stampedLines(tag, messages));
 }
 
 QString withoutPaths(const QString &text, const PathRedaction &redaction) {

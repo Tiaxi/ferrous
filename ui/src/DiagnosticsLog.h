@@ -16,6 +16,10 @@ namespace DiagnosticsLog {
 QString defaultLogPath();
 bool appendLine(const QString &logPath, const QString &line);
 bool appendLines(const QString &logPath, const QStringList &lines);
+// Appends `messages` with `tag`, stamped under the log's lock, so that
+// threads that write to the log themselves write in the order of their
+// stamps.
+bool appendStampedLines(const QString &logPath, const QString &tag, const QStringList &messages);
 // The last `maxLines` lines of the log at `logPath`; none if it cannot be
 // read. Reads from the disk: call it off the GUI thread.
 QStringList readLastLines(const QString &logPath, qsizetype maxLines);

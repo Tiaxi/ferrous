@@ -90,7 +90,7 @@ void ConsoleTee::appendLines(const QString &tag, const QList<QByteArray> &lineBy
         return;
     }
     // The console still has the output when the log cannot be written.
-    (void)DiagnosticsLog::appendLines(m_logPath, DiagnosticsLog::stampedLines(tag, messages));
+    (void)DiagnosticsLog::appendStampedLines(m_logPath, tag, messages);
 }
 
 void ConsoleTee::closeQueue() {

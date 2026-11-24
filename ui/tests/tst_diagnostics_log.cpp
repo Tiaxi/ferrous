@@ -37,6 +37,7 @@ private slots:
     void pathsAreQuotedWithTheirQuotesEscaped();
     void writerKeepsTheOrderAndWritesWhatWaitsWhenDestroyed();
     void lineQueueKeepsTheStampsInOrderAcrossThreads();
+    void threadsThatWriteThemselvesKeepTheStampsInOrder();
 };
 
 void DiagnosticsLogTest::pathsBecomePlaceholders_data() {
@@ -299,6 +300,40 @@ void DiagnosticsLogTest::lineQueueKeepsTheStampsInOrderAcrossThreads() {
     const QStringList own = queue.takeWith(QStringLiteral("own"), QStringLiteral("last"));
     QCOMPARE(own.size(), 1);
     QVERIFY(own.first().endsWith(QStringLiteral("[own] last")));
+}
+
+// #730: once the app has stopped, the console's streams write to the log
+// themselves, each on a thread of its own, still in the order of their
+// stamps.
+void DiagnosticsLogTest::threadsThatWriteThemselvesKeepTheStampsInOrder() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString logPath = dir.filePath(QStringLiteral("diagnostics.log"));
+    constexpr int kLines = 2000;
+    std::vector<std::thread> writers;
+    for (int w = 0; w < 4; ++w) {
+        writers.emplace_back([&logPath, w]() {
+            for (int n = 0; n < kLines; ++n) {
+                (void)DiagnosticsLog::appendStampedLines(logPath, QStringLiteral("thread %1").arg(w),
+                                                         QStringList{QString::number(n)});
+            }
+        });
+    }
+    for (std::thread &writer : writers) {
+        writer.join();
+    }
+    QFile file(logPath);
+    QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QStringList lines = QString::fromUtf8(file.readAll()).split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    QCOMPARE(lines.size(), 4 * kLines);
+    QDateTime previous;
+    for (const QString &line : lines) {
+        const QDateTime stamp =
+            QDateTime::fromString(line.section(QLatin1Char(']'), 0, 0).mid(1), Qt::ISODateWithMs);
+        QVERIFY2(stamp.isValid(), qPrintable(line));
+        QVERIFY2(!previous.isValid() || previous <= stamp, qPrintable(line));
+        previous = stamp;
+    }
 }
 
 int main(int argc, char **argv) {
