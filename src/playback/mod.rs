@@ -175,7 +175,13 @@ pub enum PlaybackCommand {
         paths: Vec<PathBuf>,
     },
     ClearQueue,
+    /// Make row `idx` the current track, from its start, keeping the
+    /// playback state: a stopped player stays stopped and a paused one
+    /// paused.
     PlayAt(usize),
+    /// Play row `idx` from its start, whatever the playback state was: one
+    /// track change, whose snapshot already plays.
+    StartAt(usize),
     /// Move to the next track. A burst of Next and Previous presses moves
     /// once per press and starts only the track it ends on.
     Next,
@@ -1056,43 +1062,62 @@ mod tests {
     }
 
     #[test]
-    fn a_played_queue_changes_track_once_and_its_snapshot_plays() {
-        let (engine, rx) = make_test_engine();
+    fn a_started_queue_or_row_changes_track_once_and_its_snapshot_plays() {
         let old = PathBuf::from("/tmp/old.flac");
         let a = PathBuf::from("/tmp/a.flac");
         let b = PathBuf::from("/tmp/b.flac");
-        engine.command(PlaybackCommand::LoadQueue(vec![old]));
-        let loaded = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
-        assert_eq!(loaded.state, PlaybackState::Stopped);
-
-        engine.command(PlaybackCommand::PlayQueue(vec![a.clone(), b]));
-        let mut changes = Vec::new();
-        let deadline = Instant::now() + Duration::from_millis(300);
-        let snapshot = loop {
-            assert!(Instant::now() < deadline, "no snapshot of the played queue");
-            match rx.recv_timeout(Duration::from_millis(10)) {
-                Ok(PlaybackEvent::TrackChanged {
-                    path,
-                    queue_index,
-                    kind,
-                    track_token,
-                }) => changes.push((path, queue_index, kind, track_token)),
-                Ok(PlaybackEvent::Snapshot(snapshot)) if snapshot.current.as_ref() == Some(&a) => {
-                    break snapshot;
-                }
-                _ => {}
-            }
-        };
-        assert!(
-            matches!(
-                changes.as_slice(),
-                [(path, 0, TrackChangeKind::Manual, token)]
-                    if *path == a && *token == snapshot.track_token
+        let cases = [
+            (
+                vec![old],
+                PlaybackCommand::PlayQueue(vec![a.clone(), b.clone()]),
+                &a,
+                0,
             ),
-            "{changes:?}"
-        );
-        assert_eq!(snapshot.state, PlaybackState::Playing);
-        assert_eq!(snapshot.current_queue_index, Some(0));
+            (
+                vec![a.clone(), b.clone()],
+                PlaybackCommand::StartAt(1),
+                &b,
+                1,
+            ),
+        ];
+        for (queue, start, target, row) in cases {
+            let case = format!("{start:?}");
+            let (engine, rx) = make_test_engine();
+            engine.command(PlaybackCommand::LoadQueue(queue));
+            let loaded = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+            assert_eq!(loaded.state, PlaybackState::Stopped, "{case}");
+
+            engine.command(start);
+            let mut changes = Vec::new();
+            let deadline = Instant::now() + Duration::from_millis(300);
+            let snapshot = loop {
+                assert!(Instant::now() < deadline, "{case}: no snapshot of the row");
+                match rx.recv_timeout(Duration::from_millis(10)) {
+                    Ok(PlaybackEvent::TrackChanged {
+                        path,
+                        queue_index,
+                        kind,
+                        track_token,
+                    }) => changes.push((path, queue_index, kind, track_token)),
+                    Ok(PlaybackEvent::Snapshot(snapshot))
+                        if snapshot.current.as_ref() == Some(target) =>
+                    {
+                        break snapshot;
+                    }
+                    _ => {}
+                }
+            };
+            assert!(
+                matches!(
+                    changes.as_slice(),
+                    [(path, index, TrackChangeKind::Manual, token)]
+                        if path == target && *index == row && *token == snapshot.track_token
+                ),
+                "{case}: {changes:?}"
+            );
+            assert_eq!(snapshot.state, PlaybackState::Playing, "{case}");
+            assert_eq!(snapshot.current_queue_index, Some(row), "{case}");
+        }
     }
 
     #[test]

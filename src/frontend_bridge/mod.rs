@@ -5329,6 +5329,7 @@ mod tests {
                 PlaybackCommand::PlayQueue(tracks) => format!("play {tracks:?}"),
                 PlaybackCommand::AddToQueue(tracks) => format!("add {tracks:?}"),
                 PlaybackCommand::PlayAt(index) => format!("play at {index}"),
+                PlaybackCommand::StartAt(index) => format!("start at {index}"),
                 PlaybackCommand::Play => "play".to_string(),
                 other => format!("{other:?}"),
             })

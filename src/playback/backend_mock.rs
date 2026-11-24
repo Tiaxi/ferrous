@@ -192,6 +192,12 @@ impl MockPlaybackRuntime {
                     self.switch_manually(target.path, target.index);
                 }
             }
+            PlaybackCommand::StartAt(idx) => {
+                if let Some(target) = self.queue.set_current(idx) {
+                    self.switch_manually(target.path, target.index);
+                    self.snapshot.state = PlaybackState::Playing;
+                }
+            }
             PlaybackCommand::Next => self.advance_manually(true),
             PlaybackCommand::Previous => self.advance_manually(false),
             PlaybackCommand::Play => {
