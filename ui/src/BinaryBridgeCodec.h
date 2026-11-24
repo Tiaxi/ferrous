@@ -32,13 +32,17 @@ enum SnapshotSection : quint16 {
     SectionMetadata = 1u << 4,
     SectionSettings = 1u << 5,
     // An error for the user: a u8 ErrorCategory, a u8 ErrorSeverity, the
-    // subject (a file or folder path, or empty), and the message.
+    // subject (a file or folder path, or empty), the message, and the
+    // system's text (or empty), which Recent Issues shows apart.
     SectionError = 1u << 6,
     SectionStopped = 1u << 7,
     SectionLastFm = 1u << 8,
     // The answer to CmdSaveState: the u32 request ID that CmdSaveState
-    // carried, a u8, 1 if the save succeeded, and a string with what to show
-    // the user otherwise.
+    // carried, a u8, 1 if the save succeeded, then what it could not save as
+    // QuitSaveSubject bits, a u8 QuitSaveCause, and a string with the
+    // system's text, one line for each failed save; 0, 0 and empty for a
+    // save that succeeded. Laid out by encode_state_saved_event in
+    // src/frontend_bridge/ffi.rs.
     SectionStateSaved = 1u << 9,
     // The queue change the user can undo, and the rows the latest undo
     // brought back; every snapshot carries it. The layout is described at
@@ -67,6 +71,26 @@ enum ErrorCategory : quint8 {
 enum ErrorSeverity : quint8 {
     ErrorSeverityWarning = 0,
     ErrorSeverityError = 1,
+};
+
+// What a failed save before quitting could not save, a bit each. Mirrors
+// QUIT_SAVE_* in src/frontend_bridge/quit_failure.rs.
+enum QuitSaveSubject : quint8 {
+    QuitSaveSettings = 1u << 0,
+    QuitSaveQueue = 1u << 1,
+    QuitSaveScrobbles = 1u << 2,
+    QuitSaveSubjectsAll = QuitSaveSettings | QuitSaveQueue | QuitSaveScrobbles,
+};
+
+// Why a save before quitting failed. Mirrors SaveCause in
+// src/save_cause.rs.
+enum QuitSaveCause : quint8 {
+    QuitSaveCauseOther = 0,
+    QuitSaveCausePermission = 1,
+    QuitSaveCauseReadOnlyFileSystem = 2,
+    QuitSaveCauseNoSpace = 3,
+    QuitSaveCauseBusy = 4,
+    QuitSaveCauseLast = QuitSaveCauseBusy,
 };
 
 // Queue commands that name rows (CmdPlayAt, CmdSelectQueue, CmdRemoveAt,
@@ -378,6 +402,9 @@ struct DecodedLibraryMeta {
     // The files the scan will have processed when it ends; -1 while the
     // scan cannot tell, as in the first scan of a folder.
     int filesTotal{-1};
+    // Whether the backend has the library worker's library, rather than the
+    // empty one it starts with: until then, no roots does not mean none.
+    bool loaded{false};
     QStringList rootPaths;
     QVector<DecodedLibraryRoot> rootEntries;
     bool viewStatePresent{false};
@@ -415,6 +442,11 @@ struct DecodedMetadata {
     // The tracks on the track's album when the backend knows them surely,
     // or 0.
     int trackTotal{0};
+    // Whether coverPath is a folder image under a name that holds a cover,
+    // such as cover.jpg, by the backend's rule (folder_cover): applying
+    // artwork overwrites it. False for another folder image, which applying
+    // adds a cover file beside, for embedded art and for none.
+    bool coverNamed{false};
 };
 
 // The most tree rows a track is in: a library folder, an artist, an album
@@ -577,10 +609,16 @@ struct DecodedSnapshot {
     quint8 errorCategory{ErrorCategorySystem};
     quint8 errorSeverity{ErrorSeverityError};
     QString errorSubject;
+    // The system's text for the error, shown apart from its message.
+    QString errorDetail;
     bool hasStateSaved{false};
     quint32 stateSaveRequestId{0};
     bool stateSaved{false};
-    QString stateSaveError;
+    // QuitSaveSubject bits, a QuitSaveCause, and the system's text; for a
+    // save that failed.
+    quint8 stateSaveSubjects{0};
+    quint8 stateSaveCause{QuitSaveCauseOther};
+    QString stateSaveDetail;
     bool hasWindowLayout{false};
     WindowLayout windowLayout;
     // The queue's column widths, sent with the window layout.

@@ -28,6 +28,12 @@ QtObject {
     readonly property string currentRowKey: root.selectedSelectionKey.length > 0
         ? root.selectedSelectionKey
         : root.focusSelectionKey
+    // The keys of the current row and the rows that hold it, outermost
+    // first, as they were last shown: when the row leaves the tree, as a
+    // collapse or a new tree takes it, the closest of them still shown
+    // becomes the current row (see keepCurrentRowShown).
+    property var currentRowPath: []
+    onCurrentRowKeyChanged: root.currentRowPath = root.libraryModel.selectionKeyPath(root.currentRowKey)
     property int lastAppliedVersion: -1
     property int pendingVersion: -1
     property bool hasReceivedTreeFrame: false
@@ -621,12 +627,35 @@ QtObject {
     // The model drops selected rows that left the tree; the primary row
     // moves to one that is still selected.
     function syncSelectionToVisibleRows() {
-        if (root.selectedSelectionKey.length === 0
-                || root.isSelectionKeySelected(root.selectedSelectionKey)) {
+        if (root.selectedSelectionKey.length > 0
+                && !root.isSelectionKeySelected(root.selectedSelectionKey)
+                && !root.applyPrimaryFromIndex(root.libraryModel.firstSelectedRow())) {
+            root.clearPrimarySelection()
+        }
+        root.keepCurrentRowShown()
+    }
+
+    // A current row the tree no longer shows, with no row selected, gives
+    // way to the closest row shown that held it, so the keyboard stays on
+    // a row: its album, artist or folder.
+    function keepCurrentRowShown() {
+        const key = root.currentRowKey
+        if (key.length === 0) {
             return
         }
-        if (!root.applyPrimaryFromIndex(root.libraryModel.firstSelectedRow())) {
-            root.clearPrimarySelection()
+        if (root.libraryModel.indexForSelectionKey(key) >= 0) {
+            root.currentRowPath = root.libraryModel.selectionKeyPath(key)
+            return
+        }
+        if (root.selectedSelectionKey.length > 0) {
+            return
+        }
+        const path = root.currentRowPath || []
+        for (let i = path.length - 2; i >= 0; --i) {
+            if (root.libraryModel.indexForSelectionKey(path[i]) >= 0) {
+                root.focusSelectionKey = path[i]
+                return
+            }
         }
     }
 
@@ -1050,7 +1079,9 @@ QtObject {
             root.setSingleSelection(row, rowMap)
             root.centerRow(row)
         } else {
+            root.layOutView()
             root.selectIndex(row)
+            root.settleOnRowGrid(row)
         }
         root.focusViewForNavigation()
     }
@@ -1060,11 +1091,41 @@ QtObject {
         if (!root.view) {
             return
         }
-        if (typeof root.view.forceLayout === "function") {
+        root.layOutView()
+        root.view.positionViewAtIndex(row, ListView.Center)
+        root.settleOnRowGrid(row)
+        root.scheduleLibraryViewStatePersist()
+    }
+
+    function layOutView() {
+        if (root.view && typeof root.view.forceLayout === "function") {
             root.view.forceLayout()
         }
-        root.view.positionViewAtIndex(row, ListView.Center)
-        root.scheduleLibraryViewStatePersist()
+    }
+
+    // Moves a view that a reveal placed to the nearest whole rows that show
+    // `row` whole, as the wheel steps: the reveal cut the row under the
+    // header. At the tree's end, to show its last row, the view stays
+    // where it is, as it cannot go further.
+    function settleOnRowGrid(row) {
+        const height = root.rowHeight()
+        if (!root.view || !(height > 0)) {
+            return
+        }
+        const rowTop = root.rowContentY(row)
+        const rowBottom = rowTop + height
+        const start = isFinite(root.view.originY) ? root.view.originY : 0
+        const end = start + Math.max(0, root.view.contentHeight - root.view.height)
+        let target = rowTop - Math.round((rowTop - root.view.contentY) / height) * height
+        if (target + root.view.height < rowBottom) {
+            target += height
+        }
+        if (target > end) {
+            target -= height
+        }
+        if (target >= start && target <= rowTop && target + root.view.height >= rowBottom) {
+            root.view.contentY = target
+        }
     }
 
     function cancelPendingRestoredViewState() {

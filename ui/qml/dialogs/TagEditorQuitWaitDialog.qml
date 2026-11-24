@@ -8,11 +8,14 @@ import FerrousUi 1.0
 import "../components" as Components
 
 // Shown while quitting waits for a tag save or rename to finish: what it
-// waits for, semibold, beside the spinner, the files under its text, and,
-// once it offers to quit anyway, why, in the secondary colour, as the
-// explanation of a confirmation is, on the files' left edge, so all but
-// the spinner start on one line (the explanation was on the window's
-// edge, under the spinner).
+// waits for, semibold, beside the spinner, and the files it counts under
+// its text. Once it offers to quit anyway, why it offers comes under them
+// and what that costs last, over the buttons (the files stood between the
+// two sentences), each short (as one paragraph they were five lines at
+// 24 pt). All of that is in the
+// secondary colour, as the explanation of a confirmation is, on the files'
+// left edge, so all but the spinner start on one line (the explanation was
+// on the window's edge, under the spinner).
 Components.CompactDialogWindow {
     id: root
 
@@ -80,8 +83,8 @@ Components.CompactDialogWindow {
             wrapMode: Text.WordWrap
             font.weight: Font.DemiBold
             textFormat: Text.PlainText
-            text: I18n.i18ncp("@info:status", "Ferrous quits once the tag editor has written %1 file.",
-                "Ferrous quits once the tag editor has written %1 files.", root.files.length)
+            text: I18n.i18ncp("@info:status", "Ferrous quits once it has written %1 file.",
+                "Ferrous quits once it has written %1 files.", root.files.length)
         }
     }
 
@@ -102,6 +105,19 @@ Components.CompactDialogWindow {
     }
 
     Label {
+        objectName: "tagEditorQuitWaitExplanation"
+        Layout.fillWidth: true
+        Layout.leftMargin: root.textIndent
+        visible: root.offerChoice
+        wrapMode: Text.WordWrap
+        color: root.uiPalette.textSecondary
+        textFormat: Text.PlainText
+        text: I18n.i18nc("@info", "Writing the tag changes is taking longer than expected. No file is left "
+            + "half-written.")
+    }
+
+    // The consequence, beside the decision.
+    Label {
         objectName: "tagEditorQuitWaitMessage"
         Layout.fillWidth: true
         Layout.leftMargin: root.textIndent
@@ -109,9 +125,6 @@ Components.CompactDialogWindow {
         wrapMode: Text.WordWrap
         color: root.uiPalette.textSecondary
         textFormat: Text.PlainText
-        text: I18n.i18nc("@info", "This is taking longer than it should, for example on an unresponsive "
-            + "network share. Quit Anyway stops waiting, and the tag changes not yet "
-            + "written may be lost. Each file keeps its old tags or gets its new ones; "
-            + "none is left half-written.")
+        text: I18n.i18nc("@info", "Quit Anyway stops waiting and may lose changes not yet written.")
     }
 }

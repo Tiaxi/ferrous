@@ -131,7 +131,14 @@ pub type PathRenames = HashMap<PathBuf, PathBuf>;
 
 #[derive(Debug, Clone)]
 pub enum PlaybackCommand {
+    /// Replace the queue with `paths` and open its first row from its
+    /// start, keeping the playback state: a stopped player stays stopped
+    /// and a paused one paused.
     LoadQueue(Vec<PathBuf>),
+    /// Replace the queue with `paths` and play its first row from its
+    /// start, whatever the playback state was: one track change, whose
+    /// snapshot already plays.
+    PlayQueue(Vec<PathBuf>),
     AddToQueue(Vec<PathBuf>),
     /// Replace the paths of renamed files in place. The queue order, current
     /// track, position, and playback state stay the same, and the current
@@ -168,7 +175,13 @@ pub enum PlaybackCommand {
         paths: Vec<PathBuf>,
     },
     ClearQueue,
+    /// Make row `idx` the current track, from its start, keeping the
+    /// playback state: a stopped player stays stopped and a paused one
+    /// paused.
     PlayAt(usize),
+    /// Play row `idx` from its start, whatever the playback state was: one
+    /// track change, whose snapshot already plays.
+    StartAt(usize),
     /// Move to the next track. A burst of Next and Previous presses moves
     /// once per press and starts only the track it ends on.
     Next,
@@ -212,11 +225,15 @@ pub enum TrackChangeKind {
 #[derive(Debug, Clone)]
 pub enum PlaybackEvent {
     Snapshot(PlaybackSnapshot),
+    /// The engine changed track. `snapshot` is its playback once the change
+    /// is applied, in place of a separate [`PlaybackEvent::Snapshot`], so
+    /// the change and the state it plays in arrive as one.
     TrackChanged {
         path: PathBuf,
         queue_index: usize,
         kind: TrackChangeKind,
         track_token: u64,
+        snapshot: PlaybackSnapshot,
     },
     /// A seek was applied; `position` is where it landed. Seeks that are
     /// refused, fail, or are superseded before they land send none. A
@@ -238,6 +255,32 @@ pub enum PlaybackEvent {
     },
     /// A track could not be played, or the engine cannot play at all.
     Error(PlaybackError),
+}
+
+#[cfg(test)]
+impl PlaybackEvent {
+    /// The engine's change to `path` at row `queue_index`, sent with
+    /// `playback` moved to that track as its snapshot.
+    pub(crate) fn track_change(
+        path: PathBuf,
+        queue_index: usize,
+        kind: TrackChangeKind,
+        track_token: u64,
+        playback: &PlaybackSnapshot,
+    ) -> Self {
+        Self::TrackChanged {
+            snapshot: PlaybackSnapshot {
+                current: Some(path.clone()),
+                current_queue_index: Some(queue_index),
+                track_token,
+                ..playback.clone()
+            },
+            path,
+            queue_index,
+            kind,
+            track_token,
+        }
+    }
 }
 
 /// What playback did after an error.
@@ -270,16 +313,15 @@ pub struct PlaybackError {
 }
 
 impl PlaybackError {
-    /// The message shown to the user.
+    /// The message shown to the user: for a track that failed, what failed
+    /// and what playback did then, with why it failed apart from it, in
+    /// [`Self::reason`].
     #[must_use]
     pub fn message(&self) -> String {
         let detail = self.detail.trim().trim_end_matches('.');
         let failure = || match self.path.as_deref().and_then(std::path::Path::file_name) {
-            Some(name) => format!(
-                "Couldn't play \u{201c}{}\u{201d} ({detail})",
-                name.to_string_lossy()
-            ),
-            None => format!("Playback failed ({detail})"),
+            Some(name) => format!("Couldn't play \u{201c}{}\u{201d}", name.to_string_lossy()),
+            None => "Playback failed".to_string(),
         };
         match self.outcome {
             PlaybackErrorOutcome::Skipped => format!("{}; skipped it.", failure()),
@@ -307,6 +349,25 @@ impl PlaybackError {
                 ),
                 None => format!("Can't release a file: {detail}."),
             },
+        }
+    }
+
+    /// Why a track failed, such as "Resource not found", when the message
+    /// leaves it out; empty for the other outcomes, whose messages give it.
+    /// Recent Issues shows it under the message, and the queue and the
+    /// library tell it on the file's rows, without what playback did then,
+    /// which is stale once another track plays.
+    #[must_use]
+    pub fn reason(&self) -> &str {
+        match self.outcome {
+            PlaybackErrorOutcome::Skipped
+            | PlaybackErrorOutcome::Stopped
+            | PlaybackErrorOutcome::StoppedAfterFailures(_) => {
+                self.detail.trim().trim_end_matches('.')
+            }
+            PlaybackErrorOutcome::EngineUnavailable
+            | PlaybackErrorOutcome::NotReleased
+            | PlaybackErrorOutcome::NotResumed => "",
         }
     }
 }
@@ -506,6 +567,18 @@ impl PlaybackEngine {
         }));
     }
 
+    /// An engine that plays to no audio device: the `GStreamer` backend's
+    /// to a fake sink that keeps the playback clock, or the mock.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn on_test_output(
+        analysis_tx: Sender<AnalysisCommand>,
+    ) -> (Self, Receiver<PlaybackEvent>) {
+        Self::spawn(|event_tx, failure, exit_tx| {
+            backend::spawn_engine_on_test_output(analysis_tx, event_tx, failure, exit_tx)
+        })
+    }
+
     /// An engine whose commands go to `tx` instead of a backend.
     #[cfg(test)]
     pub(crate) fn from_command_sender(tx: Sender<PlaybackCommand>) -> Self {
@@ -532,38 +605,55 @@ mod shared_tests {
 
     #[test]
     fn playback_errors_name_the_track_and_what_playback_did() {
-        let error = |path: Option<&str>, detail: &str, outcome| {
-            PlaybackError {
-                path: path.map(PathBuf::from),
-                detail: detail.to_string(),
-                outcome,
-            }
-            .message()
+        let failed = |path: Option<&str>, detail: &str, outcome| PlaybackError {
+            path: path.map(PathBuf::from),
+            detail: detail.to_string(),
+            outcome,
         };
-        assert_eq!(
-            error(
-                Some("/music/b.flac"),
-                "Resource not found.",
-                PlaybackErrorOutcome::Skipped
-            ),
-            "Couldn't play \u{201c}b.flac\u{201d} (Resource not found); skipped it."
+        let error =
+            |path: Option<&str>, detail: &str, outcome| failed(path, detail, outcome).message();
+        // A track that failed: what failed and what playback did then, with
+        // why it failed apart, for the file's rows, where what playback did
+        // is stale once another track plays.
+        let skipped = failed(
+            Some("/music/b.flac"),
+            "Resource not found.",
+            PlaybackErrorOutcome::Skipped,
         );
         assert_eq!(
-            error(
-                Some("/music/b.flac"),
-                "missing GStreamer plugin: FLAC decoder",
-                PlaybackErrorOutcome::Stopped
-            ),
-            "Couldn't play \u{201c}b.flac\u{201d} (missing GStreamer plugin: FLAC decoder); \
-             playback stopped."
+            skipped.message(),
+            "Couldn't play \u{201c}b.flac\u{201d}; skipped it."
+        );
+        assert_eq!(skipped.reason(), "Resource not found");
+        let stopped = failed(
+            Some("/music/b.flac"),
+            " missing GStreamer plugin: FLAC decoder ",
+            PlaybackErrorOutcome::Stopped,
         );
         assert_eq!(
-            error(
+            stopped.message(),
+            "Couldn't play \u{201c}b.flac\u{201d}; playback stopped."
+        );
+        assert_eq!(stopped.reason(), "missing GStreamer plugin: FLAC decoder");
+        let in_a_row = failed(
+            None,
+            "decoder failed",
+            PlaybackErrorOutcome::StoppedAfterFailures(5),
+        );
+        assert_eq!(
+            in_a_row.message(),
+            "Playback failed; playback stopped after 5 tracks in a row failed."
+        );
+        assert_eq!(in_a_row.reason(), "decoder failed");
+        // The other outcomes give why in their messages.
+        assert_eq!(
+            failed(
                 None,
-                "decoder failed",
-                PlaybackErrorOutcome::StoppedAfterFailures(5)
-            ),
-            "Playback failed (decoder failed); playback stopped after 5 tracks in a row failed."
+                "no audio output",
+                PlaybackErrorOutcome::EngineUnavailable
+            )
+            .reason(),
+            ""
         );
         assert_eq!(
             error(
@@ -762,7 +852,10 @@ mod tests {
         let deadline = Instant::now() + timeout;
         let mut last = None;
         while Instant::now() < deadline {
-            if let Ok(PlaybackEvent::Snapshot(s)) = rx.recv_timeout(Duration::from_millis(10)) {
+            if let Ok(
+                PlaybackEvent::Snapshot(s) | PlaybackEvent::TrackChanged { snapshot: s, .. },
+            ) = rx.recv_timeout(Duration::from_millis(10))
+            {
                 last = Some(s);
             }
         }
@@ -1014,6 +1107,71 @@ mod tests {
     }
 
     #[test]
+    fn a_started_queue_or_row_changes_track_once_and_its_snapshot_plays() {
+        let old = PathBuf::from("/tmp/old.flac");
+        let a = PathBuf::from("/tmp/a.flac");
+        let b = PathBuf::from("/tmp/b.flac");
+        let cases = [
+            (
+                vec![old],
+                PlaybackCommand::PlayQueue(vec![a.clone(), b.clone()]),
+                &a,
+                0,
+            ),
+            (
+                vec![a.clone(), b.clone()],
+                PlaybackCommand::StartAt(1),
+                &b,
+                1,
+            ),
+        ];
+        for (queue, start, target, row) in cases {
+            let case = format!("{start:?}");
+            let (engine, rx) = make_test_engine();
+            engine.command(PlaybackCommand::LoadQueue(queue));
+            let loaded = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+            assert_eq!(loaded.state, PlaybackState::Stopped, "{case}");
+
+            engine.command(start);
+            let mut changes = Vec::new();
+            let deadline = Instant::now() + Duration::from_millis(300);
+            let snapshot = loop {
+                assert!(Instant::now() < deadline, "{case}: no snapshot of the row");
+                match rx.recv_timeout(Duration::from_millis(10)) {
+                    Ok(PlaybackEvent::TrackChanged {
+                        path,
+                        queue_index,
+                        kind,
+                        track_token,
+                        snapshot,
+                    }) => {
+                        changes.push((path, queue_index, kind, track_token));
+                        if snapshot.current.as_ref() == Some(target) {
+                            break snapshot;
+                        }
+                    }
+                    Ok(PlaybackEvent::Snapshot(snapshot))
+                        if snapshot.current.as_ref() == Some(target) =>
+                    {
+                        break snapshot;
+                    }
+                    _ => {}
+                }
+            };
+            assert!(
+                matches!(
+                    changes.as_slice(),
+                    [(path, index, TrackChangeKind::Manual, token)]
+                        if path == target && *index == row && *token == snapshot.track_token
+                ),
+                "{case}: {changes:?}"
+            );
+            assert_eq!(snapshot.state, PlaybackState::Playing, "{case}");
+            assert_eq!(snapshot.current_queue_index, Some(row), "{case}");
+        }
+    }
+
+    #[test]
     fn seek_only_advances_to_next_track_at_duration_boundary() {
         let (analysis_tx, _analysis_rx) = unbounded();
 
@@ -1052,12 +1210,8 @@ mod tests {
         let deadline = Instant::now() + Duration::from_millis(300);
         let mut observed = None;
         while Instant::now() < deadline {
-            if let Ok(PlaybackEvent::TrackChanged {
-                path,
-                queue_index: _,
-                kind,
-                track_token: _,
-            }) = rx.recv_timeout(Duration::from_millis(10))
+            if let Ok(PlaybackEvent::TrackChanged { path, kind, .. }) =
+                rx.recv_timeout(Duration::from_millis(10))
             {
                 if path == b && matches!(kind, TrackChangeKind::Gapless) {
                     observed = Some((path, kind));
@@ -1331,7 +1485,10 @@ mod tests {
             let event = rx
                 .recv_timeout(Duration::from_secs(10))
                 .expect("the engine answers every command");
-            if matches!(event, PlaybackEvent::Snapshot(_)) {
+            if matches!(
+                event,
+                PlaybackEvent::Snapshot(_) | PlaybackEvent::TrackChanged { .. }
+            ) {
                 unanswered -= 1;
             }
             events.push(event);
@@ -1348,6 +1505,7 @@ mod tests {
                     queue_index,
                     kind,
                     track_token,
+                    ..
                 } => Some((
                     path.clone(),
                     *queue_index,
@@ -1368,7 +1526,8 @@ mod tests {
             .iter()
             .rev()
             .find_map(|event| match event {
-                PlaybackEvent::Snapshot(snapshot) => Some(snapshot.clone()),
+                PlaybackEvent::Snapshot(snapshot)
+                | PlaybackEvent::TrackChanged { snapshot, .. } => Some(snapshot.clone()),
                 _ => None,
             })
             .expect("snapshot")

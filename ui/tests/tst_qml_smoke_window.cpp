@@ -67,6 +67,10 @@ private slots:
     void drawsOffscreenUnlessAPlatformIsChosen();
     void drawingWritesNoShaderCache();
     void nowPlayingFollowsBridgeClientsSnapshots();
+    void theQueuesMessageAndTotalsChangeWithItsRows();
+    void theQueueRowsStateMarkChangesWithItsSnapshot();
+    void theEmptyQueuesHeaderKeepsItsColumns_data();
+    void theEmptyQueuesHeaderKeepsItsColumns();
     void aBackendThatCannotStartShowsWhyInRecentErrorsAndTheStatusBar();
 };
 
@@ -398,6 +402,10 @@ Item {
 
     ListModel {
         id: sidebarModel
+        // LibraryTreeModel's, for the library's Collapse All,
+        property bool hasExpandedRows: false
+        // and for the view's current row: it has none.
+        function indexForSelectionKey(selectionKey) { return -1 }
     }
 
     Components.UiPalette {
@@ -1463,16 +1471,17 @@ void checkLinesKeptUntilTheNextTracksAreKnown(const NowPlayingWindow &ui) {
 
 // A file without tags, as BridgeClient tells it, with its file name for a
 // title: its details line says what the file is, its container and its
-// length, "FLAC · 0:40", in the details' place and style, under the wide
-// cover and in the large-font header, where the album's row, which the
-// file has nothing for, is not kept, so the details follow the folder
-// 4 px under it; the panel's height and the library's place are a tagged
-// track's (at 24 pt the card stood some 100 px empty under "Unsorted").
+// length, "FLAC · 0:40", in the details' style: under the wide cover in
+// the details' place, and in the large-font header in the album's row,
+// which the file has nothing for, so the facts follow the folder 4 px under
+// it and the spare row is at the foot; the panel's height and the
+// library's place are a tagged track's (at 24 pt the card stood some 100 px
+// empty under "Unsorted").
 // The bridge's format label is from the file's extension, and its length
 // from the playback.
 void checkTaglessFileFacts(const NowPlayingWindow &ui, bool large) {
     QQuickItem *header = ui.item("libraryHeader");
-    QQuickItem *details = ui.item(large ? "nowPlayingNarrowDetails" : "nowPlayingDetails");
+    QQuickItem *details = ui.item(large ? "nowPlayingNarrowAlbum" : "nowPlayingDetails");
     QQuickItem *folder = ui.item(large ? "nowPlayingNarrowArtist" : "nowPlayingArtistAlbum");
     QObject *palette = qvariant_cast<QObject *>(ui.window->property("uiPalette"));
     QVERIFY(header != nullptr && details != nullptr && folder != nullptr && palette != nullptr);
@@ -1523,7 +1532,7 @@ void checkTaglessFileFacts(const NowPlayingWindow &ui, bool large) {
     QTRY_COMPARE(ui.panel->height(), panelHeight);
     QTRY_COMPARE(sceneRectOf(header).top(), headerTop);
     if (large) {
-        // No album row: the details 4 px under the folder.
+        // In the album's row: the facts 4 px under the folder.
         const QRectF folderRect = folder->mapRectToScene(folder->boundingRect());
         const QRectF detailsRect = details->mapRectToScene(details->boundingRect());
         QVERIFY2(std::abs(detailsRect.top() - (folderRect.bottom() + 4)) <= 1.0,
@@ -1671,6 +1680,264 @@ void WindowSmokeTest::nowPlayingFollowsBridgeClientsSnapshots() {
     checkTaglessFileFacts(ui, true);
 }
 
+// The queue's empty message and its header's totals change in the frame in
+// which BridgeClient's rows do. They followed the coalesced snapshot
+// notification, up to 33 ms behind the rows: "The queue is empty" drew over
+// the first tracks added to an empty queue, a cleared queue showed an empty
+// list without it, and the totals lagged the rows.
+void WindowSmokeTest::theQueuesMessageAndTotalsChangeWithItsRows() {
+    BridgeClient bridge;
+    detachFromTheBackend(bridge);
+    const NowPlayingWindow ui(bridge, QSize(1200, 800));
+    QVERIFY2(ui.window != nullptr, "Main.qml failed to show");
+    QQuickItem *message = ui.item("queueEmptyMessage");
+    QQuickItem *view = ui.item("playlistView");
+    QQuickItem *header = ui.item("queueRegionHeader");
+    QVERIFY(message != nullptr && view != nullptr && header != nullptr);
+
+    // A loaded library with a folder, and nothing queued.
+    BinaryBridgeCodec::DecodedSnapshot empty;
+    empty.library.present = true;
+    empty.library.loaded = true;
+    empty.library.rootCount = 1;
+    empty.queue.present = true;
+    empty.queue.kind = BinaryBridgeCodec::QueueFull;
+    empty.queue.revision = 1;
+    QVERIFY(ui.deliver(empty));
+    QTRY_VERIFY(message->isVisible());
+    QCOMPARE(header->property("totals").toString(), QString());
+
+    // A grab draws the next frame without letting the timers run.
+    const auto drawFrame = [&ui]() { (void)ui.window->grabWindow(); };
+
+    BinaryBridgeCodec::DecodedSnapshot added;
+    added.queue.present = true;
+    added.queue.kind = BinaryBridgeCodec::QueueFull;
+    added.queue.revision = 2;
+    added.queue.len = 3;
+    added.queue.totalDurationSeconds = 180.0;
+    for (int i = 0; i < 3; ++i) {
+        BinaryBridgeCodec::DecodedQueueTrack track;
+        track.title = QStringLiteral("Track %1").arg(i + 1);
+        track.path = QStringLiteral("/music/%1.flac").arg(i + 1);
+        track.lengthSeconds = 60.0f;
+        added.queue.tracks.push_back(track);
+    }
+    ui.deliver(added);
+    drawFrame();
+    QCOMPARE(view->property("count").toInt(), 3);
+    QVERIFY(!message->isVisible());
+    QVERIFY2(header->property("totals").toString().startsWith(QStringLiteral("3 tracks")),
+             qPrintable(header->property("totals").toString()));
+    QVERIFY2(header->property("totals").toString().endsWith(QStringLiteral("3:00")),
+             qPrintable(header->property("totals").toString()));
+
+    // Clear Queue.
+    BinaryBridgeCodec::DecodedSnapshot cleared;
+    cleared.queue.present = true;
+    cleared.queue.kind = BinaryBridgeCodec::QueueDelta;
+    cleared.queue.baseRevision = 2;
+    cleared.queue.revision = 3;
+    cleared.queue.len = 0;
+    BinaryBridgeCodec::DecodedQueueOp removeAll;
+    removeAll.type = BinaryBridgeCodec::QueueOpRemove;
+    removeAll.index = 0;
+    removeAll.count = 3;
+    cleared.queue.ops.push_back(removeAll);
+    ui.deliver(cleared);
+    drawFrame();
+    QCOMPARE(view->property("count").toInt(), 0);
+    QVERIFY(message->isVisible());
+    QCOMPARE(header->property("totals").toString(), QString());
+}
+
+// A queue row's state mark (play, pause or stop) is drawn from the
+// snapshot that brings the row, in the frame in which the row shows, and a
+// row that moves carries the mark with the playing track in its frame. The
+// rows were made before the playing row was told, which followed with the
+// queued trackIdentityChanged: on First Play from idle the first row drew a
+// frame without its mark, and a track put before the playing one left the
+// mark on the row it took.
+void WindowSmokeTest::theQueueRowsStateMarkChangesWithItsSnapshot() {
+    BridgeClient bridge;
+    detachFromTheBackend(bridge);
+    const NowPlayingWindow ui(bridge, QSize(1200, 800));
+    QVERIFY2(ui.window != nullptr, "Main.qml failed to show");
+    QQuickItem *view = ui.item("playlistView");
+    QVERIFY(view != nullptr);
+
+    BinaryBridgeCodec::DecodedSnapshot empty;
+    empty.library.present = true;
+    empty.library.loaded = true;
+    empty.library.rootCount = 1;
+    empty.queue.present = true;
+    empty.queue.kind = BinaryBridgeCodec::QueueFull;
+    empty.queue.revision = 1;
+    empty.playback.present = true;
+    QVERIFY(ui.deliver(empty));
+    QTRY_VERIFY(ui.item("queueEmptyMessage")->isVisible());
+
+    // A grab draws the next frame without letting queued notifications or
+    // timers run.
+    const auto drawFrame = [&ui]() { (void)ui.window->grabWindow(); };
+    const auto markAt = [view](int index) -> QString {
+        QQuickItem *row = nullptr;
+        QMetaObject::invokeMethod(view, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, row), Q_ARG(int, index));
+        QQuickItem *mark = row != nullptr ? itemNamed(row, QStringLiteral("queueRowState")) : nullptr;
+        if (mark == nullptr) {
+            return QStringLiteral("<no row>");
+        }
+        return mark->isVisible() ? mark->property("glyph").toString() : QString();
+    };
+    const auto pathOf = [](int i) { return QStringLiteral("/music/%1.flac").arg(i); };
+    const auto track = [&pathOf](int i) {
+        BinaryBridgeCodec::DecodedQueueTrack row;
+        row.title = QStringLiteral("Track %1").arg(i);
+        row.path = pathOf(i);
+        row.lengthSeconds = 60.0f;
+        return row;
+    };
+
+    // The rows, their playing row and its state in one snapshot: the play
+    // mark in the rows' first frame.
+    BinaryBridgeCodec::DecodedSnapshot started;
+    started.queue.present = true;
+    started.queue.kind = BinaryBridgeCodec::QueueFull;
+    started.queue.revision = 2;
+    started.queue.len = 3;
+    for (int i = 1; i <= 3; ++i) {
+        started.queue.tracks.push_back(track(i));
+    }
+    started.playback.present = true;
+    started.playback.state = 1;
+    started.playback.currentPath = pathOf(1);
+    started.playback.currentQueueIndex = 0;
+    started.playback.trackToken = 1;
+    ui.deliver(started);
+    drawFrame();
+    QCOMPARE(view->property("count").toInt(), 3);
+    QCOMPARE(markAt(0), QStringLiteral("media-playback-start"));
+    QCOMPARE(markAt(1), QString());
+
+    // A track put before the playing one moves its row down, in the
+    // snapshot that says where it plays now: the mark goes with it in the
+    // same frame, and the row it left has none.
+    BinaryBridgeCodec::DecodedSnapshot inserted;
+    inserted.queue.present = true;
+    inserted.queue.kind = BinaryBridgeCodec::QueueDelta;
+    inserted.queue.baseRevision = 2;
+    inserted.queue.revision = 3;
+    inserted.queue.len = 4;
+    BinaryBridgeCodec::DecodedQueueOp insert;
+    insert.type = BinaryBridgeCodec::QueueOpInsert;
+    insert.index = 0;
+    insert.tracks.push_back(track(4));
+    inserted.queue.ops.push_back(insert);
+    inserted.playback = started.playback;
+    inserted.playback.currentQueueIndex = 1;
+    ui.deliver(inserted);
+    drawFrame();
+    QCOMPARE(view->property("count").toInt(), 4);
+    QCOMPARE(markAt(0), QString());
+    QCOMPARE(markAt(1), QStringLiteral("media-playback-start"));
+}
+
+void WindowSmokeTest::theEmptyQueuesHeaderKeepsItsColumns_data() {
+    QTest::addColumn<int>("rootCount");
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("first run") << 0 << 10.0;
+    QTest::newRow("idle") << 1 << 10.0;
+    QTest::newRow("idle, 24 pt") << 1 << 24.0;
+}
+
+// An empty queue's header, at the first run and idle, has the column labels
+// and dividers of a full one, so "Queue" heads its column as in every other
+// state, and only its count is left out. The labels and dividers came only
+// with the first track, so "Queue" read as a lone title over nothing. The
+// first tracks change nothing in the header but the count, in the frame
+// that draws them.
+void WindowSmokeTest::theEmptyQueuesHeaderKeepsItsColumns() {
+    QFETCH(int, rootCount);
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    BridgeClient bridge;
+    detachFromTheBackend(bridge);
+    const NowPlayingWindow ui(bridge, QSize(1600, 900));
+    QVERIFY2(ui.window != nullptr, "Main.qml failed to show");
+    QQuickItem *header = ui.item("queueRegionHeader");
+    QVERIFY(header != nullptr);
+
+    BinaryBridgeCodec::DecodedSnapshot empty;
+    empty.library.present = true;
+    empty.library.loaded = true;
+    empty.library.rootCount = rootCount;
+    empty.queue.present = true;
+    empty.queue.kind = BinaryBridgeCodec::QueueFull;
+    empty.queue.revision = 1;
+    QVERIFY(ui.deliver(empty));
+    QTRY_VERIFY(ui.item(rootCount == 0 ? "queueFirstRunMessage" : "queueEmptyMessage")->isVisible());
+    QCOMPARE(header->property("totals").toString(), QString());
+
+    // "Queue", each label, and each column's divider and handle: whether
+    // shown and where, and whether Tab stops on the handle.
+    const auto columns = [&ui, header]() {
+        const auto describe = [](const QQuickItem *item) {
+            return item == nullptr ? QStringLiteral("missing")
+                                   : QStringLiteral("%1 %2 %3").arg(item->isVisible()).arg(item->opacity()).arg(
+                                         describeRect(sceneRectOf(item)));
+        };
+        QStringList shown{describe(header->findChild<QQuickItem *>(QStringLiteral("regionHeaderTitle")))};
+        for (const QByteArray &column : {QByteArray("artist"), QByteArray("album"), QByteArray("length")}) {
+            QQuickItem *handle = ui.item(("queueColumnHandle_" + column).constData());
+            shown << column + ' ' + describe(ui.item(("queueHeader_" + column).constData()))
+                  << describe(handle ? handle->findChild<QQuickItem *>(QStringLiteral("queueColumnHandleRest"))
+                                     : nullptr)
+                  << QString::number(handle != nullptr && handle->activeFocusOnTab());
+        }
+        return shown;
+    };
+    const QStringList before = columns();
+    for (const QByteArray &column : {QByteArray("artist"), QByteArray("album"), QByteArray("length")}) {
+        QQuickItem *label = ui.item(("queueHeader_" + column).constData());
+        QQuickItem *handle = ui.item(("queueColumnHandle_" + column).constData());
+        QVERIFY2(label && handle, column.constData());
+        // A narrow queue drops Album, and at a large font Artist.
+        if (column != "length" && !label->isVisible()) {
+            QVERIFY2(!handle->activeFocusOnTab(), column.constData());
+            continue;
+        }
+        QVERIFY2(label->isVisible() && label->opacity() == 1.0, column.constData());
+        QVERIFY2(handle->activeFocusOnTab(), column.constData());
+        QVERIFY2(handle->findChild<QQuickItem *>(QStringLiteral("queueColumnHandleRest"))->isVisible(),
+                 column.constData());
+    }
+
+    // The first tracks: in the frame that draws them, the count, and
+    // nothing else in the header has changed.
+    BinaryBridgeCodec::DecodedSnapshot added;
+    added.queue.present = true;
+    added.queue.kind = BinaryBridgeCodec::QueueFull;
+    added.queue.revision = 2;
+    added.queue.len = 3;
+    added.queue.totalDurationSeconds = 180.0;
+    for (int i = 0; i < 3; ++i) {
+        BinaryBridgeCodec::DecodedQueueTrack track;
+        track.title = QStringLiteral("Track %1").arg(i + 1);
+        track.path = QStringLiteral("/music/%1.flac").arg(i + 1);
+        track.lengthSeconds = 60.0f;
+        added.queue.tracks.push_back(track);
+    }
+    ui.deliver(added);
+    (void)ui.window->grabWindow();
+    QCOMPARE(ui.item("playlistView")->property("count").toInt(), 3);
+    QVERIFY2(header->property("totals").toString().startsWith(QStringLiteral("3 tracks")),
+             qPrintable(header->property("totals").toString()));
+    QCOMPARE(columns(), before);
+}
+
+// A backend that could not start fails before the window is made: the
+// window shows it as it shows one that stopped later.
+
 // A backend that could not start fails before the window is made: the
 // window shows it as it shows one that stopped later.
 void WindowSmokeTest::aBackendThatCannotStartShowsWhyInRecentErrorsAndTheStatusBar() {
@@ -1716,8 +1983,10 @@ void WindowSmokeTest::aBackendThatCannotStartShowsWhyInRecentErrorsAndTheStatusB
     QVERIFY(stopped != nullptr && notRunning != nullptr);
     QTRY_VERIFY(stopped->isVisible());
     QVERIFY(!notRunning->isVisible());
-    QCOMPARE(evaluateOn(stopped, QStringLiteral("ToolTip.text")).toString(), failure);
-    QCOMPARE(evaluateOn(stopped, QStringLiteral("Accessible.description")).toString(), failure);
+    auto *engineError = window->findChild<QQuickItem *>(QStringLiteral("statusBarEngineError"));
+    QVERIFY(engineError != nullptr);
+    QCOMPARE(engineError->property("toolTipText").toString(), failure);
+    QCOMPARE(evaluateOn(engineError, QStringLiteral("Accessible.description")).toString(), failure);
     auto *transportBar = window->findChild<QQuickItem *>(QStringLiteral("transportBar"));
     QVERIFY(transportBar != nullptr);
     QVERIFY(!transportBar->isEnabled());

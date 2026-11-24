@@ -196,6 +196,24 @@ Shown inspectWindows(QQuickWindow *main) {
             items << item;
         }
     }
+    // A popup of a list's row, such as an unreadable row's reason: the
+    // row's own child, not the window's, as delegates are the view's.
+    for (const QPointer<QQuickItem> &item : std::as_const(items)) {
+        if (item.isNull()) {
+            continue;
+        }
+        const auto children = item->findChildren<QObject *>(Qt::FindDirectChildrenOnly);
+        for (QObject *child : children) {
+            const auto popups = child->inherits("QQuickPopup")
+                ? QList<QObject *>{child}
+                : child->findChildren<QObject *>(Qt::FindDirectChildrenOnly);
+            for (QObject *popup : popups) {
+                if (popup->inherits("QQuickPopup") && !objects.contains(popup)) {
+                    inspect(qvariant_cast<QQuickItem *>(popup->property("contentItem")), shown);
+                }
+            }
+        }
+    }
     for (const QPointer<QQuickItem> &item : std::as_const(items)) {
         if (item.isNull() || qmlContext(item) == nullptr
             || idsIn(evaluateOn(item, QStringLiteral("ToolTip.text")).toString()).isEmpty()) {
@@ -264,9 +282,10 @@ struct RecordedWindow {
         return bridge != nullptr;
     }
     QObject *child(const char *name) const { return window->findChild<QObject *>(QString::fromLatin1(name)); }
+    // The message is the system's text too, so that its line is checked.
     void report(int category, const QString &subject, const QString &message) const {
         QMetaObject::invokeMethod(bridge, "bridgeError", Q_ARG(QString, message), Q_ARG(int, category),
-                                  Q_ARG(int, 1), Q_ARG(QString, subject));
+                                  Q_ARG(int, 1), Q_ARG(QString, subject), Q_ARG(QString, message));
     }
     QString check(const QStringList &expected) {
         QTest::qWait(100);
@@ -474,15 +493,21 @@ void PlainTextSmokeTest::theMainWindowShowsMarkupLiterally() {
     ui.bridge->setProperty("lastFmScrobbleState", 4);
     ui.bridge->setProperty("lastFmScrobbleMessage", hostile(QStringLiteral("scrobbleerror")));
     ui.report(1, path, hostile(QStringLiteral("unreadable")));
-    ui.bridge->setProperty("backendFailure", hostile(QStringLiteral("backendfailure")));
-
+    // Last.fm's reason, while the engine runs: the Last.fm slot, whose
+    // scrobbler runs in the engine, shows only then.
+    ui.bridge->setProperty("connected", true);
     QTRY_COMPARE(ui.libraryModel.rowCount(), 2);
+    const QString scrobble = ui.check({QStringLiteral("scrobbleerror")});
+    QVERIFY2(scrobble.isEmpty(), qPrintable(scrobble));
+
+    // The rest once the engine has stopped, and says why.
+    ui.bridge->setProperty("backendFailure", hostile(QStringLiteral("backendfailure")));
     const QString wrong = ui.check({
         QStringLiteral("queuetitle"), QStringLiteral("queueartist"), QStringLiteral("queuealbum"),
         QStringLiteral("queuelength"), QStringLiteral("libraryartist"), QStringLiteral("libraryalbum"),
         QStringLiteral("nowtitle"), QStringLiteral("nowartist"), QStringLiteral("nowalbum"),
-        QStringLiteral("nowformat"), QStringLiteral("scanfolder"), QStringLiteral("scrobbleerror"),
-        QStringLiteral("unreadable"), QStringLiteral("backendfailure")});
+        QStringLiteral("nowformat"), QStringLiteral("scanfolder"), QStringLiteral("unreadable"),
+        QStringLiteral("backendfailure")});
     QVERIFY2(wrong.isEmpty(), qPrintable(wrong));
 }
 
@@ -545,6 +570,9 @@ void PlainTextSmokeTest::theDialogsShowMarkupLiterally() {
 
     confirm->setProperty("message", hostile(QStringLiteral("confirmmessage")));
     confirm->setProperty("details", hostile(QStringLiteral("confirmdetails")));
+    confirm->setProperty("suggestion", QVariantMap{
+        {QStringLiteral("albumTitle"), hostile(QStringLiteral("chosentitle"))},
+        {QStringLiteral("artistName"), hostile(QStringLiteral("chosenartist"))}});
     confirm->setProperty("path", QStringLiteral("/fixture/") + hostileName(QStringLiteral("confirmpath")));
 
     const QString wrong = ui.check({
@@ -552,7 +580,8 @@ void PlainTextSmokeTest::theDialogsShowMarkupLiterally() {
         QStringLiteral("lastfmuser"), QStringLiteral("lastfmstatus"), QStringLiteral("issuemessage"),
         QStringLiteral("itunesasset"),
         QStringLiteral("itunesstatus"), QStringLiteral("itunesalbum"), QStringLiteral("confirmmessage"),
-        QStringLiteral("confirmdetails"), QStringLiteral("confirmpath")});
+        QStringLiteral("confirmdetails"), QStringLiteral("confirmpath"),
+        QStringLiteral("chosentitle"), QStringLiteral("chosenartist")});
     QVERIFY2(wrong.isEmpty(), qPrintable(wrong));
 }
 
@@ -652,6 +681,10 @@ void PlainTextSmokeTest::searchShowsMarkupLiterally() {
     for (QQuickItem *item : std::as_const(items)) {
         if (item->metaObject()->indexOfMethod("toolTipText()") >= 0 && item->property("isResult").toBool()) {
             dialog->setProperty("hoveredResultRow", QVariant::fromValue(item));
+            // The tooltip takes a row's text as the pointer rests on it.
+            QVariant tip;
+            QVERIFY(QMetaObject::invokeMethod(item, "toolTipText", Q_RETURN_ARG(QVariant, tip)));
+            dialog->setProperty("toolTipText", tip);
         }
     }
     QString wrong = ui.check({QStringLiteral("searchtitle"), QStringLiteral("searchartist"),
@@ -838,6 +871,9 @@ void PlainTextSmokeTest::everyTextItemStatesASafeFormat() {
     static const QHash<QString, QStringList> intendedMarkup{
         // The menus' own titles, with the mnemonic underlined while Alt is held.
         {QStringLiteral("components/AppMenuBarItem.qml"), {QStringLiteral("Text.AutoText")}},
+        // The menus' items, the same; Kirigami's mnemonic label escapes the words
+        // (tst_ui_menus' menuItemGlyphsGrowWithTheFont).
+        {QStringLiteral("components/AppMenuItem.qml"), {QStringLiteral("Text.StyledText")}},
         // The forms' own labels, underlined in the same way.
         {QStringLiteral("preferences/PreferencesForm.qml"), {QStringLiteral("Text.AutoText")}},
         // KDE's description, a message of the app's own with no arguments.

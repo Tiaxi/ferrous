@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import QtQuick 2.15
-import QtQuick.Controls 2.15
 import FerrousUi 1.0
 import "." as Components
 import "../logic/ColorUtils.js" as ColorUtils
 
-// The controls of a viewer, as flat 24 px tool buttons 4 px apart on the
-// window's colours, or with `plotColors` on the plot's: a quiet zoom readout
-// and Reset while the view is zoomed, a button to Recent Issues while there
+// The controls of a viewer, as flat 24 px tool buttons (or a title strip's
+// size, `viewerButtonSize` with `viewerIconSize` glyphs) 4 px apart on the
+// window's colours, or with `plotColors` on the plot's: "Not following" while
+// the visualization's view is moved away from the playhead, a quiet zoom readout
+// and Reset's glyph while the view is zoomed, a button to Recent Issues while there
 // are new ones (the viewer covers the status bar), the viewer's own buttons
 // (declared inside, which take `plotColors` themselves) and Close.
 //
@@ -25,73 +26,124 @@ Item {
     // The view's zoom, 1 at the default; Reset calls resetView.
     property real zoomLevel: 1.0
     property var resetView: null
+    // Whether the view does not follow the playhead, as the plot's zoom
+    // plate says, and Follow Playhead's shortcut for that.
+    property bool noticeShown: false
+    property string followShortcut: ""
     property string resetToolTip: I18n.i18nc("@info:tooltip", "Reset Zoom")
     property var errorController: null
+    // The readout's size: the small font's, or a title strip's own.
+    property real readoutPointSize: root.uiPalette.smallPointSize
     property string closeButtonName: "viewerCloseButton"
     // The viewer's own button before Close, if it has one.
     default property alias viewerControls: viewerControlsRow.data
     // On the windowed viewer's corner plate, the zoom is set off from the
-    // viewer's controls by a 1 px divider with the controls' 4 px either
-    // side, as on the visualization viewer's.
+    // viewer's controls by a 1 px divider, the controls' 4 px after the
+    // zoom and `dividerClearance` before the viewer's own, as on the
+    // visualization viewer's.
     property bool dividers: false
-    // The viewer's own controls set off from Close by a 1 px divider, with
-    // the controls' 4 px either side: the visualization viewer's mode switch
-    // in its title strip, a choice of two, beside the button that closes it.
+    // The viewer's own controls set off from Close by a 1 px divider,
+    // `dividerClearance` after them and the controls' 4 px before Close:
+    // the visualization viewer's mode switch in its title strip, a choice
+    // of two, beside the button that closes it.
     property bool closeDivided: false
+    // Close, unless the viewer has none here, as with its strip turned off.
+    property bool closeShown: true
+    // Its buttons' size and their glyphs', which the viewer's own buttons
+    // declared inside take too (ViewerToolButton): the design's small tool
+    // button, or a title strip's, on its larger type.
+    property int viewerButtonSize: root.uiPalette.toolButtonSize
+    property int viewerIconSize: root.uiPalette.toolIconSize
+    // What a plate under the controls has around them: the readout's text
+    // and the dividers are 6 px in from a plate's edge, as on the plot's.
+    property real platePadding: 2
 
     readonly property bool zoomed: Math.abs(root.zoomLevel - 1.0) > 0.001
     readonly property int unseenIssueCount: root.errorController ? root.errorController.unseenCount : 0
+    // Whether an error, rather than warnings alone, is among them.
+    readonly property bool unseenIssuesIncludeError: root.errorController
+        ? (Number(root.errorController.unseenErrorCount) || 0) > 0
+        : false
     readonly property real spacing: 4
+    // Between a divider and the viewer's own controls, whose chosen segment
+    // has an edge of its own: 8 px, so that edge never stands 4 px from
+    // the divider's line, and a hovered button's fill never meets it.
+    readonly property real dividerClearance: 8
     // Which items take room, whatever the auto-hide does.
     readonly property bool readoutShown: root.zoomed
     readonly property bool resetShown: root.zoomed && root.resetView !== null
     readonly property bool issuesShown: root.unseenIssueCount > 0
     readonly property bool viewerControlsShown: viewerControlsRow.implicitWidth > 0
 
-    implicitWidth: closeButton.x + closeButton.width
-    implicitHeight: root.uiPalette.toolButtonSize
+    implicitWidth: root.closeShown ? closeButton.x + closeButton.width
+                                   : viewerControlsRow.x + viewerControlsRow.implicitWidth
+    implicitHeight: root.viewerButtonSize
+
+    // First, so that it grows the controls to the left.
+    Components.FollowNotice {
+        id: notice
+        objectName: "viewerFollowNotice"
+        x: 0
+        visible: root.noticeShown
+        height: root.viewerButtonSize
+        uiPalette: root.uiPalette
+        plotColors: root.plotColors
+        pointSize: root.readoutPointSize
+        shortcut: root.followShortcut
+        divided: root.readoutShown
+        inset: root._dividerInset
+    }
 
     // Quiet: only while the view is zoomed. On the album art viewer's
     // corner plate, 6 px in from its edge, as the plot's zoom readout is.
     Components.ZoomReadout {
         id: readout
         objectName: "viewerZoomReadout"
-        x: 0
-        leftPadding: 4
+        // Its text 6 px from the notice's divider, as from a plate's edge.
+        x: root.noticeShown ? notice.implicitWidth + root.platePadding : 0
+        leftPadding: 6 - root.platePadding
         visible: root.readoutShown
+        height: root.viewerButtonSize
         uiPalette: root.uiPalette
         plotColors: root.plotColors
         zoomLevel: root.zoomLevel
-        rightPadding: 4
+        pointSize: root.readoutPointSize
+        rightPadding: 0
     }
 
+    // The plot's Reset Zoom (PlotZoomPlate), its glyph as far from the
+    // readout (as the word "Reset" in the strip, it was another control
+    // than the glyph in the window).
     Components.ViewerToolButton {
         id: resetButton
         objectName: "viewerResetButton"
-        x: readout.x + (root.readoutShown ? readout.width + root.spacing : 0)
+        x: readout.x + (root.readoutShown ? readout.width + 2 : 0)
         visible: root.resetShown
         uiPalette: root.uiPalette
         plotColors: root.plotColors
-        display: AbstractButton.TextOnly
-        text: I18n.i18nc("@action:button reset the view's zoom", "Reset")
-        toolTipText: root.resetToolTip
+        text: root.resetToolTip
+        icon.name: "zoom-original"
         onClicked: root.resetView()
     }
 
-    // Where the zoom ends, and what follows it starts.
+    // Where the view's part, the notice and the zoom, ends, and what
+    // follows it starts.
     readonly property real _zoomEnd: root.resetShown ? resetButton.x + resetButton.width
-                                                     : readout.x + readout.width
-    readonly property bool _zoomDivided: root.dividers && root.readoutShown
-    readonly property real _afterZoom: !root.readoutShown ? 0
-        : root._zoomEnd + root.spacing + (root._zoomDivided ? 1 + root.spacing : 0)
+        : root.readoutShown ? readout.x + readout.width
+        : notice.implicitWidth
+    readonly property bool _viewShown: root.readoutShown || root.noticeShown
+    readonly property bool _zoomDivided: root.dividers && root._viewShown
+    readonly property real _dividerInset: 6 - root.platePadding
+    readonly property real _afterZoom: !root._viewShown ? 0
+        : root._zoomEnd + root.spacing + (root._zoomDivided ? 1 + root.dividerClearance : 0)
 
     Rectangle {
         objectName: "viewerControlsDivider"
         visible: root._zoomDivided
         x: root._zoomEnd + root.spacing
-        y: 4
+        y: root._dividerInset
         width: 1
-        height: Math.max(0, root.height - 8)
+        height: Math.max(0, root.height - 2 * root._dividerInset)
         color: root.plotColors ? root.plotColors.plotPlateEdge : root.uiPalette.seam
     }
 
@@ -106,14 +158,24 @@ Item {
             root.unseenIssueCount)
         toolTipText: I18n.i18nc("@info:tooltip %1 is the issue count", "%1: Show Recent Issues",
             text)
-        icon.name: Qt.resolvedUrl("../assets/status-warning.svg")
-        // The window's negative is lightened on dark and darkened on light:
-        // on a plot of the other brightness, such as the spectrogram's black
-        // in a light theme, the glyph is the plot's text instead.
-        glyphColor: !root.plotColors
-                || (ColorUtils.colorLuma(root.plotColors.plotBg) < 0.45) === root.uiPalette.themeIsDark
+        // The status bar's glyph for the most severe new issue: an error's
+        // ring with a cross, or the warning's triangle.
+        icon.name: root.unseenIssuesIncludeError
+            ? Qt.resolvedUrl("../assets/status-error.svg")
+            : Qt.resolvedUrl("../assets/status-warning.svg")
+        // A click leaves the focus where it is: Recent Issues takes it, and
+        // the button goes once they are seen, so the focus would come back
+        // to a button that is no longer there.
+        focusPolicy: Qt.TabFocus
+        // An error's in the negative colour, which the window lightens on
+        // dark and darkens on light: on a plot of the other brightness, such
+        // as the spectrogram's black in a light theme, the glyph is the
+        // plot's text instead. Warnings alone are in the words' colour, as
+        // the status bar never marks them red.
+        glyphColor: root.unseenIssuesIncludeError && (!root.plotColors
+                || (ColorUtils.colorLuma(root.plotColors.plotBg) < 0.45) === root.uiPalette.themeIsDark)
             ? root.uiPalette.negative
-            : root.plotColors.plotText
+            : issuesButton.baseTextColor
         onClicked: root.errorController.historyRequested()
     }
 
@@ -122,31 +184,35 @@ Item {
         id: viewerControlsRow
         x: issuesButton.x + (root.issuesShown ? issuesButton.width + root.spacing : 0)
         implicitWidth: childrenRect.width
-        implicitHeight: root.uiPalette.toolButtonSize
+        implicitHeight: root.viewerButtonSize
         width: implicitWidth
         height: implicitHeight
     }
 
-    readonly property bool _closeDivided: root.closeDivided && root.viewerControlsShown
+    readonly property bool _closeDivided: root.closeShown && root.closeDivided && root.viewerControlsShown
 
     Rectangle {
         objectName: "viewerControlsCloseDivider"
         visible: root._closeDivided
-        x: viewerControlsRow.x + viewerControlsRow.implicitWidth + root.spacing
-        y: 4
+        x: viewerControlsRow.x + viewerControlsRow.implicitWidth + root.dividerClearance
+        y: root._dividerInset
         width: 1
-        height: Math.max(0, root.height - 8)
+        height: Math.max(0, root.height - 2 * root._dividerInset)
         color: root.plotColors ? root.plotColors.plotPlateEdge : root.uiPalette.seam
     }
 
     Components.ViewerToolButton {
         id: closeButton
         objectName: root.closeButtonName
-        x: viewerControlsRow.x + (root.viewerControlsShown ? viewerControlsRow.implicitWidth + root.spacing : 0)
-            + (root._closeDivided ? 1 + root.spacing : 0)
+        visible: root.closeShown
+        x: viewerControlsRow.x + (root.viewerControlsShown ? viewerControlsRow.implicitWidth
+            + (root._closeDivided ? root.dividerClearance + 1 + root.spacing : root.spacing) : 0)
         uiPalette: root.uiPalette
         plotColors: root.plotColors
         text: I18n.i18nc("@action:button", "Close")
+        // The tooltip names the key, as Image Details' does; the
+        // accessible name stays the action alone.
+        toolTipText: I18n.i18nc("@info:tooltip %1 is the key", "Close (%1)", "Esc")
         icon.name: "window-close"
         onClicked: root.closeViewer()
     }

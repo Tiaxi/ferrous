@@ -303,7 +303,7 @@ void TranslationTest::backendStopWithoutAReasonIsTranslated() {
     decoded.hasStopped = true;
     QVERIFY(!client.processBinarySnapshot(decoded));
     QCOMPARE(client.backendFailure(),
-             pseudo(QStringLiteral("The Ferrous backend stopped unexpectedly. Restart Ferrous to continue.")));
+             pseudo(QStringLiteral("The playback engine stopped unexpectedly. Restart Ferrous to continue.")));
 }
 
 void TranslationTest::backendStartFailureIsTranslated() {
@@ -312,13 +312,13 @@ void TranslationTest::backendStartFailureIsTranslated() {
         const ScopedFailingBridgeStart failing(QStringLiteral("no threads in this test"));
         BridgeClient client;
         QCOMPARE(client.backendFailure(),
-                 pseudo(QStringLiteral("The playback engine could not start: no threads in this test. "
+                 pseudo(QStringLiteral("The playback engine couldn\u2019t start: no threads in this test. "
                                        "Restart Ferrous to try again.")));
     }
     const ScopedFailingBridgeStart failing{QString()};
     BridgeClient client;
     QCOMPARE(client.backendFailure(),
-             pseudo(QStringLiteral("The playback engine could not start. Restart Ferrous to try again.")));
+             pseudo(QStringLiteral("The playback engine couldn\u2019t start. Restart Ferrous to try again.")));
 }
 
 void TranslationTest::mainWindowShowsTranslatedText() {
@@ -379,7 +379,7 @@ void TranslationTest::tagEditorTellsMixedValuesByAFlag() {
     QVERIFY(tags != nullptr);
     QQuickItem *title = findQuickItemByObjectName(tags->contentItem(), QStringLiteral("tagEditorField_title"));
     QVERIFY(title != nullptr);
-    QTRY_COMPARE(title->property("placeholderText").toString(), pseudo(QStringLiteral("Multiple values")));
+    QTRY_COMPARE(title->property("placeholderText").toString(), pseudo(QStringLiteral("Mixed")));
     QCOMPARE(title->property("text").toString(), QString());
 
     // The albums are the same, whatever their text: it is the field's value.

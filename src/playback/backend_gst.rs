@@ -526,6 +526,22 @@ pub fn spawn_engine(
     spawn_engine_with_output(analysis_tx, event_tx, failure, exit_tx, build_output_sink)
 }
 
+/// Spawn the engine with a fake sink, which keeps the playback clock, as
+/// its output, for tests outside this module.
+#[cfg(test)]
+pub fn spawn_engine_on_test_output(
+    analysis_tx: Sender<AnalysisCommand>,
+    event_tx: Sender<PlaybackEvent>,
+    failure: &Arc<OnceLock<String>>,
+    exit_tx: Sender<EngineExit>,
+) -> Sender<PlaybackCommand> {
+    spawn_engine_with_output(analysis_tx, event_tx, failure, exit_tx, || {
+        Ok(gst::ElementFactory::make("fakesink")
+            .property("sync", true)
+            .build()?)
+    })
+}
+
 /// Wait until `GStreamer` has loaded its plugin registry, before a test
 /// starts an engine.
 ///
@@ -991,6 +1007,7 @@ impl GstPlaybackRuntime {
         self.track_token_counter
     }
 
+    /// Report a track change with the snapshot it leaves, as one event.
     fn emit_track_changed(
         &self,
         path: PathBuf,
@@ -1003,6 +1020,7 @@ impl GstPlaybackRuntime {
             queue_index,
             kind,
             track_token,
+            snapshot: self.snapshot.clone(),
         });
     }
 
@@ -1054,7 +1072,6 @@ impl GstPlaybackRuntime {
         self.switch_track(path.as_path(), &uri, force_play);
         self.buffering_active = false;
         self.emit_track_changed(path, queue_index, kind, track_token);
-        self.emit_snapshot();
     }
 
     fn stop_with_empty_queue(&mut self) {
@@ -1075,7 +1092,9 @@ impl GstPlaybackRuntime {
         self.snapshot.duration = Duration::ZERO;
     }
 
-    fn load_queue(&mut self, paths: Vec<PathBuf>) {
+    /// Replace the queue with `paths` and open its first row, playing it
+    /// when `play` is set and otherwise keeping the playback state.
+    fn load_queue(&mut self, paths: Vec<PathBuf>, play: bool) {
         if paths.is_empty() {
             return;
         }
@@ -1093,7 +1112,7 @@ impl GstPlaybackRuntime {
         let Some(first) = first else {
             return;
         };
-        self.switch_to_path(first, current_index, TrackChangeKind::Manual, false);
+        self.switch_to_path(first, current_index, TrackChangeKind::Manual, play);
     }
 
     fn add_to_queue(&mut self, paths: Vec<PathBuf>) {
@@ -1265,7 +1284,9 @@ impl GstPlaybackRuntime {
         self.emit_snapshot();
     }
 
-    fn play_at(&mut self, idx: usize) {
+    /// Make row `idx` the current track, playing it when `play` is set and
+    /// otherwise keeping the playback state.
+    fn play_at(&mut self, idx: usize, play: bool) {
         let Ok(mut state) = self.queue_state.lock() else {
             return;
         };
@@ -1278,7 +1299,7 @@ impl GstPlaybackRuntime {
             return;
         };
         self.release_staged_spectrogram(target.cancelled, false);
-        self.switch_to_path(target.path, target.index, TrackChangeKind::Manual, false);
+        self.switch_to_path(target.path, target.index, TrackChangeKind::Manual, play);
     }
 
     /// Apply a burst of Next (`true`) and Previous presses: move once per
@@ -2154,7 +2175,6 @@ impl GstPlaybackRuntime {
             TrackChangeKind::Gapless,
             track_token,
         );
-        self.emit_snapshot();
     }
 
     /// Duration of the current track. Once the pipeline was given a
@@ -2808,8 +2828,10 @@ impl GstPlaybackRuntime {
         if matches!(
             cmd,
             PlaybackCommand::LoadQueue(_)
+                | PlaybackCommand::PlayQueue(_)
                 | PlaybackCommand::ClearQueue
                 | PlaybackCommand::PlayAt(_)
+                | PlaybackCommand::StartAt(_)
                 | PlaybackCommand::Next
                 | PlaybackCommand::Previous
                 | PlaybackCommand::Play
@@ -2818,7 +2840,8 @@ impl GstPlaybackRuntime {
             self.reset_failures();
         }
         match cmd {
-            PlaybackCommand::LoadQueue(paths) => self.load_queue(paths),
+            PlaybackCommand::LoadQueue(paths) => self.load_queue(paths, false),
+            PlaybackCommand::PlayQueue(paths) => self.load_queue(paths, true),
             PlaybackCommand::AddToQueue(paths) => self.add_to_queue(paths),
             PlaybackCommand::RemapPaths(renames) => self.remap_paths(&renames),
             PlaybackCommand::RestoreQueue { paths, current } => self.restore_queue(paths, current),
@@ -2828,7 +2851,8 @@ impl GstPlaybackRuntime {
             PlaybackCommand::ReorderQueue(order) => self.reorder_queue(&order),
             PlaybackCommand::InsertIntoQueue { at, paths } => self.insert_into_queue(at, paths),
             PlaybackCommand::ClearQueue => self.clear_queue(),
-            PlaybackCommand::PlayAt(idx) => self.play_at(idx),
+            PlaybackCommand::PlayAt(idx) => self.play_at(idx, false),
+            PlaybackCommand::StartAt(idx) => self.play_at(idx, true),
             PlaybackCommand::Next => self.navigate(&[true]),
             PlaybackCommand::Previous => self.navigate(&[false]),
             PlaybackCommand::Play => self.play(),
@@ -6903,12 +6927,16 @@ mod engine_tests {
                     queue_index,
                     kind,
                     track_token,
-                } => self.changes.push(Change {
-                    path,
-                    index: queue_index,
-                    kind,
-                    token: track_token,
-                }),
+                    snapshot,
+                } => {
+                    self.changes.push(Change {
+                        path,
+                        index: queue_index,
+                        kind,
+                        token: track_token,
+                    });
+                    self.record(PlaybackEvent::Snapshot(snapshot));
+                }
                 PlaybackEvent::Error(error) => self.errors.push(error),
                 PlaybackEvent::Seeked { position } => self.seeked.push(position),
                 PlaybackEvent::PathsRemapped => {}
@@ -7065,6 +7093,141 @@ mod engine_tests {
 
     fn millis(value: u64) -> Duration {
         Duration::from_millis(value)
+    }
+
+    /// The states and repeat modes a track is started from in the tests of
+    /// one-step starts.
+    const START_CASES: [(PlaybackState, RepeatMode); 5] = [
+        (PlaybackState::Stopped, RepeatMode::Off),
+        (PlaybackState::Paused, RepeatMode::Off),
+        (PlaybackState::Playing, RepeatMode::Off),
+        (PlaybackState::Stopped, RepeatMode::One),
+        (PlaybackState::Playing, RepeatMode::One),
+    ];
+
+    /// Start an engine on `queue`'s first row in the state `from`, send it
+    /// `start`, and check that it changes track once, to `row` of `played`,
+    /// which every snapshot of the track reports playing under that change's
+    /// token, and that the track goes on to its successor as one started
+    /// with Play does.
+    fn assert_started_once(
+        (from, repeat): (PlaybackState, RepeatMode),
+        queue: Vec<PathBuf>,
+        start: PlaybackCommand,
+        played: &[PathBuf],
+        row: usize,
+    ) {
+        let case = format!("{start:?} from {from:?}, repeat {repeat:?}");
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::SetRepeatMode(repeat));
+        engine.send(PlaybackCommand::LoadQueue(queue));
+        engine.wait_for_changes(1);
+        if from != PlaybackState::Stopped {
+            engine.send(PlaybackCommand::Play);
+            engine.wait_until(&format!("{case}: the old track did not play"), |engine| {
+                engine.snapshot.state == PlaybackState::Playing
+                    && engine.snapshot.position >= millis(200)
+            });
+        }
+        if from == PlaybackState::Paused {
+            engine.send(PlaybackCommand::Pause);
+            engine.wait_until(&format!("{case}: the old track did not pause"), |engine| {
+                engine.snapshot.state == PlaybackState::Paused
+            });
+        }
+        let snapshots = engine.snapshots.len();
+        let target = &played[row];
+
+        engine.send(start);
+        let change = engine.wait_for_changes(2);
+        assert_change(&change, target, row, Expect::Manual);
+        engine.wait_until(&format!("{case}: the row did not play"), |engine| {
+            engine.snapshot.current.as_ref() == Some(target)
+                && engine.snapshot.position >= millis(300)
+        });
+        assert_eq!(engine.changes.len(), 2, "{case}: {:?}", engine.changes);
+        // The UI never sees the track stopped or paused first.
+        for snapshot in &engine.snapshots[snapshots..] {
+            if snapshot.current.as_ref() != Some(target) {
+                continue;
+            }
+            assert_eq!(
+                (
+                    snapshot.state,
+                    snapshot.current_queue_index,
+                    snapshot.track_token
+                ),
+                (PlaybackState::Playing, Some(row), change.token),
+                "{case}"
+            );
+        }
+
+        let successor = if repeat == RepeatMode::One {
+            row
+        } else {
+            row + 1
+        };
+        assert_change(
+            &engine.wait_for_changes(3),
+            &played[successor],
+            successor,
+            Expect::Gapless,
+        );
+        assert!(engine.errors.is_empty(), "{case}: {:?}", engine.errors);
+    }
+
+    #[test]
+    fn a_queue_played_from_any_state_changes_track_once_and_is_reported_playing() {
+        let fixtures = Fixtures::new("play-queue");
+        let old = fixtures.wav("old.wav", 4_000);
+        let played = vec![fixtures.wav("a.wav", 1_500), fixtures.wav("b.wav", 4_000)];
+        for case in START_CASES {
+            assert_started_once(
+                case,
+                vec![old.clone()],
+                PlaybackCommand::PlayQueue(played.clone()),
+                &played,
+                0,
+            );
+        }
+    }
+
+    #[test]
+    fn a_row_started_from_any_state_changes_track_once_and_is_reported_playing() {
+        let fixtures = Fixtures::new("start-at");
+        let queue = vec![
+            fixtures.wav("a.wav", 4_000),
+            fixtures.wav("b.wav", 1_500),
+            fixtures.wav("c.wav", 4_000),
+        ];
+        for case in START_CASES {
+            assert_started_once(case, queue.clone(), PlaybackCommand::StartAt(1), &queue, 1);
+        }
+    }
+
+    #[test]
+    fn a_loaded_queue_keeps_the_playback_state() {
+        let fixtures = Fixtures::new("load-queue-state");
+        let old = fixtures.wav("old.wav", 4_000);
+        let a = fixtures.wav("a.wav", 4_000);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![old]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("the old track did not play", |engine| {
+            engine.snapshot.state == PlaybackState::Playing
+        });
+        engine.send(PlaybackCommand::Stop);
+        engine.wait_until("the old track did not stop", |engine| {
+            engine.snapshot.state == PlaybackState::Stopped
+        });
+
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone()]));
+        assert_change(&engine.wait_for_changes(2), &a, 0, Expect::Manual);
+        let until = Instant::now() + millis(400);
+        engine.wait_until("time passed", |_| Instant::now() >= until);
+        assert_eq!(engine.snapshot.current.as_deref(), Some(a.as_path()));
+        assert_eq!(engine.snapshot.state, PlaybackState::Stopped);
+        assert_eq!(engine.snapshot.position, Duration::ZERO);
     }
 
     #[test]
@@ -11638,8 +11801,11 @@ mod engine_tests {
         assert_eq!(error.detail, STALLED_STREAM_DETAIL);
         assert_eq!(
             error.message(),
-            "Couldn't play \u{201c}a.mp3\u{201d} (playback could not start: GStreamer \
-             stalled twice while opening it); skipped it."
+            "Couldn't play \u{201c}a.mp3\u{201d}; skipped it."
+        );
+        assert_eq!(
+            error.reason(),
+            "playback could not start: GStreamer stalled twice while opening it"
         );
         assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Automatic);
         engine.wait_for_playing(1, millis(5_280));
@@ -11733,11 +11899,7 @@ mod engine_tests {
             error.detail,
             format!("missing GStreamer plugin: {description}")
         );
-        assert!(
-            error.message().contains(&description),
-            "{}",
-            error.message()
-        );
+        assert!(error.reason().contains(&description), "{}", error.reason());
         assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Automatic);
     }
 

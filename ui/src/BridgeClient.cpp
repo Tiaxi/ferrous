@@ -902,9 +902,9 @@ bool BridgeClient::startInProcessBridge() {
         // As when the backend stops on its own: the user can't play anything.
         reason = reason.trimmed();
         setBackendFailure(reason.isEmpty()
-                ? i18nc("@info", "The playback engine could not start. "
+                ? i18nc("@info", "The playback engine couldn’t start. "
                                  "Restart Ferrous to try again.")
-                : i18nc("@info %1 is why, in English", "The playback engine could not start: %1. "
+                : i18nc("@info %1 is why, in English", "The playback engine couldn’t start: %1. "
                                                        "Restart Ferrous to try again.",
                         reason));
         return false;
@@ -1019,7 +1019,7 @@ void BridgeClient::startItunesArtworkAssetDownload(int candidateIndex) {
             i18nc("@info", "No full-size image is available."));
         row.insert(
             QStringLiteral("detailStatusText"),
-            i18nc("@info", "The full-size image could not be loaded."));
+            i18nc("@info", "The full-size image couldn’t be loaded."));
         updateItunesArtworkResult(candidateIndex, row);
         return;
     }
@@ -1031,7 +1031,7 @@ void BridgeClient::startItunesArtworkAssetDownload(int candidateIndex) {
             i18nc("@info", "Failed to prepare temporary artwork cache."));
         row.insert(
             QStringLiteral("detailStatusText"),
-            i18nc("@info", "The full-size image could not be loaded."));
+            i18nc("@info", "The full-size image couldn’t be loaded."));
         updateItunesArtworkResult(candidateIndex, row);
         return;
     }
@@ -1065,7 +1065,7 @@ void BridgeClient::startItunesArtworkAssetDownload(int candidateIndex) {
             row.insert(QStringLiteral("assetError"), message);
             row.insert(
                 QStringLiteral("detailStatusText"),
-                i18nc("@info", "The full-size image could not be loaded."));
+                i18nc("@info", "The full-size image couldn’t be loaded."));
             updateItunesArtworkResult(candidateIndex, row);
         };
 
@@ -1116,7 +1116,7 @@ void BridgeClient::applyItunesArtworkAssetJobResult(ItunesArtworkAssetJobResult 
         row.insert(QStringLiteral("assetError"), result.errorMessage);
         row.insert(
             QStringLiteral("detailStatusText"),
-            i18nc("@info", "The full-size image could not be loaded."));
+            i18nc("@info", "The full-size image couldn’t be loaded."));
         updateItunesArtworkResult(result.candidateIndex, row);
         return;
     }
@@ -1658,6 +1658,7 @@ void BridgeClient::resetPollChanges() {
     m_pollTrackIdentityChanged = false;
     m_pollTrackMetadataChanged = false;
     m_pollSnapshotChanged = false;
+    m_pollQueueChanged = false;
     m_pollLibraryChanged = false;
     m_pollLibraryScanChanged = false;
     m_pollLastFmScrobbleChanged = false;
@@ -1675,6 +1676,13 @@ void BridgeClient::schedulePollChanges() {
     }
     if (m_pollSnapshotChanged) {
         scheduleSnapshotChanged();
+    }
+    // The rows changed in this poll, and its views draw them at the next
+    // frame, so the count, totals and playing row that go with them are
+    // told now. A burst of snapshots in one poll still tells them once.
+    if (m_pollQueueChanged) {
+        m_pollQueueChanged = false;
+        emit queueChanged();
     }
     if (m_pollLibraryChanged) {
         scheduleLibraryChanged();
@@ -1849,12 +1857,20 @@ int BridgeClient::playingQueueIndex() const {
     return m_playingQueueIndex;
 }
 
+QString BridgeClient::playingQueueLengthText() const {
+    return m_playingQueueLengthText;
+}
+
 QString BridgeClient::currentTrackPath() const {
     return m_currentTrackPath;
 }
 
 QString BridgeClient::currentTrackCoverPath() const {
     return m_currentTrackCoverPath;
+}
+
+QVariant BridgeClient::currentTrackCoverNamed() const {
+    return m_currentTrackCoverNamed;
 }
 
 QString BridgeClient::currentTrackTitle() const {
@@ -2144,6 +2160,10 @@ int BridgeClient::libraryVersion() const {
 
 bool BridgeClient::libraryScanInProgress() const {
     return m_libraryScanInProgress;
+}
+
+bool BridgeClient::libraryLoaded() const {
+    return m_libraryLoaded;
 }
 
 int BridgeClient::libraryRootCount() const {
@@ -3844,6 +3864,9 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
         {QStringLiteral("artist"), artist},
         {QStringLiteral("coverPath"), m_currentTrackCoverPath},
     };
+    if (m_currentTrackCoverNamed.isValid()) {
+        m_itunesArtworkTarget.insert(QStringLiteral("coverNamed"), m_currentTrackCoverNamed);
+    }
 
     cancelItunesArtworkRequests();
     m_itunesArtworkGeneration++;
@@ -3990,7 +4013,8 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
                 m_itunesArtworkErrorText = aggregation->firstErrorDetail.isEmpty()
                     ? aggregation->firstError : aggregation->firstErrorDetail;
             } else {
-                m_itunesArtworkStatusText = i18nc("@info:status", "No iTunes artwork suggestions found.");
+                m_itunesArtworkStatusText = i18nc("@info:status under the heading No artwork found",
+                                                  "iTunes has no suggestions for this album.");
             }
             emit itunesArtworkChanged();
             return;
@@ -4398,10 +4422,11 @@ quint32 BridgeClient::saveStateBeforeQuit() {
     QMetaObject::invokeMethod(
         this,
         [this, requestId]() {
-            emit stateSaveFinished(
-                requestId,
-                false,
-                i18nc("@info", "Settings and the queue could not be saved: the backend has stopped."));
+            QVariantMap failure = quitSaveFailureMap(
+                BinaryBridgeCodec::QuitSaveSettings | BinaryBridgeCodec::QuitSaveQueue,
+                BinaryBridgeCodec::QuitSaveCauseOther, QString());
+            failure.insert(QStringLiteral("cause"), QStringLiteral("engineStopped"));
+            emit stateSaveFinished(requestId, false, failure);
         },
         Qt::QueuedConnection);
     return requestId;
@@ -4409,6 +4434,30 @@ quint32 BridgeClient::saveStateBeforeQuit() {
 
 void BridgeClient::shutdown() {
     shutdownBridgeGracefully();
+}
+
+QVariantMap BridgeClient::quitSaveFailureMap(quint8 subjects, quint8 cause, const QString &detail) {
+    const auto causeCode = [cause]() -> QString {
+        switch (cause) {
+        case BinaryBridgeCodec::QuitSaveCausePermission:
+            return QStringLiteral("permission");
+        case BinaryBridgeCodec::QuitSaveCauseReadOnlyFileSystem:
+            return QStringLiteral("readOnlyFileSystem");
+        case BinaryBridgeCodec::QuitSaveCauseNoSpace:
+            return QStringLiteral("noSpace");
+        case BinaryBridgeCodec::QuitSaveCauseBusy:
+            return QStringLiteral("busy");
+        default:
+            return {};
+        }
+    };
+    return {
+        {QStringLiteral("settings"), (subjects & BinaryBridgeCodec::QuitSaveSettings) != 0},
+        {QStringLiteral("queue"), (subjects & BinaryBridgeCodec::QuitSaveQueue) != 0},
+        {QStringLiteral("scrobbles"), (subjects & BinaryBridgeCodec::QuitSaveScrobbles) != 0},
+        {QStringLiteral("cause"), causeCode()},
+        {QStringLiteral("detail"), detail},
+    };
 }
 
 void BridgeClient::clearDiagnostics() {
@@ -5538,17 +5587,22 @@ bool BridgeClient::openUrlInFileBrowser(const QString &path, bool containingFold
 }
 
 void BridgeClient::reportError(BinaryBridgeCodec::ErrorCategory category, const QString &message,
-                               const QString &subject, BinaryBridgeCodec::ErrorSeverity severity) {
-    // The log keeps every error Recent Issues shows, with what it concerns.
+                               const QString &subject, BinaryBridgeCodec::ErrorSeverity severity,
+                               const QString &detail) {
+    // The log keeps every error Recent Issues shows, with the system's text
+    // and what it concerns.
     QString line = QStringLiteral("%1: %2").arg(
         severity == BinaryBridgeCodec::ErrorSeverityWarning ? QStringLiteral("warning")
                                                             : QStringLiteral("error"),
         message);
+    if (!detail.isEmpty()) {
+        line += QStringLiteral(": %1").arg(detail);
+    }
     if (!subject.isEmpty()) {
         line += QStringLiteral(" (%1)").arg(subject);
     }
     logDiagnostic(errorCategoryLogName(category), line);
-    emit bridgeError(message, static_cast<int>(category), static_cast<int>(severity), subject);
+    emit bridgeError(message, static_cast<int>(category), static_cast<int>(severity), subject, detail);
 }
 
 void BridgeClient::reportUiError(int category, int severity, const QString &subject,
@@ -5640,7 +5694,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         if (!m_bridgeShutdownRequested) {
             const QString reason = snapshot.errorMessage.trimmed();
             setBackendFailure(reason.isEmpty()
-                    ? i18nc("@info", "The Ferrous backend stopped unexpectedly. "
+                    ? i18nc("@info", "The playback engine stopped unexpectedly. "
                                      "Restart Ferrous to continue.")
                     : reason);
         }
@@ -5648,8 +5702,12 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
 
     if (snapshot.hasStateSaved) {
-        emit stateSaveFinished(
-            snapshot.stateSaveRequestId, snapshot.stateSaved, snapshot.stateSaveError);
+        emit stateSaveFinished(snapshot.stateSaveRequestId, snapshot.stateSaved,
+                               snapshot.stateSaved
+                                   ? QVariantMap()
+                                   : quitSaveFailureMap(snapshot.stateSaveSubjects,
+                                                        snapshot.stateSaveCause,
+                                                        snapshot.stateSaveDetail));
         return false;
     }
 
@@ -5672,7 +5730,8 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (!snapshot.errorMessage.trimmed().isEmpty()) {
         reportError(static_cast<BinaryBridgeCodec::ErrorCategory>(snapshot.errorCategory),
                     snapshot.errorMessage, snapshot.errorSubject,
-                    static_cast<BinaryBridgeCodec::ErrorSeverity>(snapshot.errorSeverity));
+                    static_cast<BinaryBridgeCodec::ErrorSeverity>(snapshot.errorSeverity),
+                    snapshot.errorDetail);
         return false;
     }
 
@@ -5759,6 +5818,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     bool trackIdentitySignalChanged = false;
     bool trackMetadataSignalChanged = false;
     bool snapshotSignalChanged = false;
+    bool queueSignalChanged = false;
     bool librarySignalChanged = false;
     bool libraryScanSignalChanged = false;
     const bool currentPathChanged = m_currentTrackPath != currentPath;
@@ -5951,6 +6011,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             m_queueDurationText = nextQueueDurationText;
             changed = true;
             snapshotSignalChanged = true;
+            queueSignalChanged = true;
         }
 
         const int previousLength = m_queueLength;
@@ -5969,6 +6030,9 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             changed = true;
             snapshotSignalChanged = true;
         }
+        if (m_queueLength != previousLength) {
+            queueSignalChanged = true;
+        }
     }
     finishSnapshotSection(snapshotQueueMs);
 
@@ -5983,6 +6047,13 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         trackIdentitySignalChanged = true;
     }
 
+    // The playing row holds the current track. An index the engine sent
+    // before a queue edit reached it can name another row, which neither
+    // shows the mark nor gives the transport its length.
+    const QueueRowData *indexedRow = m_queueRowsModel.rowAt(playing);
+    if (indexedRow != nullptr && indexedRow->path != currentPath) {
+        playing = -1;
+    }
     if (playing < 0 && !currentPath.isEmpty() && m_queueLength > 0) {
         playing = queuePathFirstIndex(currentPath);
     }
@@ -5990,6 +6061,19 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         m_playingQueueIndex = playing;
         changed = true;
         trackIdentitySignalChanged = true;
+        // The rows applied above are drawn at the next frame, and they read
+        // the playing row as they are made: told before that frame.
+        queueSignalChanged = true;
+    }
+    const QueueRowData *playingRow = m_queueRowsModel.rowAt(playing);
+    const QString playingLengthText = playingRow != nullptr && !currentPath.isEmpty()
+        ? playingRow->lengthText
+        : QString{};
+    if (m_playingQueueLengthText != playingLengthText) {
+        m_playingQueueLengthText = playingLengthText;
+        changed = true;
+        snapshotSignalChanged = true;
+        queueSignalChanged = true;
     }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (m_profileUiEnabled) {
@@ -6249,16 +6333,28 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     // The track whose cover it is: the current track's, or the track
     // before's while it stays.
     QString currentCoverTrackPath;
+    // Whether the cover has a cover's name, which only the metadata's cover
+    // tells; unknown for the queue row's.
+    QVariant currentCoverNamed;
     if (!currentPath.isEmpty()) {
         currentCover = metadataCoverUrl.isEmpty() ? queueTrackCover : metadataCoverUrl;
         currentCoverTrackPath = currentPath;
+        if (!metadataCoverUrl.isEmpty()) {
+            currentCoverNamed = snapshot.metadata.coverNamed;
+        }
         if (currentCover.isEmpty() && !metadataMatchesCurrentPath) {
             currentCover = m_currentTrackCoverPath;
             currentCoverTrackPath = m_currentTrackCoverTrackPath;
+            currentCoverNamed = m_currentTrackCoverNamed;
         }
     }
     if (m_currentTrackCoverPath != currentCover) {
         m_currentTrackCoverPath = currentCover;
+        changed = true;
+        trackMetadataSignalChanged = true;
+    }
+    if (m_currentTrackCoverNamed != currentCoverNamed) {
+        m_currentTrackCoverNamed = currentCoverNamed;
         changed = true;
         trackMetadataSignalChanged = true;
     }
@@ -6561,6 +6657,13 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         libraryScanSignalChanged = true;
     }
 
+    const bool loaded = snapshot.library.present ? snapshot.library.loaded : m_libraryLoaded;
+    if (m_libraryLoaded != loaded) {
+        m_libraryLoaded = loaded;
+        changed = true;
+        librarySignalChanged = true;
+    }
+
     const int roots = snapshot.library.present ? snapshot.library.rootCount : m_libraryRootCount;
     if (m_libraryRootCount != roots) {
         m_libraryRootCount = roots;
@@ -6764,6 +6867,9 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
     if (snapshotSignalChanged) {
         m_pollSnapshotChanged = true;
+    }
+    if (queueSignalChanged) {
+        m_pollQueueChanged = true;
     }
     if (librarySignalChanged) {
         m_pollLibraryChanged = true;

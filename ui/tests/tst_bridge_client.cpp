@@ -252,6 +252,10 @@ private slots:
     void tagEditorLoadReportsUnreadableFiles();
     void tagEditorAutoNumberRestartsInEachFolder();
     void tagEditorReportsFailuresAsAProperty();
+    void tagEditorPutsACauseCodeInWords_data();
+    void tagEditorPutsACauseCodeInWords();
+    void tagEditorShowsTheCauseOfARealFailure_data();
+    void tagEditorShowsTheCauseOfARealFailure();
     void tagEditorKeepsExtraValuesUntilTheirFieldIsSaved();
     void tagEditorSelectionIsAModelRole();
     void tagEditorTellsWhetherARowHasAnError();
@@ -291,6 +295,8 @@ private slots:
     void queueTotalReadsAsAClockTime();
     void queuePathFallbackUsesCachedFirstIndex();
     void queueDeltasChangeOnlyTheirRowsWithoutAReset();
+    void queueCountAndTotalsAreToldInThePollThatChangesTheRows();
+    void playingRowIsToldInThePollThatChangesTheRows();
     void queueRowRangeMovesDecodeAndMoveTheirRowsOnce();
     void movedQueueRowsTravelAsOneCommandWithTheRustLayout();
     void libraryItemsTravelAsOneCommandWithTheRustLayout();
@@ -298,6 +304,8 @@ private slots:
     void rowCommandsCarryTheQueueRevision();
     void aLargeQueueEditDecodesOnlyTheChangedRows();
     void gaplessAndRepeatOneMoveOnlyThePlayingRow();
+    void aPlayingIndexFromBeforeAnEditMarksOnlyTheCurrentTracksRow();
+    void playingQueueLengthFollowsTheCurrentRow();
     void snapshotWorkerDecodesPacketsInTheirOrder();
     void snapshotWorkerDropsPacketsOfAnEarlierGeneration();
     void droppedQueueRowsAreFreedOnTheWorker();
@@ -359,6 +367,7 @@ private slots:
     void metadataTrackTotalDecodesAfterTheTreeKeys();
     void currentTrackLibraryPathFollowsTheMetadataOfTheCurrentTrack();
     void currentTrackTotalBelongsToTheCurrentTracksNumber();
+    void currentTrackCoverNamedFollowsTheMetadataCover();
     void itunesSquareArtworkReuseSkipsRedundantNormalization();
     void trackOnlySnapshotSetsTrackFlagOnly();
     void gaplessHandoffSetsIdentityFlagBeforeMetadata();
@@ -405,6 +414,7 @@ private slots:
     void mprisExportsNoArtOfTheTrackBeforeAfterTheRowEndsTheHold();
     void mprisExportsNoArtOfTheTrackBeforeAfterAStopEndsTheHold();
     void playbackErrorPacketReachesBridgeError();
+    void anErrorsSystemTextReachesBridgeErrorApart();
     void backendFailurePacketShowsStoppedState();
     void requestedStopIsNotABackendFailure();
     void commandsToAStoppedBackendFailWithoutRepeatingWhy();
@@ -417,6 +427,8 @@ private slots:
     void theDynamicRangeKeepsTheBackendsWholeRange();
     void saveBeforeQuitReportsAFailedSaveAndSavesOnRetry();
     void saveBeforeQuitFailsWhenTheBackendHasStopped();
+    void aFailedSaveBeforeQuitDecodesWhatAndWhy();
+    void aStoppedEngineIsNamedAnEngine();
     void spectrogramOverlaySettingsApplyFromSnapshot();
     void analysisFrameTellsAFileThatEndsEarly();
     void spectrogramOverlaySettingsDecodeFromBinaryPayload();
@@ -428,6 +440,7 @@ private slots:
     void libraryViewStateAvailabilityFollowsSnapshot();
     void volumeTheBackendSendsReachesTheSliderAndMpris();
     void libraryChangesNotifyOnlyLibraryProperties();
+    void libraryLoadedFollowsTheBackend();
     void testBinariesSetNoFileBrowserNameDetector();
     void detectedFileBrowserNameNotifiesOnlyWhenItChanges();
     void aDetectedFileBrowserNameIsNeverMarkup_data();
@@ -459,7 +472,6 @@ private slots:
     void coverImageProviderReadsTheFileOfAStampedId();
     void replacedCoverReloadsForANewStampButNotFromTheCache();
     void drawsOffscreenUnlessAPlatformIsChosen();
-
 private:
     QString m_userDirectoriesParent;
     // The current test's own user directories; see init().
@@ -1227,7 +1239,9 @@ void BridgeClientTest::tagEditorShowsRefusedEditsAndKeepsTheFile() {
     // The same, in sections, for the Details window to set out.
     QCOMPARE(editor.statusDetailSections(),
              (QVariantList{QVariantMap{{QStringLiteral("heading"), QStringLiteral("Failed:")},
-                                       {QStringLiteral("items"), QStringList{QStringLiteral("song.flac: ") + error}},
+                                       {QStringLiteral("items"),
+                                        QVariantList{QVariantMap{{QStringLiteral("name"), QStringLiteral("song.flac")},
+                                                                 {QStringLiteral("error"), error}}}},
                                        {QStringLiteral("failed"), true}}}));
     QVERIFY(file.open(QIODevice::ReadOnly));
     QCOMPARE(file.readAll(), flac);
@@ -1386,6 +1400,32 @@ void BridgeClientTest::tagEditorReportsFailuresAsAProperty() {
     QCOMPARE(reported.at(1).at(0).toString(),
              QStringLiteral("Renamed 0 files; 1 failed.\n0.flac: busy"));
 
+    // With files of both, what failed comes first, in plain text as in the
+    // sections, with each whole message (what failed came last); the error
+    // list hears of the failures in that order.
+    TagEditorController mixed(nullptr);
+    QVERIFY(loadTagEditorRows(
+        mixed, tagEditorRows(3, 3),
+        {{TagEditorController::Operation::Save,
+          QByteArray(R"({"results":[{"path":"/fixture/Album 0/2.flac","ok":false,"error":"busy"},)"
+                     R"({"path":"/fixture/Album 0/0.flac","ok":true},)"
+                     R"json({"path":"/fixture/Album 0/1.flac","ok":false,"error":"denied (os error 13)"}]})json")}}));
+    for (int index = 0; index < 3; ++index) {
+        mixed.setCell(index, QStringLiteral("title"), QStringLiteral("New"));
+    }
+    QSignalSpy mixedSaved(&mixed, &TagEditorController::saveFinished);
+    QSignalSpy mixedReports(&mixed, &TagEditorController::errorReported);
+    QVERIFY(mixed.save());
+    QTRY_COMPARE(mixedSaved.size(), 1);
+    QCOMPARE(mixed.statusDetails(),
+             QStringLiteral("Failed:\n  1.flac: denied (os error 13)\n  2.flac: busy\n\nSucceeded:\n  0.flac"));
+    const QVariantList sections = mixed.statusDetailSections();
+    QCOMPARE(sections.size(), 2);
+    QVERIFY(sections.first().toMap().value(QStringLiteral("failed")).toBool());
+    QCOMPARE(mixedReports.size(), 1);
+    QCOMPARE(mixedReports.first().first().toString(),
+             QStringLiteral("Saved 1 file; 2 failed.\n1.flac: denied (os error 13)\n2.flac: busy"));
+
     // A success whose wording mentions errors is not a failure.
     TagEditorController succeeding(nullptr);
     QJsonArray rows = tagEditorRows(1, 1);
@@ -1405,6 +1445,159 @@ void BridgeClientTest::tagEditorReportsFailuresAsAProperty() {
     QVERIFY(succeeding.statusDetails().contains(QStringLiteral("error failed.flac")));
     QVERIFY(!succeeding.statusIsError());
     QCOMPARE(succeededReports.size(), 0);
+}
+
+// Each code the backend sends (its test of the same list is in
+// src/edit_failure.rs) has its words, after a save as after a rename, and
+// the error's words have no say: the same code gives the same cause beside
+// any of them, and no code gives none, whatever they say.
+void BridgeClientTest::tagEditorPutsACauseCodeInWords_data() {
+    QTest::addColumn<QString>("code");
+    QTest::addColumn<QString>("cause");
+    const auto row = [](const char *code, const QString &cause) {
+        QTest::newRow(code) << QString::fromLatin1(code) << cause;
+    };
+    row("folderNotWritable", QStringLiteral("You don’t have permission to write in this folder."));
+    row("fileNotWritable", QStringLiteral("You don’t have permission to change this file."));
+    row("fileNotReplaceable", QStringLiteral("You don’t have permission to replace this file."));
+    row("fileNotReadable", QStringLiteral("You don’t have permission to read this file."));
+    row("readOnlyFileSystem", QStringLiteral("The file system is read-only."));
+    row("noSpace", QStringLiteral("There isn’t enough free space on the disk."));
+    row("renameNotPermitted", QStringLiteral("Renaming stopped: you don’t have permission."));
+    row("renameReadOnlyFileSystem", QStringLiteral("Renaming stopped: a file system is read-only."));
+    row("renameNoSpace", QStringLiteral("Renaming stopped: there isn’t enough free space."));
+    row("aCodeOfALaterBackend", QString());
+    QTest::newRow("no code") << QString() << QString();
+}
+
+void BridgeClientTest::tagEditorPutsACauseCodeInWords() {
+    QFETCH(QString, code);
+    QFETCH(QString, cause);
+    for (const QString &error : {
+             QStringLiteral("failed to create temporary file in /fixture: Permission denied (os error 13)"),
+             QStringLiteral("failed to copy /fixture/0.flac: No space left on device (os error 28)"),
+             QStringLiteral("Lupa evätty"),
+         }) {
+        QJsonObject result{{QStringLiteral("path"), QStringLiteral("/fixture/Album 0/0.flac")},
+                           {QStringLiteral("ok"), false},
+                           {QStringLiteral("error"), error}};
+        if (!code.isEmpty()) {
+            result.insert(QStringLiteral("cause"), code);
+        }
+        const QByteArray response =
+            QJsonDocument(QJsonObject{{QStringLiteral("results"), QJsonArray{result}}}).toJson(QJsonDocument::Compact);
+        BridgeClient bridge;
+        isolateBridgeClient(bridge);
+        TagEditorController editor(&bridge);
+        QVERIFY(loadTagEditorRows(editor, tagEditorRows(1, 1),
+                                  {{TagEditorController::Operation::Save, response},
+                                   {TagEditorController::Operation::Rename, response}}));
+        const auto shownAsFailed = [&]() {
+            const QVariantMap item = editor.statusDetailSections().value(0).toMap().value(QStringLiteral("items"))
+                                         .toList().value(0).toMap();
+            QCOMPARE(item.value(QStringLiteral("cause")).toString(), cause);
+            QCOMPARE(item.contains(QStringLiteral("cause")), !cause.isEmpty());
+            // The system's text stays verbatim.
+            QCOMPARE(item.value(QStringLiteral("error")).toString(), error);
+            QCOMPARE(editor.m_tableModel.rowAt(0)->errorText, error);
+        };
+        editor.setCell(0, QStringLiteral("title"), QStringLiteral("New"));
+        QSignalSpy saved(&editor, &TagEditorController::saveFinished);
+        QVERIFY(editor.save());
+        QTRY_COMPARE(saved.size(), 1);
+        shownAsFailed();
+        if (QTest::currentTestFailed()) {
+            return;
+        }
+        editor.setSelectedRows({0});
+        QSignalSpy renamed(&editor, &TagEditorController::renameFinished);
+        QVERIFY(editor.renameSelectedFiles());
+        QTRY_COMPARE(renamed.size(), 1);
+        shownAsFailed();
+        if (QTest::currentTestFailed()) {
+            return;
+        }
+    }
+}
+
+// The backend's codes as they reach the editor: real saves and renames of
+// files whose permissions, or the folder's, refuse them.
+void BridgeClientTest::tagEditorShowsTheCauseOfARealFailure_data() {
+    QTest::addColumn<int>("fileMode");
+    QTest::addColumn<int>("folderMode");
+    QTest::addColumn<bool>("rename");
+    QTest::addColumn<QString>("cause");
+    const int file = int(QFile::ReadOwner | QFile::WriteOwner);
+    const int folder = int(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+    const int readOnlyFolder = int(QFile::ReadOwner | QFile::ExeOwner);
+    QTest::newRow("read-only file") << int(QFile::ReadOwner) << folder << false
+                                    << QStringLiteral("You don’t have permission to change this file.");
+    QTest::newRow("read-only folder") << file << readOnlyFolder << false
+                                      << QStringLiteral("You don’t have permission to write in this folder.");
+    QTest::newRow("unreadable file") << int(QFile::WriteOwner) << folder << false
+                                     << QStringLiteral("You don’t have permission to read this file.");
+    QTest::newRow("rename in a read-only folder") << file << readOnlyFolder << true
+                                                  << QStringLiteral("Renaming stopped: you don’t have permission.");
+}
+
+void BridgeClientTest::tagEditorShowsTheCauseOfARealFailure() {
+    QFETCH(int, fileMode);
+    QFETCH(int, folderMode);
+    QFETCH(bool, rename);
+    QFETCH(QString, cause);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString folder = dir.filePath(QStringLiteral("album"));
+    QVERIFY(QDir().mkpath(folder));
+    const QStringList paths{folder + QStringLiteral("/a.flac"), folder + QStringLiteral("/b.flac")};
+    for (qsizetype index = 0; index < paths.size(); ++index) {
+        QFile file(paths.at(index));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray flac = flacWithComments(
+            {QStringLiteral("TITLE=Song %1").arg(index + 1), QStringLiteral("TRACKNUMBER=%1").arg(index + 1)});
+        QCOMPARE(file.write(flac), qint64(flac.size()));
+    }
+    BridgeClient bridge;
+    isolateBridgeClient(bridge);
+    TagEditorController editor(&bridge);
+    QVERIFY(editor.openForPaths(paths));
+    QTRY_VERIFY(!editor.loading());
+    QCOMPARE(editor.m_tableModel.rowCount(), 2);
+
+    const auto restorePermissions = qScopeGuard([&] {
+        QFile::setPermissions(folder, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+        for (const QString &path : paths) {
+            QFile::setPermissions(path, QFile::ReadOwner | QFile::WriteOwner);
+        }
+    });
+    for (const QString &path : paths) {
+        QVERIFY(QFile::setPermissions(path, QFileDevice::Permissions::fromInt(fileMode)));
+    }
+    QVERIFY(QFile::setPermissions(folder, QFileDevice::Permissions::fromInt(folderMode)));
+    const QFileInfo fileInfo(paths.first());
+    if (fileInfo.isReadable() && fileInfo.isWritable() && QFileInfo(folder).isWritable()) {
+        QSKIP("The user may write to any file, such as root.");
+    }
+
+    if (rename) {
+        editor.selectAllRows();
+        QSignalSpy renamed(&editor, &TagEditorController::renameFinished);
+        QVERIFY(editor.renameSelectedFiles());
+        QTRY_COMPARE(renamed.size(), 1);
+    } else {
+        editor.setCell(0, QStringLiteral("title"), QStringLiteral("New"));
+        editor.setCell(1, QStringLiteral("title"), QStringLiteral("New"));
+        QSignalSpy saved(&editor, &TagEditorController::saveFinished);
+        QVERIFY(editor.save());
+        QTRY_COMPARE(saved.size(), 1);
+    }
+    const QVariantList items =
+        editor.statusDetailSections().value(0).toMap().value(QStringLiteral("items")).toList();
+    QCOMPARE(items.size(), 2);
+    for (const QVariant &item : items) {
+        QCOMPARE(item.toMap().value(QStringLiteral("cause")).toString(), cause);
+        QVERIFY(!item.toMap().value(QStringLiteral("error")).toString().isEmpty());
+    }
 }
 
 void BridgeClientTest::tagEditorKeepsExtraValuesUntilTheirFieldIsSaved() {
@@ -3100,9 +3293,10 @@ void BridgeClientTest::stringsPastTheOldLengthLimitCrossWhole() {
     QByteArray payload;
     QDataStream payloadStream(&payload, QIODevice::WriteOnly);
     payloadStream.setByteOrder(QDataStream::LittleEndian);
-    // A system error with no subject, then the message.
+    // A system error with no subject, then the message, and no system's text.
     payloadStream << quint8(0) << quint8(1) << quint32(0) << quint32(utf8.size());
     payload.append(utf8);
+    payload.append(QByteArray(4, '\0'));
     const auto packetWith = [](const QByteArray &section) {
         QByteArray packet;
         QDataStream header(&packet, QIODevice::WriteOnly);
@@ -4414,6 +4608,157 @@ void BridgeClientTest::queueDeltasChangeOnlyTheirRowsWithoutAReset() {
     QVERIFY(!client.m_queueResyncRequested);
 }
 
+// The queue's count and totals are told at the end of the poll that changed
+// its rows, not with the coalesced snapshotChanged up to 33 ms later: the
+// views drew an empty queue's message over its first rows, a cleared list
+// without it, and the header's "N tracks · duration" behind the rows, for a
+// frame or two. A burst of snapshots in one poll tells them once, and the
+// rest of the snapshot is still told on the timer.
+void BridgeClientTest::queueCountAndTotalsAreToldInThePollThatChangesTheRows() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    const QMetaMethod queueChanged = QMetaMethod::fromSignal(&BridgeClient::queueChanged);
+    for (const char *name : {"queueLength", "queueDurationText", "playingQueueLengthText"}) {
+        const QMetaProperty property =
+            client.metaObject()->property(client.metaObject()->indexOfProperty(name));
+        QVERIFY2(property.notifySignal() == queueChanged, name);
+    }
+    client.m_snapshotNotifyTimer.stop();
+    client.m_snapshotChangedPending = false;
+
+    auto *model = qobject_cast<QueueRowsModel *>(client.queueRows());
+    QVERIFY(model != nullptr);
+    QSignalSpy told(&client, &BridgeClient::queueChanged);
+    QSignalSpy snapshotTold(&client, &BridgeClient::snapshotChanged);
+    // The count that bindings have last been told, against the rows a view
+    // draws at the end of each poll.
+    int toldLength = client.queueLength();
+    QString toldDuration = client.queueDurationText();
+    connect(&client, &BridgeClient::queueChanged, &client, [&]() {
+        toldLength = client.queueLength();
+        toldDuration = client.queueDurationText();
+    });
+    const auto poll = [&client](const QVector<BinaryBridgeCodec::DecodedSnapshot> &snapshots) {
+        client.resetPollChanges();
+        for (const BinaryBridgeCodec::DecodedSnapshot &snapshot : snapshots) {
+            client.processBinarySnapshot(snapshot);
+        }
+        client.schedulePollChanges();
+    };
+    const auto withTotal = [](BinaryBridgeCodec::DecodedSnapshot snapshot, double seconds) {
+        snapshot.queue.totalDurationSeconds = seconds;
+        return snapshot;
+    };
+
+    // The first tracks, added to an empty queue.
+    poll({withTotal(fullQueueSnapshot(1, numberedPaths(3)), 180.0)});
+    QCOMPARE(model->rowCount(), 3);
+    QCOMPARE(told.size(), 1);
+    QCOMPARE(toldLength, 3);
+    QCOMPARE(toldDuration, QStringLiteral("3:00"));
+    // The rest of the snapshot waits for the timer, as before.
+    QCOMPARE(snapshotTold.size(), 0);
+    QVERIFY(client.m_snapshotNotifyTimer.isActive());
+
+    // A burst of additions in one poll is told once, with its last rows.
+    QVector<BinaryBridgeCodec::DecodedSnapshot> burst;
+    for (int i = 0; i < 4; ++i) {
+        burst.push_back(withTotal(
+            queueDeltaSnapshot(1 + i, 2 + i, 4 + i,
+                {queueOp(BinaryBridgeCodec::QueueOpInsert, 3 + i, 0,
+                    {queueTrack(QStringLiteral("/music/burst%1.flac").arg(i))})}),
+            240.0 + 60.0 * i));
+    }
+    poll(burst);
+    QCOMPARE(model->rowCount(), 7);
+    QCOMPARE(told.size(), 2);
+    QCOMPARE(toldLength, 7);
+    QCOMPARE(toldDuration, QStringLiteral("7:00"));
+
+    // A move changes neither the count nor the totals, and tells nothing.
+    poll({withTotal(queueDeltaSnapshot(5, 6, 7, {queueOp(BinaryBridgeCodec::QueueOpMove, 6, 0)}), 420.0)});
+    QCOMPARE(told.size(), 2);
+
+    // Clear Queue.
+    poll({queueDeltaSnapshot(6, 7, 0, {queueOp(BinaryBridgeCodec::QueueOpRemove, 0, 7)})});
+    QCOMPARE(model->rowCount(), 0);
+    QCOMPARE(told.size(), 3);
+    QCOMPARE(toldLength, 0);
+    QCOMPARE(toldDuration, QStringLiteral("0:00"));
+    QCOMPARE(snapshotTold.size(), 0);
+    QTRY_COMPARE(snapshotTold.size(), 1);
+}
+
+// The playing row is told at the end of the poll that applied it, with the
+// queue's count and totals, not with the queued trackIdentityChanged: rows
+// that came with it were made reading the row before it, and drew a frame
+// without the playing row's mark (on First Play, the first row; after a
+// track put before the playing one, the mark on the row it left). A burst
+// tells it once, and trackIdentityChanged still follows for its handlers.
+void BridgeClientTest::playingRowIsToldInThePollThatChangesTheRows() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    const QMetaProperty property = client.metaObject()->property(
+        client.metaObject()->indexOfProperty("playingQueueIndex"));
+    QVERIFY(property.notifySignal() == QMetaMethod::fromSignal(&BridgeClient::queueChanged));
+    client.m_snapshotNotifyTimer.stop();
+    client.m_snapshotChangedPending = false;
+
+    auto *model = qobject_cast<QueueRowsModel *>(client.queueRows());
+    QVERIFY(model != nullptr);
+    QSignalSpy told(&client, &BridgeClient::queueChanged);
+    QSignalSpy identityTold(&client, &BridgeClient::trackIdentityChanged);
+    // The playing row bindings have last been told.
+    int toldPlaying = client.playingQueueIndex();
+    connect(&client, &BridgeClient::queueChanged, &client, [&]() {
+        toldPlaying = client.playingQueueIndex();
+    });
+    const auto poll = [&client](const QVector<BinaryBridgeCodec::DecodedSnapshot> &snapshots) {
+        client.resetPollChanges();
+        for (const BinaryBridgeCodec::DecodedSnapshot &snapshot : snapshots) {
+            client.processBinarySnapshot(snapshot);
+        }
+        client.schedulePollChanges();
+    };
+    const auto playing = [](BinaryBridgeCodec::DecodedSnapshot snapshot, int index, const QString &path) {
+        snapshot.playback.present = true;
+        snapshot.playback.state = 1;
+        snapshot.playback.currentQueueIndex = index;
+        snapshot.playback.currentPath = path;
+        snapshot.playback.trackToken = 1;
+        return snapshot;
+    };
+    const QStringList paths = numberedPaths(3);
+
+    // First Play: the rows and their playing row in one snapshot.
+    poll({playing(fullQueueSnapshot(1, paths), 0, paths[0])});
+    QCOMPARE(model->rowCount(), 3);
+    QCOMPARE(told.size(), 1);
+    QCOMPARE(toldPlaying, 0);
+    QCOMPARE(identityTold.size(), 0);
+    QTRY_COMPARE(identityTold.size(), 1);
+
+    // A track put before the playing one: the playing row moves down with
+    // the rows, in the same poll.
+    poll({playing(queueDeltaSnapshot(1, 2, 4,
+                      {queueOp(BinaryBridgeCodec::QueueOpInsert, 0, 0,
+                               {queueTrack(QStringLiteral("/music/first.flac"))})}),
+                  1, paths[0])});
+    QCOMPARE(model->rowCount(), 4);
+    QCOMPARE(told.size(), 2);
+    QCOMPARE(toldPlaying, 1);
+
+    // The next track, in a burst of snapshots: told once, with the last.
+    poll({playing(BinaryBridgeCodec::DecodedSnapshot{}, 2, paths[1]),
+          playing(BinaryBridgeCodec::DecodedSnapshot{}, 3, paths[2])});
+    QCOMPARE(told.size(), 3);
+    QCOMPARE(toldPlaying, 3);
+
+    // A poll that leaves the playing row tells nothing.
+    poll({playing(BinaryBridgeCodec::DecodedSnapshot{}, 3, paths[2])});
+    QCOMPARE(told.size(), 3);
+}
+
 void BridgeClientTest::queueRowRangeMovesDecodeAndMoveTheirRowsOnce() {
     QByteArray full;
     putQueueHeader(full, BinaryBridgeCodec::QueueFull, 1, 6);
@@ -5089,6 +5434,88 @@ void BridgeClientTest::gaplessAndRepeatOneMoveOnlyThePlayingRow() {
     QCOMPARE(rowSignals.resets.count(), 0);
     QCOMPARE(rowSignals.updates.count(), 0);
     QCOMPARE(rowSignals.removes.count(), 1);
+}
+
+// A queue edit can reach the client with the playing index from before it,
+// which then names another row: the current track's own row is marked
+// playing and gives the transport its length.
+void BridgeClientTest::aPlayingIndexFromBeforeAnEditMarksOnlyTheCurrentTracksRow() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    const QStringList paths = numberedPaths(3);
+    auto queue = fullQueueSnapshot(1, paths);
+    queue.queue.tracks[0].lengthSeconds = 61.0f;
+    queue.queue.tracks[1].lengthSeconds = 62.0f;
+    queue.queue.tracks[2].lengthSeconds = 63.0f;
+    QVERIFY(client.processBinarySnapshot(queue));
+    auto playing = playbackSnapshot(paths.at(1), 1.0, 1);
+    playing.playback.currentQueueIndex = 1;
+    QVERIFY(client.processBinarySnapshot(playing));
+    QCOMPARE(client.playingQueueIndex(), 1);
+    QCOMPARE(client.playingQueueLengthText(), QStringLiteral("1:02"));
+
+    // Row 0 goes, and the index still says row 1, which is the last
+    // track's now.
+    auto edit = queueDeltaSnapshot(1, 2, 2, {queueOp(BinaryBridgeCodec::QueueOpRemove, 0, 1)});
+    edit.playback = playing.playback;
+    QVERIFY(client.processBinarySnapshot(edit));
+    QCOMPARE(client.queuePathAt(0), paths.at(1));
+    QCOMPARE(client.playingQueueIndex(), 0);
+    QCOMPARE(client.playingQueueLengthText(), QStringLiteral("1:02"));
+
+    // A new queue without the track marks no row and gives no length.
+    auto replaced = fullQueueSnapshot(3, {paths.at(2), paths.at(0)});
+    replaced.playback = playing.playback;
+    QVERIFY(client.processBinarySnapshot(replaced));
+    QCOMPARE(client.playingQueueIndex(), -1);
+    QCOMPARE(client.playingQueueLengthText(), QString());
+}
+
+// The current track's length from its queue row, which stays while it is
+// stopped, follows the row as its tags are read and the track as it
+// changes, gapless and Repeat One too, and goes with the queue.
+void BridgeClientTest::playingQueueLengthFollowsTheCurrentRow() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    const QStringList paths = numberedPaths(2);
+    auto queue = fullQueueSnapshot(1, paths);
+    queue.queue.tracks[0].lengthSeconds = 245.0f;
+    queue.queue.tracks[1].lengthSeconds = -1.0f;
+    QVERIFY(client.processBinarySnapshot(queue));
+    QCOMPARE(client.playingQueueLengthText(), QString());
+
+    auto stopped = playbackSnapshot(paths.at(0), 0.0, 1);
+    stopped.playback.state = 0;
+    stopped.playback.durationSeconds = 0.0;
+    stopped.playback.currentQueueIndex = -1;
+    client.m_pollSnapshotChanged = false;
+    QVERIFY(client.processBinarySnapshot(stopped));
+    QCOMPARE(client.playingQueueLengthText(), QStringLiteral("4:05"));
+    // The poll that took it tells the views.
+    QVERIFY(client.m_pollSnapshotChanged);
+
+    auto gapless = playbackSnapshot(paths.at(1), 0.0, 2);
+    gapless.playback.currentQueueIndex = 1;
+    QVERIFY(client.processBinarySnapshot(gapless));
+    QCOMPARE(client.playingQueueLengthText(), formatQueueDuration(-1.0));
+    // The row's tags are read.
+    auto read = fullQueueSnapshot(2, paths);
+    read.queue.tracks[0].lengthSeconds = 245.0f;
+    read.queue.tracks[1].lengthSeconds = 62.0f;
+    read.playback = gapless.playback;
+    QVERIFY(client.processBinarySnapshot(read));
+    QCOMPARE(client.playingQueueLengthText(), QStringLiteral("1:02"));
+    auto repeatOne = playbackSnapshot(paths.at(1), 0.0, 3);
+    repeatOne.playback.currentQueueIndex = 1;
+    QVERIFY(client.processBinarySnapshot(repeatOne));
+    QCOMPARE(client.playingQueueLengthText(), QStringLiteral("1:02"));
+
+    auto cleared = fullQueueSnapshot(3, {});
+    cleared.playback.present = true;
+    cleared.playback.state = 0;
+    cleared.playback.currentQueueIndex = -1;
+    QVERIFY(client.processBinarySnapshot(cleared));
+    QCOMPARE(client.playingQueueLengthText(), QString());
 }
 
 void BridgeClientTest::realBridgeQueueEditsArriveAsRowSignals() {
@@ -8447,6 +8874,8 @@ void BridgeClientTest::playbackErrorPacketReachesBridgeError() {
         payloadStream.writeRawData(subjectText.constData(), static_cast<int>(subjectText.size()));
         payloadStream << quint32(text.size());
         payloadStream.writeRawData(text.constData(), static_cast<int>(text.size()));
+        // No system's text.
+        payloadStream << quint32(0);
         QByteArray packet;
         QDataStream header(&packet, QIODevice::WriteOnly);
         header.setByteOrder(QDataStream::LittleEndian);
@@ -8486,6 +8915,50 @@ void BridgeClientTest::playbackErrorPacketReachesBridgeError() {
     QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packetWith(0, 2), &decoded, &error));
 }
 
+// A failed save's title and the system's text come as fields of their own:
+// Recent Issues shows the text apart, and the log has both.
+void BridgeClientTest::anErrorsSystemTextReachesBridgeErrorApart() {
+    // Mirrored by ffi::error_packet_tests::an_errors_system_text_is_sent_apart_from_its_message.
+    const QString message = QStringLiteral("Settings couldn\u2019t be saved");
+    const QString subject = QStringLiteral("/c/settings.txt");
+    const QString detail = QStringLiteral("failed to replace /c/settings.txt: Permission denied (os error 13)");
+    QByteArray payload;
+    QDataStream payloadStream(&payload, QIODevice::WriteOnly);
+    payloadStream.setByteOrder(QDataStream::LittleEndian);
+    payloadStream << quint8(BinaryBridgeCodec::ErrorCategorySettings) << quint8(BinaryBridgeCodec::ErrorSeverityError);
+    for (const QString &text : {subject, message, detail}) {
+        const QByteArray utf8 = text.toUtf8();
+        payloadStream << quint32(utf8.size());
+        payloadStream.writeRawData(utf8.constData(), static_cast<int>(utf8.size()));
+    }
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QString error;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packetWithSection(BinaryBridgeCodec::SectionError, payload),
+                                                     &decoded, &error),
+             qPrintable(error));
+    QCOMPARE(decoded.errorMessage, message);
+    QCOMPARE(decoded.errorDetail, detail);
+
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QSignalSpy errors(&client, &BridgeClient::bridgeError);
+    client.processBinarySnapshot(decoded);
+    QCOMPARE(errors.count(), 1);
+    QCOMPARE(errors.at(0).at(0).toString(), message);
+    QCOMPARE(errors.at(0).at(3).toString(), subject);
+    QCOMPARE(errors.at(0).at(4).toString(), detail);
+    // The log keeps the line it had: the title, the system's text, the file.
+    const QString logged = client.m_diagnosticsLines.join(QLatin1Char('\n'));
+    QVERIFY2(logged.contains(QStringLiteral("[settings] error: Settings couldn\u2019t be saved: failed to replace "
+                                            "/c/settings.txt: Permission denied (os error 13) (/c/settings.txt)")),
+             qPrintable(logged));
+
+    // A section without the system's text, as an older backend sent it, is refused.
+    payload.chop(4 + detail.toUtf8().size());
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packetWithSection(BinaryBridgeCodec::SectionError, payload),
+                                                     &decoded, &error));
+}
+
 namespace {
 
 // The packet the Rust relay encodes when the backend stops without being asked
@@ -8495,9 +8968,10 @@ QByteArray backendFailurePacket(const QString &message) {
     QByteArray payload;
     QDataStream payloadStream(&payload, QIODevice::WriteOnly);
     payloadStream.setByteOrder(QDataStream::LittleEndian);
-    // A system error with no subject.
+    // A system error with no subject, and no system's text.
     payloadStream << quint8(0) << quint8(1) << quint32(0) << quint32(text.size());
     payload.append(text);
+    payload.append(QByteArray(4, '\0'));
     QByteArray packet;
     QDataStream stream(&packet, QIODevice::WriteOnly);
     stream.setByteOrder(QDataStream::LittleEndian);
@@ -8596,7 +9070,7 @@ void BridgeClientTest::aBackendThatCannotStartIsABackendFailure() {
         QVERIFY(!client.connected());
         // The state a backend that stops on its own leaves, with the reason.
         QCOMPARE(client.backendFailure(),
-                 QStringLiteral("The playback engine could not start: %1. "
+                 QStringLiteral("The playback engine couldn\u2019t start: %1. "
                                 "Restart Ferrous to try again.")
                      .arg(reason));
 
@@ -8620,7 +9094,7 @@ void BridgeClientTest::aBackendThatCannotStartIsABackendFailure() {
     BridgeClient client;
     QCOMPARE(client.m_ffiBridge, nullptr);
     QCOMPARE(client.backendFailure(),
-             QStringLiteral("The playback engine could not start. Restart Ferrous to try again."));
+             QStringLiteral("The playback engine couldn\u2019t start. Restart Ferrous to try again."));
 }
 
 void BridgeClientTest::quittingSendsNothingToTheStoppedBackend() {
@@ -8779,9 +9253,9 @@ void BridgeClientTest::saveBeforeQuitReportsAFailedSaveAndSavesOnRetry() {
     QVERIFY(second != first);
     QTRY_COMPARE(finished.count(), 2);
     QCOMPARE(finished.at(0).at(0).value<quint32>(), first);
-    QVERIFY2(finished.at(0).at(1).toBool(), qPrintable(finished.at(0).at(2).toString()));
+    QVERIFY2(finished.at(0).at(1).toBool(), qPrintable(finished.at(0).at(2).toMap().value(QStringLiteral("detail")).toString()));
     QCOMPARE(finished.at(1).at(0).value<quint32>(), second);
-    QVERIFY2(finished.at(1).at(1).toBool(), qPrintable(finished.at(1).at(2).toString()));
+    QVERIFY2(finished.at(1).at(1).toBool(), qPrintable(finished.at(1).at(2).toMap().value(QStringLiteral("detail")).toString()));
     QVERIFY(QFileInfo(settingsPath).isFile());
     finished.clear();
 
@@ -8796,16 +9270,23 @@ void BridgeClientTest::saveBeforeQuitReportsAFailedSaveAndSavesOnRetry() {
     QTRY_COMPARE(finished.count(), 1);
     QCOMPARE(finished.at(0).at(0).value<quint32>(), failing);
     QVERIFY(!finished.at(0).at(1).toBool());
-    const QString message = finished.at(0).at(2).toString();
-    QVERIFY2(message.startsWith(QStringLiteral("Settings could not be saved")), qPrintable(message));
-    QVERIFY2(message.contains(settingsPath), qPrintable(message));
+    // The settings alone, with no cause the dialog can name, and the
+    // system's text, which names the file.
+    const QVariantMap failure = finished.at(0).at(2).toMap();
+    QCOMPARE(failure.value(QStringLiteral("settings")).toBool(), true);
+    QCOMPARE(failure.value(QStringLiteral("queue")).toBool(), false);
+    QCOMPARE(failure.value(QStringLiteral("scrobbles")).toBool(), false);
+    QCOMPARE(failure.value(QStringLiteral("cause")).toString(), QString());
+    const QString detail = failure.value(QStringLiteral("detail")).toString();
+    QVERIFY2(detail.startsWith(QStringLiteral("failed to replace ")), qPrintable(detail));
+    QVERIFY2(detail.contains(settingsPath), qPrintable(detail));
 
     // Retry once the cause is gone.
     QVERIFY(configDir.rmdir(QStringLiteral("settings.txt")));
     const quint32 retry = client.saveStateBeforeQuit();
     QTRY_COMPARE(finished.count(), 2);
     QCOMPARE(finished.at(1).at(0).value<quint32>(), retry);
-    QVERIFY2(finished.at(1).at(1).toBool(), qPrintable(finished.at(1).at(2).toString()));
+    QVERIFY2(finished.at(1).at(1).toBool(), qPrintable(finished.at(1).at(2).toMap().value(QStringLiteral("detail")).toString()));
     QFile settings(settingsPath);
     QVERIFY(settings.open(QIODevice::ReadOnly));
     const QByteArray saved = settings.readAll();
@@ -8827,8 +9308,110 @@ void BridgeClientTest::saveBeforeQuitFailsWhenTheBackendHasStopped() {
     QCOMPARE(finished.at(0).at(0).value<quint32>(), requestId);
     QVERIFY(requestId != 0);
     QVERIFY(!finished.at(0).at(1).toBool());
-    QCOMPARE(finished.at(0).at(2).toString(),
-        QStringLiteral("Settings and the queue could not be saved: the backend has stopped."));
+    const QVariantMap failure = finished.at(0).at(2).toMap();
+    QCOMPARE(failure.value(QStringLiteral("settings")).toBool(), true);
+    QCOMPARE(failure.value(QStringLiteral("queue")).toBool(), true);
+    QCOMPARE(failure.value(QStringLiteral("scrobbles")).toBool(), false);
+    QCOMPARE(failure.value(QStringLiteral("cause")).toString(), QStringLiteral("engineStopped"));
+    QCOMPARE(failure.value(QStringLiteral("detail")).toString(), QString());
+}
+
+// The answer to a save before quitting carries what could not be saved
+// and why as values, which the dialog puts in words; it never reads the
+// system's text for them.
+void BridgeClientTest::aFailedSaveBeforeQuitDecodesWhatAndWhy() {
+    // Mirrored by ffi::tests::a_save_before_quitting_is_answered_as_the_qt_decoder_reads_it.
+    const auto packetWith = [](quint8 saved, quint8 subjects, quint8 cause, const QByteArray &detail) {
+        QByteArray payload;
+        QDataStream payloadStream(&payload, QIODevice::WriteOnly);
+        payloadStream.setByteOrder(QDataStream::LittleEndian);
+        payloadStream << quint32(5) << saved << subjects << cause << quint32(detail.size());
+        payloadStream.writeRawData(detail.constData(), static_cast<int>(detail.size()));
+        return packetWithSection(BinaryBridgeCodec::SectionStateSaved, payload);
+    };
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QString error;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(
+                 packetWith(0, 0b101, 1, QByteArrayLiteral("a: denied\nb: denied")), &decoded, &error),
+             qPrintable(error));
+    QVERIFY(decoded.hasStateSaved);
+    QCOMPARE(decoded.stateSaveRequestId, quint32(5));
+    QVERIFY(!decoded.stateSaved);
+
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QSignalSpy finished(&client, &BridgeClient::stateSaveFinished);
+    client.processBinarySnapshot(decoded);
+    QCOMPARE(finished.count(), 1);
+    QCOMPARE(finished.at(0).at(0).value<quint32>(), quint32(5));
+    QCOMPARE(finished.at(0).at(1).toBool(), false);
+    const QVariantMap failure = finished.at(0).at(2).toMap();
+    QCOMPARE(failure.value(QStringLiteral("settings")).toBool(), true);
+    QCOMPARE(failure.value(QStringLiteral("queue")).toBool(), false);
+    QCOMPARE(failure.value(QStringLiteral("scrobbles")).toBool(), true);
+    QCOMPARE(failure.value(QStringLiteral("cause")).toString(), QStringLiteral("permission"));
+    QCOMPARE(failure.value(QStringLiteral("detail")).toString(), QStringLiteral("a: denied\nb: denied"));
+
+    // Each cause the backend sends has its code; none for Other.
+    const QList<QPair<quint8, QString>> causes{
+        {BinaryBridgeCodec::QuitSaveCauseOther, QString()},
+        {BinaryBridgeCodec::QuitSaveCausePermission, QStringLiteral("permission")},
+        {BinaryBridgeCodec::QuitSaveCauseReadOnlyFileSystem, QStringLiteral("readOnlyFileSystem")},
+        {BinaryBridgeCodec::QuitSaveCauseNoSpace, QStringLiteral("noSpace")},
+        {BinaryBridgeCodec::QuitSaveCauseBusy, QStringLiteral("busy")},
+    };
+    for (const auto &[cause, code] : causes) {
+        QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(
+                     packetWith(0, BinaryBridgeCodec::QuitSaveSettings, cause, {}), &decoded, &error),
+                 qPrintable(error));
+        QCOMPARE(BridgeClient::quitSaveFailureMap(decoded.stateSaveSubjects, decoded.stateSaveCause,
+                                                  decoded.stateSaveDetail)
+                     .value(QStringLiteral("cause"))
+                     .toString(),
+                 code);
+    }
+
+    // A success says nothing failed.
+    QVERIFY(BinaryBridgeCodec::decodeSnapshotPacket(packetWith(1, 0, 0, {}), &decoded, &error));
+    QVERIFY(decoded.stateSaved);
+    client.processBinarySnapshot(decoded);
+    QCOMPARE(finished.count(), 2);
+    QVERIFY(finished.at(1).at(2).toMap().isEmpty());
+
+    // Bits and causes past those Rust sends are refused, as is the old
+    // layout, a message alone.
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packetWith(0, 0b1000, 0, {}), &decoded, &error));
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
+        packetWith(0, 1, BinaryBridgeCodec::QuitSaveCauseLast + 1, {}), &decoded, &error));
+    QByteArray oldLayout;
+    QDataStream oldStream(&oldLayout, QIODevice::WriteOnly);
+    oldStream.setByteOrder(QDataStream::LittleEndian);
+    oldStream << quint32(5) << quint8(0) << quint32(1);
+    oldStream.writeRawData("x", 1);
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
+        packetWithSection(BinaryBridgeCodec::SectionStateSaved, oldLayout), &decoded, &error));
+}
+
+// The status bar says "Playback engine stopped": its tooltip's default,
+// when the stop came without a reason, and the error of a save after it
+// call it an engine too (they said backend).
+void BridgeClientTest::aStoppedEngineIsNamedAnEngine() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    acceptCommands(client);
+    BinaryBridgeCodec::DecodedSnapshot stopped;
+    stopped.hasStopped = true;
+    // A stop the client didn't ask for.
+    client.m_bridgeShutdownRequested = false;
+    QVERIFY(!client.processBinarySnapshot(stopped));
+    client.m_bridgeShutdownRequested = true;
+    QCOMPARE(client.backendFailure(),
+             QStringLiteral("The playback engine stopped unexpectedly. Restart Ferrous to continue."));
+    QSignalSpy finished(&client, &BridgeClient::stateSaveFinished);
+    (void)client.saveStateBeforeQuit();
+    QTRY_COMPARE(finished.count(), 1);
+    QCOMPARE(finished.at(0).at(2).toMap().value(QStringLiteral("cause")).toString(),
+             QStringLiteral("engineStopped"));
 }
 
 void BridgeClientTest::analysisFrameTellsAFileThatEndsEarly() {
@@ -9244,8 +9827,16 @@ void BridgeClientTest::metadataTrackTotalDecodesAfterTheTreeKeys()
     QCOMPARE(decoded.metadata.trackTotal, 8);
     QCOMPARE(decoded.metadata.treeKeys, QStringList{QStringLiteral("root|/music")});
     QCOMPARE(decoded.metadata.libraryPath, QStringLiteral("/library/A/Album/02.flac"));
+    QVERIFY(!decoded.metadata.coverNamed);
     QVERIFY(!decode(payload.first(payload.size() - 1), &decoded));
-    QVERIFY(!decode(payload + QByteArray(1, '\0'), &decoded));
+    // Then whether the cover has a cover's name, such as cover.jpg: 0 or 1.
+    QVERIFY(decode(payload + QByteArray(1, '\1'), &decoded));
+    QVERIFY(decoded.metadata.coverNamed);
+    QCOMPARE(decoded.metadata.trackTotal, 8);
+    QVERIFY(decode(payload + QByteArray(1, '\0'), &decoded));
+    QVERIFY(!decoded.metadata.coverNamed);
+    QVERIFY(!decode(payload + QByteArray(1, '\2'), &decoded));
+    QVERIFY(!decode(payload + QByteArray(2, '\0'), &decoded));
 }
 
 // The library's path for the playing track, which differs from the track's
@@ -9278,6 +9869,65 @@ void BridgeClientTest::currentTrackLibraryPathFollowsTheMetadataOfTheCurrentTrac
     snapshot.metadata.libraryPath = QStringLiteral("/music/Album/02.flac");
     QVERIFY(client.processBinarySnapshot(snapshot));
     QCOMPARE(client.currentTrackLibraryPath(), snapshot.metadata.libraryPath);
+}
+
+// Whether the playing track's cover has a cover's name, which Replace
+// Album Art says the outcome by: the backend says it with the metadata's
+// cover, and the iTunes search keeps it with the cover it searched for.
+void BridgeClientTest::currentTrackCoverNamedFollowsTheMetadataCover()
+{
+    BridgeClient client;
+    isolateBridgeClient(client);
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.playback.present = true;
+    snapshot.playback.state = 1;
+    snapshot.playback.currentPath = QStringLiteral("/music/A/Album/01.flac");
+    snapshot.metadata.present = true;
+    snapshot.metadata.sourcePath = snapshot.playback.currentPath;
+    // Without a cover, nothing is said.
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QVERIFY(!client.currentTrackCoverNamed().isValid());
+    snapshot.metadata.coverPath = QStringLiteral("/music/A/Album/cover.jpg");
+    snapshot.metadata.coverNamed = true;
+    client.m_pollTrackMetadataChanged = false;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentTrackCoverNamed(), QVariant(true));
+    QVERIFY(client.m_pollTrackMetadataChanged);
+    // The same cover path, renamed in place by the backend's word.
+    snapshot.metadata.coverNamed = false;
+    client.m_pollTrackMetadataChanged = false;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentTrackCoverNamed(), QVariant(false));
+    QVERIFY(client.m_pollTrackMetadataChanged);
+    // The next track's cover is not known yet: the cover shown stays, and
+    // what was said of it.
+    snapshot.metadata.coverNamed = true;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    snapshot.playback.currentPath = QStringLiteral("/music/A/Album/02.flac");
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QVERIFY(!client.currentTrackCoverPath().isEmpty());
+    QCOMPARE(client.currentTrackCoverNamed(), QVariant(true));
+    // Its own metadata, without art, says nothing.
+    snapshot.metadata.sourcePath = snapshot.playback.currentPath;
+    snapshot.metadata.coverPath.clear();
+    snapshot.metadata.coverNamed = false;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QVERIFY(client.currentTrackCoverPath().isEmpty());
+    QVERIFY(!client.currentTrackCoverNamed().isValid());
+
+    // The search keeps the word with the cover it was for, and says none
+    // when there was none.
+    snapshot.metadata.coverPath = QStringLiteral("/music/A/Album/back.jpg");
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    client.searchCurrentTrackArtworkSuggestions();
+    QCOMPARE(client.itunesArtworkTarget().value(QStringLiteral("coverNamed")), QVariant(false));
+    QCOMPARE(client.itunesArtworkTarget().value(QStringLiteral("coverPath")).toString(),
+             client.currentTrackCoverPath());
+    snapshot.metadata.coverPath.clear();
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    client.searchCurrentTrackArtworkSuggestions();
+    QVERIFY(!client.itunesArtworkTarget().contains(QStringLiteral("coverNamed")));
+    client.clearItunesArtworkSuggestions();
 }
 
 void BridgeClientTest::currentTrackTotalBelongsToTheCurrentTracksNumber()
@@ -9730,6 +10380,51 @@ void BridgeClientTest::libraryChangesNotifyOnlyLibraryProperties() {
     QCOMPARE(client.libraryScanTotal(), -1);
 }
 
+// The backend starts with an empty library and sends it before the library
+// worker has read the database: no roots then is not a first run, and the
+// client says so until a snapshot says the library is loaded (#373: the
+// first-run prompt and "No folders" flashed at startup).
+void BridgeClientTest::libraryLoadedFollowsTheBackend() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QVERIFY(!client.libraryLoaded());
+    QCOMPARE(client.property("libraryLoaded").toBool(), false);
+
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.library.present = true;
+    snapshot.library.loaded = false;
+    client.processBinarySnapshot(snapshot);
+    QVERIFY(!client.libraryLoaded());
+    QCOMPARE(client.libraryRootCount(), 0);
+    QVERIFY(!client.m_pollLibraryChanged);
+
+    // The worker's library, with a folder: both at once, in one notification.
+    snapshot.library.loaded = true;
+    snapshot.library.rootCount = 1;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QVERIFY(client.libraryLoaded());
+    QCOMPARE(client.libraryRootCount(), 1);
+    QVERIFY(client.m_pollLibraryChanged);
+
+    // A snapshot without the library section keeps it.
+    client.m_pollLibraryChanged = false;
+    BinaryBridgeCodec::DecodedSnapshot other;
+    client.processBinarySnapshot(other);
+    QVERIFY(client.libraryLoaded());
+    QVERIFY(!client.m_pollLibraryChanged);
+
+    // A new install's library, empty but loaded, is told too.
+    BridgeClient fresh;
+    isolateBridgeClient(fresh);
+    snapshot.library.rootCount = 0;
+    QVERIFY(fresh.processBinarySnapshot(snapshot));
+    QVERIFY(fresh.libraryLoaded());
+    QVERIFY(fresh.m_pollLibraryChanged);
+    QSignalSpy library(&fresh, &BridgeClient::libraryChanged);
+    fresh.scheduleLibraryChanged();
+    QTRY_COMPARE(library.count(), 1);
+}
+
 // The file manager's name that xdg-mime finds would change the name guessed
 // from $XDG_CURRENT_DESKTOP after a test's client starts, and notify
 // snapshotChanged while the test counts it; main() sets no detector.
@@ -9848,6 +10543,7 @@ void BridgeClientTest::libraryWatchingDecodesFromBinaryPayload() {
     append(float(-1.0f));
     append(quint8(1));                                       // files to scan known
     append(quint32(40));                                     // files to scan
+    append(quint8(1));                                       // library loaded
     append(quint16(2));
     text(QStringLiteral("/music"));
     text(QStringLiteral("Music"));
@@ -9880,6 +10576,22 @@ void BridgeClientTest::libraryWatchingDecodesFromBinaryPayload() {
     QCOMPARE(decoded.library.filesDiscovered, 3);
     QCOMPARE(decoded.library.filesProcessed, 2);
     QCOMPARE(decoded.library.filesTotal, 40);
+    QVERIFY(decoded.library.loaded);
+    // The backend's empty start, before the library worker's library: the
+    // flag follows the files to scan.
+    constexpr qsizetype loadedOffset = 4 * 4 + 1 + 4 + 4 + 4 * 4 + 4 + 4 + 1 + 4;
+    QCOMPARE(bytes.at(loadedOffset), char(1));
+    bytes[loadedOffset] = char(0);
+    decoded = {};
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(section(BinaryBridgeCodec::SectionLibraryMeta),
+                                                     &decoded, &error),
+             qPrintable(error));
+    QVERIFY(!decoded.library.loaded);
+    bytes[loadedOffset] = char(2);
+    decoded = {};
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(section(BinaryBridgeCodec::SectionLibraryMeta),
+                                                     &decoded, &error));
+    bytes[loadedOffset] = char(1);
     // A scan that cannot tell its total, as the first scan of a folder.
     // The flag follows the counts, the error, the progress and the rate.
     constexpr qsizetype totalKnownOffset = 4 * 4 + 1 + 4 + 4 + 4 * 4 + 4 + 4;

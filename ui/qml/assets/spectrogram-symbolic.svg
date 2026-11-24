@@ -1,15 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- The visualization mode switch's Spectrogram glyph, drawn for 16 px at 1x: the app icon's
-     small-size pair of traces, a glide and its 3rd harmonic, each starting on its own at the left
-     as the icon's traces do, in the icon's weight order, the lower one the heavier. The lower is the
-     icon's fundamental, a 2 px stroke from x 2 to 14 that rises 2.5 px along its length, most of it
-     in its first half, bending over as a glide does. The harmonic, the icon's top trace, a 1.5 px
-     stroke, starts 4 px above it and rises at some 45 degrees, bending over to 20: two arcs fanning
-     apart, some 4 px clear of each other half way across and 6 px at the end, and 1.75 px or more
-     everywhere. Round caps, a weight beside Breeze's waveform glyph. A one-colour mask, drawn in the
+<!-- The visualization mode switch's Spectrogram glyph, drawn for 16 px at 1x on its Waveform
+     partner's grid: the same five 2 px time slices, 3 px apart from x 1, as the spectrogram's own
+     columns. Near the bottom a band of five 2 px cells, one in each slice, a beat's pulses; above
+     it a note's fundamental and its harmonic, 2 px traces stepping up at each slice's edge, the
+     harmonic 1 px a slice, twice the fundamental's rise, so they fan apart. Every edge on a whole
+     pixel, so each part fills whole pixels at 1x and 2x, as the waveform's strokes do, and the
+     chosen glyph is whole on its fill. Smooth, the glyph was the app's mark, which the idle row and
+     the stand-in cover use; three ascending bars read as levels. A one-colour mask, drawn in the
      plot's text colour. -->
 <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" d="M2.75 13.25C5.25 12.1 8.75 11.15 13.25 10.75"/>
-<path fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" d="M2.75 9.25C5 6.9 8.5 5 13.25 3.25"/>
+<path fill="#000" d="M1 6H4V5H7V4H10V3H13V2H15V4H13V5H10V6H7V7H4V8H1Z"/>
+<path fill="#000" d="M1 10H7V9H13V8H15V10H13V11H7V12H1Z"/>
+<path fill="#000" d="M1 13H3V15H1ZM4 13H6V15H4ZM7 13H9V15H7ZM10 13H12V15H10ZM13 13H15V15H13Z"/>
 </svg>

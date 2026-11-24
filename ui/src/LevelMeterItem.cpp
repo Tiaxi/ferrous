@@ -3,6 +3,7 @@
 #include "LevelMeterItem.h"
 #include "FerrousBridgeFfi.h"
 #include "PlaybackClock.h"
+#include "SceneGraphParentNode.h"
 #include "WindowPresence.h"
 
 #include <QFutureWatcher>
@@ -31,16 +32,19 @@ constexpr int kReadoutIntervalMs = 250;
 constexpr double kMarksDb[] = {-6.0, -12.0, -24.0};
 constexpr double kShortLaneMarksDb[] = {-6.0, -24.0};
 // Per lane: the column's floor, the track, the lamp, the gap under it, the
-// fill, the three marks' ticks, the gap under the peak tick and the peak
-// tick.
-constexpr int kNodesPerLane = 10;
-// Which of a lane's nodes is the fill, a texture of its rungs; the others
-// are rectangles of one colour.
-constexpr int kRampNode = 4;
+// unlit ladder, the fill, the three marks' ticks, the gap under the peak
+// tick, the peak tick and the keyline.
+constexpr int kNodesPerLane = 12;
+// Which of a lane's nodes are the unlit ladder and the fill, textures of
+// their rungs; the others are rectangles of one colour.
+constexpr int kUnlitRampNode = 4;
+constexpr int kRampNode = 5;
 
 using Self = LevelMeterItem;
 
-struct MeterNode : QSGNode {
+// A parent node, as its nodes are made again for a new lane count while it
+// is drawn.
+struct MeterNode : SceneGraphParentNode {
     int lanes{-1};
 };
 
@@ -336,12 +340,6 @@ void LevelMeterItem::setActive(bool value) {
     noteReadout();
 }
 
-void LevelMeterItem::setFramed(bool value) {
-    if (m_framed == value) return;
-    m_framed = value;
-    emit framedChanged();
-    update();
-}
 
 
 void LevelMeterItem::setReadoutWanted(bool value) {
@@ -700,13 +698,13 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
         // The seam: the column's left edge and the rows between lanes.
         node->appendChildNode(new QSGSimpleRectNode);
         for (int i = 0; i < m_laneCount * kNodesPerLane; ++i) {
-            if (i % kNodesPerLane == kRampNode) {
+            if (i % kNodesPerLane == kRampNode || i % kNodesPerLane == kUnlitRampNode) {
                 auto *ramp = new RampNode;
                 ramp->setFiltering(QSGTexture::Nearest);
                 // In the tree, a texture node has a texture to draw: the
                 // software renderer looks at it as soon as it is added.
                 updateRamp(ramp, window(), scalePixels(i / kNodesPerLane), window()->effectiveDevicePixelRatio(),
-                           m_fillColor);
+                           i % kNodesPerLane == kRampNode ? m_fillColor : m_unlitColor);
                 node->appendChildNode(ramp);
             } else {
                 node->appendChildNode(new QSGSimpleRectNode);
@@ -724,10 +722,12 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
         setRect(child, rect, color);
         child = child->nextSibling();
     };
-    // The fill, showing `rows` device pixels of its ramp.
-    const auto nextRamp = [&child, dpr, this](const QRectF &rect, double scalePixels, int rows) {
+    // A ladder of `color`, showing `rows` device pixels of its ramp: the
+    // fill, or the unlit ladder.
+    const auto nextRamp = [&child, dpr, this](const QRectF &rect, double scalePixels, int rows,
+                                              const QColor &color) {
         auto *ramp = static_cast<RampNode *>(child);
-        updateRamp(ramp, window(), scalePixels, dpr, m_fillColor);
+        updateRamp(ramp, window(), scalePixels, dpr, color);
         const int height = ramp->ramp->textureSize().height();
         rows = std::clamp(rows, 0, height);
         const QRectF source(0, height - rows, 1, rows);
@@ -735,27 +735,35 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
         if (ramp->rect() != rect) ramp->setRect(rect);
         child = child->nextSibling();
     };
-    // Across the track, and along the bar on it.
+    // Across the track, along the body on it, and a mark's tick beside it.
     const auto track = [](double y, double height) { return QRectF(kTrackLeft, y, kTrackWidth, height); };
-    const auto bar = [this](double y, double height) {
-        return m_framed ? QRectF(kFramedInset, y, kFramedBarWidth, height) : QRectF(kBarLeft, y, kBarWidth, height);
-    };
+    const auto body = [](double y, double height) { return QRectF(kBodyLeft, y, kBodyWidth, height); };
+    const auto mark = [](double y) { return QRectF(kMarkLeft, y, kMarkWidth, kMarkGap); };
     for (int lane = 0; lane < m_laneCount; ++lane) {
         const auto [top, bottom] = laneRows(lane, m_laneCount, height());
-        next(QRectF(kTrackLeft, top, std::max(0.0, width() - kTrackLeft), bottom - top), m_backgroundColor);
+        next(QRectF(kKeylineLeft, top, std::max(0.0, width() - kKeylineLeft), bottom - top), m_backgroundColor);
+        // The meter's own edge, the lane's height, beside the seam.
+        const QRectF keyline(kKeylineLeft, top, kKeylineWidth, bottom - top);
         const double meterTop = top + kInset;
         const double meterBottom = std::max(meterTop, bottom - kInset);
         next(track(meterTop, meterBottom - meterTop), m_troughColor);
         const Painted &shown = m_painted[static_cast<std::size_t>(lane)];
         const double scaleTop = meterTop + kLampHeight + 1.0;
         const double scaleHeight = std::max(0.0, meterBottom - scaleTop);
-        // The marks' ticks, across the track, each in the upper row of its
-        // gap in the ladder.
+        // The whole ladder, unlit, under the fill.
+        const auto nextUnlit = [&]() {
+            const double rows = std::ceil(scaleHeight * dpr);
+            nextRamp(scaleHeight > 0.0 && m_unlitColor.alpha() > 0 ? body(meterBottom - rows / dpr, rows / dpr)
+                                                                    : QRectF(),
+                     scaleHeight * dpr, static_cast<int>(rows), m_unlitColor);
+        };
+        // The marks' ticks, on the track's outer side, each beside its gap
+        // in the ladder.
         const auto nextMarks = [&]() {
             const std::vector<int> gaps = scaleHeight > 0.0 ? markGaps(scaleHeight) : std::vector<int>{};
             for (std::size_t i = 0; i < std::size(kMarksDb); ++i) {
                 const double y = i < gaps.size() ? std::max(scaleTop, meterBottom - gaps[i] - kMarkGap) : 0.0;
-                next(i < gaps.size() ? track(y, 1.0) : QRectF(), m_tickColor);
+                next(i < gaps.size() ? mark(y) : QRectF(), m_tickColor);
             }
         };
         if (!m_active || scaleHeight <= 0.0) {
@@ -764,27 +772,31 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
             // trough (an empty one read as a scrollbar's).
             next(QRectF(), m_backgroundColor);
             next(QRectF(), m_backgroundColor);
-            nextRamp(QRectF(), scaleHeight * dpr, 0);
+            nextUnlit();
+            nextRamp(QRectF(), scaleHeight * dpr, 0, m_fillColor);
             nextMarks();
             next(QRectF(), m_backgroundColor);
             next(QRectF(), m_backgroundColor);
+            next(keyline, m_keylineColor);
             continue;
         }
-        next(bar(meterTop, kLampHeight), shown.clip ? m_clipColor : m_clipOffColor);
-        next(track(meterTop + kLampHeight, 1.0), m_gapColor);
+        next(body(meterTop, kLampHeight), shown.clip ? m_clipColor : m_clipOffColor);
+        next(body(meterTop + kLampHeight, 1.0), m_gapColor);
         // The fill and the tick end on device pixels; frames are drawn only
         // when these change. The fill is a ladder of rungs from the scale's
         // foot, of one colour.
         const double fill = shown.fill / dpr;
-        nextRamp(bar(meterBottom - fill, fill), scaleHeight * dpr, shown.fill);
+        nextUnlit();
+        nextRamp(body(meterBottom - fill, fill), scaleHeight * dpr, shown.fill, m_fillColor);
         nextMarks();
-        // The 2 px tick is centred on its level, inside the scale. On the
-        // fill, a 1 px gap under it keeps it a mark of its own, whatever
-        // the fill's colour.
+        // The held peak, a 2 px line across the body, centred on its level,
+        // inside the scale. On the fill, a 1 px gap under it keeps it a
+        // mark of its own, whatever the fill's colour.
         const double tickY = std::clamp(meterBottom - shown.peak / dpr - 1.0, scaleTop, meterBottom - 2.0);
         const bool onFill = shown.peak >= 0 && meterBottom - fill < tickY + 3.0 && tickY + 3.0 <= meterBottom;
-        next(onFill ? track(tickY + 2.0, 1.0) : QRectF(), m_gapColor);
-        next(shown.peak >= 0 ? track(tickY, 2.0) : QRectF(), m_peakColor);
+        next(onFill ? body(tickY + 2.0, 1.0) : QRectF(), m_gapColor);
+        next(shown.peak >= 0 ? body(tickY, 2.0) : QRectF(), m_peakColor);
+        next(keyline, m_keylineColor);
     }
     setRect(node->lastChild(), m_topSeamColor.alpha() > 0 ? QRectF(0.0, 0.0, width(), 1.0) : QRectF(),
             m_topSeamColor);

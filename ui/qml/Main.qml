@@ -37,7 +37,7 @@ ApplicationWindow {
         "@title:window the album art viewer; %1 is the application name", "%1 Album Art",
         root.appDisplayName)
     // A preview from Replace from iTunes names what it shows:
-    // "iTunes Candidate — Ferrous Album Art".
+    // "iTunes Artwork — Ferrous Album Art".
     readonly property string albumArtViewerTitleName: viewerController.albumArtPreviewActive
             && viewerController.comparisonLabel.length > 0
         ? I18n.i18nc("@title:window %1 is what the album art viewer shows; %2 is the viewer's name",
@@ -73,6 +73,15 @@ ApplicationWindow {
     property string pendingLibraryRootName: ""
     // The backend stopped without being asked to, so no control works anymore.
     readonly property bool backendStopped: (root.uiBridge.backendFailure || "").length > 0
+    // Where Playback's actions can act, which its menu's items and the
+    // transport's buttons show as Breeze's disabled state; the actions stay
+    // on for the shortcuts. Play and Pause need a track, Stop one that plays
+    // or is paused, and Previous and Next a queue, as MPRIS has CanGoPrevious
+    // and CanGoNext.
+    readonly property bool playPauseCanAct: root.uiBridge.queueLength > 0
+        || root.uiBridge.playbackState !== "Stopped"
+    readonly property bool stopCanAct: root.uiBridge.playbackState !== "Stopped"
+    readonly property bool skipCanAct: root.uiBridge.queueLength > 0
     readonly property real snappyScrollFlickDeceleration: 18000
     readonly property real snappyScrollMaxFlickVelocity: 1400
     // Whether the window is on screen: visible, not minimized, and exposed.
@@ -195,14 +204,15 @@ ApplicationWindow {
     readonly property int splitHandleAllowance: 1
     // The smallest window that shows every pane at its own minimum size,
     // with the level meter whether it is shown or not, so that the window's
-    // minimum does not change with a setting.
+    // minimum does not change with a setting; the transport's band without
+    // the room under its row, which gives way in the least window.
     readonly property int contentMinimumWidth: Math.ceil(Math.max(
         sidebarPane.SplitView.minimumWidth + rightSplit.SplitView.minimumWidth
             + root.splitHandleAllowance,
         transportBar.implicitWidth))
     readonly property int contentMinimumHeight: Math.ceil(
         (root.menuBar ? root.menuBar.implicitHeight : 0)
-        + transportBar.implicitHeight
+        + transportBar.leastHeight
         + queuePane.SplitView.minimumHeight
         + root.visualizationMinimumHeight
         + root.splitHandleAllowance + transportSeam.height
@@ -252,6 +262,7 @@ ApplicationWindow {
         property var queueRows: []
         property int selectedQueueIndex: -1
         property int playingQueueIndex: -1
+        property string playingQueueLengthText: ""
         property string currentTrackPath: ""
         property real currentPlaySerial: 0
         property string currentTrackCoverPath: ""
@@ -320,6 +331,7 @@ ApplicationWindow {
         property var libraryTreeBinary: ""
         property int libraryVersion: 0
         property bool libraryScanInProgress: false
+        property bool libraryLoaded: true
         property int libraryRootCount: 0
         property int libraryTrackCount: 0
         property int libraryArtistCount: 0
@@ -359,8 +371,9 @@ ApplicationWindow {
         property bool diagnosticsLoading: false
         property bool connected: false
         property string backendFailure: ""
-        // What saveStateBeforeQuit fails with; empty for a save that succeeds.
-        property string stateSaveError: ""
+        // What saveStateBeforeQuit fails with, as BridgeClient's
+        // quitSaveFailureMap gives it; null for a save that succeeds.
+        property var stateSaveFailure: null
         // Leaves saveStateBeforeQuit unanswered, so tests can answer it
         // with stateSaveFinished in the order they choose.
         property bool holdStateSaveAnswers: false
@@ -378,7 +391,7 @@ ApplicationWindow {
         signal itunesArtworkChanged()
         signal imageFileDetailsChanged(string path)
         signal diagnosticsChanged()
-        signal bridgeError(string message, int category, int severity, string subject)
+        signal bridgeError(string message, int category, int severity, string subject, string detail)
         signal precomputedSpectrogramChunkReady(var data, int bins, int channelCount, int columns,
             int startIndex, int totalEstimate, int sampleRate, int hopSize,
             real coverage, bool complete, bool bufferReset, bool clearHistory, var trackToken, var generation)
@@ -556,13 +569,13 @@ ApplicationWindow {
             return true
         }
         function shutdown() {}
-        signal stateSaveFinished(int requestId, bool saved, string message)
+        signal stateSaveFinished(int requestId, bool saved, var failure)
         function saveStateBeforeQuit() {
             const requestId = ++bridgeFallback.lastStateSaveRequestId
-            const error = bridgeFallback.stateSaveError
+            const failure = bridgeFallback.stateSaveFailure
             if (!bridgeFallback.holdStateSaveAnswers) {
                 Qt.callLater(function() {
-                    bridgeFallback.stateSaveFinished(requestId, error.length === 0, error)
+                    bridgeFallback.stateSaveFinished(requestId, !failure, failure || ({}))
                 })
             }
             return requestId
@@ -576,7 +589,7 @@ ApplicationWindow {
         }
         // BridgeClient also logs it; there is no log here.
         function reportUiError(category, severity, subject, message) {
-            bridgeFallback.bridgeError(message, category, severity, subject)
+            bridgeFallback.bridgeError(message, category, severity, subject, "")
         }
         function toggleChannelMute(channelIndex) {}
         function soloChannel(channelIndex) {}
@@ -613,6 +626,7 @@ ApplicationWindow {
         function toggleRowSelected(row) {}
         function selectAllRows() {}
         function loadedPaths() { return [] }
+        function leadingRows(limit) { return [] }
         function bulkValue(field) { return "" }
         function bulkValueMixed(field) { return false }
         function extraValuesNote(field) { return "" }
@@ -797,7 +811,10 @@ ApplicationWindow {
         shortcutId: "add_library_folder"
         overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "Add Library Fol&der…")
-        icon.name: "folder-music"
+        // The symbolic one, a note at every size: from 32 px "folder-music"
+        // is the places' coloured folder, a solid block under the shortcuts
+        // list's mask at 24 pt.
+        icon.name: "folder-music-symbolic"
         onTriggered: root.promptAddLibraryRoot("add-library-root")
     }
     Components.ShortcutAction {
@@ -815,7 +832,7 @@ ApplicationWindow {
         objectName: "appendAllLibraryTracksAction"
         shortcutId: "queue_whole_library"
         overrides: root.keyboardShortcutOverrides
-        text: I18n.i18nc("@action:inmenu", "Queue &Whole Library")
+        text: I18n.i18nc("@action:inmenu", "Add &Whole Library to Queue")
         icon.name: "media-playlist-append"
         enabled: libraryController.canPlayAllTracks()
         onTriggered: libraryController.appendAllTracks()
@@ -906,7 +923,10 @@ ApplicationWindow {
         shortcutId: "clear_queue"
         overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "&Clear Queue")
-        icon.name: "edit-clear-list"
+        // Breeze's broom, a line glyph as Undo's, Redo's and Find's beside
+        // it, not edit-clear-list's filled badge, the one solid shape in
+        // the menu.
+        icon.name: "edit-clear-all"
         enabled: uiBridge.queueLength > 0 && !root.viewerOpen
         onTriggered: uiBridge.clearQueue()
     }
@@ -1204,7 +1224,10 @@ ApplicationWindow {
         shortcutId: "volume_up"
         overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "Volume &Up")
-        icon.name: "audio-volume-high"
+        // No glyph, nor Volume Down: Breeze's loud and quiet speakers differ
+        // only in how faint their waves are, which 16 px does not show, and
+        // its plus and minus do not say volume. The two read as words, as
+        // Mute beside them.
         defaultKeyBindings: ["Alt+Up"]
         onTriggered: playbackController.changeVolumeBy(root.keyboardVolumeStep)
     }
@@ -1214,7 +1237,6 @@ ApplicationWindow {
         shortcutId: "volume_down"
         overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "Volume &Down")
-        icon.name: "audio-volume-low"
         defaultKeyBindings: ["Alt+Down"]
         onTriggered: playbackController.changeVolumeBy(-root.keyboardVolumeStep)
     }
@@ -1390,99 +1412,121 @@ ApplicationWindow {
         Components.AppMenu {
             objectName: "fileMenu"
             title: I18n.i18nc("@title:menu", "&File")
-            MenuItem { action: openFilesAction }
-            MenuItem { action: addFilesAction }
-            MenuItem { action: addFolderAction }
+            Components.AppMenuItem { action: openFilesAction }
+            Components.AppMenuItem { action: addFilesAction }
+            Components.AppMenuItem { action: addFolderAction }
             MenuSeparator {}
-            MenuItem { action: addLibraryFolderAction }
-            MenuItem { action: playAllLibraryTracksAction }
-            MenuItem { action: appendAllLibraryTracksAction }
+            // A setting of the library, apart from the items that play it.
+            Components.AppMenuItem { action: addLibraryFolderAction }
             MenuSeparator {}
-            MenuItem { action: quitAction }
+            Components.AppMenuItem { action: playAllLibraryTracksAction }
+            Components.AppMenuItem { action: appendAllLibraryTracksAction }
+            MenuSeparator {}
+            Components.AppMenuItem { action: quitAction }
         }
         Components.AppMenu {
             objectName: "editMenu"
             title: I18n.i18nc("@title:menu", "&Edit")
-            MenuItem { action: undoQueueChangeAction }
-            MenuItem { action: redoQueueChangeAction }
+            Components.AppMenuItem { action: undoQueueChangeAction }
+            Components.AppMenuItem { action: redoQueueChangeAction }
             MenuSeparator {}
-            MenuItem { action: globalSearchAction }
+            Components.AppMenuItem { action: globalSearchAction }
             MenuSeparator {}
-            MenuItem { action: clearQueueAction }
+            Components.AppMenuItem { action: clearQueueAction }
         }
         Components.AppMenu {
             objectName: "viewMenu"
             title: I18n.i18nc("@title:menu", "&View")
-            MenuItem { action: visualizationViewerAction }
-            MenuItem { action: albumArtViewerAction }
+            Components.AppMenuItem { action: visualizationViewerAction }
+            Components.AppMenuItem { action: albumArtViewerAction }
             MenuSeparator {}
             Components.MenuHeading {
                 objectName: "visualizationHeading"
                 text: I18n.i18nc("@title:menu visualization modes", "Visualization")
             }
-            MenuItem {
+            Components.AppMenuItem {
                 action: spectrogramModeAction
                 Accessible.description: I18n.i18nc("@info", "Visualization")
             }
-            MenuItem {
+            Components.AppMenuItem {
                 action: waveformModeAction
                 Accessible.description: I18n.i18nc("@info", "Visualization")
             }
             MenuSeparator {}
-            MenuItem { action: showLevelMeterAction }
-            MenuItem { action: showScaleAction }
+            Components.AppMenuItem { action: showLevelMeterAction }
+            Components.AppMenuItem { action: showScaleAction }
             MenuSeparator {}
-            MenuItem { action: autoCenterSelectionAction }
-            MenuItem { action: resetZoomAction }
-            MenuItem { action: followPlayheadAction }
+            // By what they act on: the plot, then the queue. Two items
+            // that follow read as one another's variants in one group.
+            Components.AppMenuItem { action: resetZoomAction }
+            Components.AppMenuItem { action: followPlayheadAction }
+            MenuSeparator {}
+            Components.AppMenuItem { action: autoCenterSelectionAction }
         }
         Components.AppMenu {
             objectName: "playbackMenu"
             title: I18n.i18nc("@title:menu", "&Playback")
-            MenuItem { action: playPauseAction }
-            MenuItem { action: stopAction }
-            MenuItem { action: previousAction }
-            MenuItem { action: nextAction }
+            // Off where they cannot act, here and on the transport: the
+            // actions stay on for the shortcuts.
+            Components.ConditionalMenuItem {
+                action: playPauseAction
+                canAct: root.playPauseCanAct
+            }
+            Components.ConditionalMenuItem {
+                action: stopAction
+                canAct: root.stopCanAct
+            }
+            Components.ConditionalMenuItem {
+                action: previousAction
+                canAct: root.skipCanAct
+            }
+            Components.ConditionalMenuItem {
+                action: nextAction
+                canAct: root.skipCanAct
+            }
             MenuSeparator {}
-            MenuItem { action: seekBackwardAction }
-            MenuItem { action: seekForwardAction }
+            Components.AppMenuItem { action: seekBackwardAction }
+            Components.AppMenuItem { action: seekForwardAction }
             MenuSeparator {}
-            MenuItem { action: shuffleAction }
+            Components.AppMenuItem { action: shuffleAction }
+            // A heading starts a group, as View's Visualization does:
+            // without the rule Shuffle read as the first of Repeat's.
+            MenuSeparator {}
             Components.MenuHeading {
                 objectName: "repeatHeading"
                 text: I18n.i18nc("@title:menu repeat modes", "Repeat")
             }
-            MenuItem {
+            Components.AppMenuItem {
                 action: repeatOffAction
                 Accessible.description: I18n.i18nc("@info", "Repeat")
             }
-            MenuItem {
+            Components.AppMenuItem {
                 action: repeatOneAction
                 Accessible.description: I18n.i18nc("@info", "Repeat")
             }
-            MenuItem {
+            Components.AppMenuItem {
                 action: repeatAllAction
                 Accessible.description: I18n.i18nc("@info", "Repeat")
             }
             MenuSeparator {}
-            MenuItem { action: volumeUpAction }
-            MenuItem { action: volumeDownAction }
-            MenuItem { action: muteAction }
+            Components.AppMenuItem { action: volumeUpAction }
+            Components.AppMenuItem { action: volumeDownAction }
+            Components.AppMenuItem { action: muteAction }
         }
         Components.AppMenu {
             objectName: "settingsMenu"
             title: I18n.i18nc("@title:menu", "&Settings")
-            MenuItem { action: configureShortcutsAction }
-            MenuItem { action: preferencesAction }
+            Components.AppMenuItem { action: configureShortcutsAction }
+            Components.AppMenuItem { action: preferencesAction }
         }
         Components.AppMenu {
             objectName: "helpMenu"
             title: I18n.i18nc("@title:menu", "&Help")
-            MenuItem { action: reportBugAction }
-            MenuItem { action: diagnosticsAction }
+            Components.AppMenuItem { action: reportBugAction }
+            Components.AppMenuItem { action: diagnosticsAction }
             MenuSeparator {}
-            MenuItem { action: aboutAction }
-            MenuItem { action: aboutKdeAction }
+            Components.AppMenuItem { action: aboutAction }
+            Components.AppMenuItem { action: aboutKdeAction }
         }
     }
 
@@ -1668,6 +1712,14 @@ ApplicationWindow {
             stopAction: stopAction
             nextAction: nextAction
             playPauseAction: playPauseAction
+            muteAction: muteAction
+            playPauseCanAct: root.playPauseCanAct
+            stopCanAct: root.stopCanAct
+            previousCanAct: root.skipCanAct
+            nextCanAct: root.skipCanAct
+            // The room under its row comes out of what the window has
+            // beyond its least height.
+            balanceRoomLimit: Math.max(0, root.height - root.contentMinimumHeight)
             volumeMuted: playbackController.volumeMuted
             mutedVolume: playbackController.rememberedVolumeBeforeMute
             keyboardSeekStepSeconds: root.keyboardSeekStepSeconds
@@ -1834,13 +1886,15 @@ ApplicationWindow {
         // is open, so that the pane's last frame is laid out as the pane
         // showed it.
         readonly property bool inViewer: visualizationSurface.parent !== spectrogramPane.hostItem
+        // Whether the viewer over the whole screen shows them, where their
+        // text is on its strip's type scale.
+        readonly property bool inFullscreenViewer: spectrogramViewerShell.windowHost !== null
+            && visualizationSurface.parent === spectrogramViewerShell.windowHost
         // What the plot keeps clear of in its top right corner: the mode
-        // switch, and in the viewer in the main window its controls beside it.
-        readonly property size reservedCorner: Qt.size(
-            plotLayer.reservedCorner.width - plotLayer.meterWidth,
-            Math.max(plotLayer.reservedCorner.height,
-                     visualizationSurface.inViewer
-                         ? spectrogramViewerShell.reservedCorner.height : 0))
+        // switch in the pane, and in a viewer the plate of its own controls.
+        readonly property size reservedCorner: visualizationSurface.inViewer
+            ? spectrogramViewerShell.reservedCorner
+            : Qt.size(plotLayer.reservedCorner.width - plotLayer.meterWidth, plotLayer.reservedCorner.height)
         readonly property bool spectrogramShown: viewerController.visualizationMode === 0
 
         // The mode switch (#373 Motion): the plot that shows whole stays on
@@ -1971,6 +2025,12 @@ ApplicationWindow {
 
         readonly property bool zoomed: Math.abs(visualizationSurface.zoomLevel - 1.0) > 0.001
 
+        // The shown plot's pointer, for the areas over it that take a press
+        // for the focus, which would show an arrow of their own.
+        readonly property int pointerCursorShape: visualizationSurface.spectrogramShown
+            ? spectrogramSurface.pointerCursorShape
+            : waveformSurface.pointerCursorShape
+
         // The part of the track the shown plot's view covers, in seconds,
         // while it is zoomed, for the seek bar's band; NaN otherwise. The
         // plot is the one whose playhead shows: through a mode switch, the
@@ -1993,7 +2053,6 @@ ApplicationWindow {
             : visualizationSurface.viewBandMode === 0
                 ? spectrogramSurface.visibleEndSeconds
                 : waveformSurface.waveformItem.visibleEndSeconds
-
         // View › Reset Zoom, and the viewer's Reset: the shown plot at its
         // default zoom, following the playhead. Nothing else changes; the
         // spectrogram keeps what it has drawn.
@@ -2011,6 +2070,31 @@ ApplicationWindow {
         readonly property bool detached: visualizationSurface.spectrogramShown
             ? spectrogramSurface.detached
             : waveformSurface.waveformItem.detached
+
+        // Whether autoscroll moves the shown plot.
+        readonly property bool autoscrolling: visualizationSurface.spectrogramShown
+            ? spectrogramSurface.autoscrolling
+            : waveformSurface.waveformItem.autoscrolling
+        // Whether a middle-drag pans it.
+        readonly property bool panning: visualizationSurface.spectrogramShown
+            ? spectrogramSurface.panning
+            : waveformSurface.panning
+        // Whether a middle press holds it, from the press to the release:
+        // it leads to a pan or to autoscroll.
+        readonly property bool panPressed: visualizationSurface.spectrogramShown
+            ? spectrogramSurface.panPressed
+            : waveformSurface.panPressed
+        readonly property point panScenePosition: visualizationSurface.spectrogramShown
+            ? spectrogramSurface.panScenePosition
+            : waveformSurface.panScenePosition
+        // Whether the user moved the view and it stays there, which the zoom
+        // plate and the viewers' controls say; never while autoscroll runs,
+        // whose cursor is its only indicator (#655).
+        readonly property bool viewMoved: visualizationSurface.detached && !visualizationSurface.autoscrolling
+        // Follow Playhead's shortcut, as the user reads it, or "".
+        readonly property string followShortcut: followPlayheadAction.keyBindings.length > 0
+            ? StandardKeys.nativeText(followPlayheadAction.keyBindings[0])
+            : ""
 
         // View › Follow Playhead: the shown plot follows the playhead again.
         function followPlayhead() {
@@ -2042,6 +2126,7 @@ ApplicationWindow {
             Accessible.description: I18n.i18nc("@info", "Frequencies of the playing track over time")
             anchors.fill: parent
             plotWidth: plotLayer.plotWidth
+            textScale: plotLayer.textScale
             // Live while the waveform shows, at 0, so that its analysis runs
             // and its view is drawn for the switch back; then it takes no
             // pointer or keys, and assistive technology skips it.
@@ -2061,13 +2146,17 @@ ApplicationWindow {
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
             reservedCorner: visualizationSurface.reservedCorner
             laneHeadBounds: plotLayer.lowestLaneHeadBounds
-            laneHeadBoundsByLane: plotLayer.laneHeadBoundsByLane
+            laneHeadsFoot: plotLayer.laneHeadsFoot
             markerSeconds: plotLayer.cutSeconds
             crosshairLevel: plotLayer.crosshairLevel
             uiBridge: root.uiBridge
             uiPalette: root.uiPalette
             clock: playbackController.playbackClock
-            seekCommitted: playbackController.seekCommitted
+            // A seek on the plot holds its lane heads as a pan does.
+            seekCommitted: function(seconds) {
+                plotLayer.plotSeeked()
+                playbackController.seekCommitted(seconds)
+            }
         }
 
         Viewers.WaveformSurface {
@@ -2075,9 +2164,11 @@ ApplicationWindow {
             objectName: "mainWaveformSurface"
             anchors.fill: parent
             plotWidth: plotLayer.plotWidth
+            textScale: plotLayer.textScale
             visible: visualizationSurface.plotShown(1)
             opacity: visualizationSurface.plotOpacity(1)
             playheadVisible: visualizationSurface.playheadShown(1)
+            viewerMode: visualizationSurface.inViewer
             z: visualizationSurface.settledMode === 1 ? 0 : 1
             layer.enabled: opacity > 0 && opacity < 1
             interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible
@@ -2090,17 +2181,23 @@ ApplicationWindow {
             uiBridge: root.uiBridge
             uiPalette: root.uiPalette
             clock: playbackController.playbackClock
-            seekCommitted: playbackController.seekCommitted
+            // A seek on the plot holds its lane heads as a pan does.
+            seekCommitted: function(seconds) {
+                plotLayer.plotSeeked()
+                playbackController.seekCommitted(seconds)
+            }
         }
 
         // A press of any button, or the wheel, on the plot in the pane takes
         // the keyboard focus for the pane, then goes on to the plot, as the
         // viewers' press does; they have their own. Under the plot layer, so
         // that a click on one of its buttons leaves the focus to the button.
+        // Being over the plot, it shows the plot's pointer.
         MouseArea {
             anchors.fill: parent
             z: 1.5
             enabled: !visualizationSurface.inViewer
+            cursorShape: visualizationSurface.pointerCursorShape
             acceptedButtons: Qt.AllButtons
             onPressed: function(mouse) {
                 spectrogramPane.takePlotFocus()
@@ -2128,16 +2225,20 @@ ApplicationWindow {
             controlsLevel: spectrogramViewerShell.fullscreenControlsLevel
             controlsAutoHide: visualizationSurface.inViewer
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
-            trailingInset: visualizationSurface.inViewer
-                ? spectrogramViewerShell.reservedCorner.width : 0
             topInset: spectrogramViewerShell.controlsTopInset
+            textScale: visualizationSurface.inFullscreenViewer ? root.uiPalette.fullscreenTextScale : 1
+            laneHeadInset: visualizationSurface.inFullscreenViewer && spectrogramViewerShell.stripTextInset >= 0
+                ? spectrogramViewerShell.stripTextInset : plotLayer.plateInset
             laneCount: visualizationSurface.spectrogramShown
                 ? spectrogramSurface.laneCount : waveformSurface.laneCount
             laneLabels: visualizationSurface.spectrogramShown
                 ? spectrogramSurface.laneLabels : waveformSurface.laneLabels
             hoveredLane: visualizationSurface.spectrogramShown
                 ? spectrogramSurface.hoveredLane : waveformSurface.hoveredLane
-            paneHovered: visualizationHover.hovered || spectrogramViewerShell.controlsHovered
+            plotPointerOn: visualizationSurface.spectrogramShown
+                ? spectrogramSurface.pointerOn : waveformSurface.pointerOn
+            paneHovered: visualizationHover.hovered
+            viewerPlateHovered: spectrogramViewerShell.cornerHovered
             pointerKnown: plotLayer.hoveredLane >= 0
             pointerPosition: plotLayer.mapFromItem(null, visualizationSurface.spectrogramShown
                 ? spectrogramSurface.pointerScenePosition : waveformSurface.pointerScenePosition)
@@ -2148,7 +2249,12 @@ ApplicationWindow {
             openIssues: function() { errorController.historyRequested() }
             zoomLevel: visualizationSurface.zoomLevel
             resetZoom: visualizationSurface.resetZoom
-            controlsInViewer: spectrogramViewerShell.controlsInStrip
+            viewMoved: visualizationSurface.viewMoved
+            viewAutoscrolling: visualizationSurface.autoscrolling
+            viewPanPressed: visualizationSurface.panPressed
+            viewPanLetGoAt: plotLayer.mapFromItem(null, visualizationSurface.panScenePosition)
+            followShortcut: visualizationSurface.followShortcut
+            controlsInViewer: visualizationSurface.inViewer
         }
     }
 
@@ -2171,10 +2277,12 @@ ApplicationWindow {
         errorController: errorController
         uiBridge: root.uiBridge
         positionText: playbackController.positionText
-        cornerRightMargin: (plotLayer.meterShown ? plotLayer.meterWidth : 0) + plotLayer.plateInset
+        meterWidth: plotLayer.meterWidth
         stripEnabled: root.uiBridge.showFullscreenTitleStrip
         zoomLevel: visualizationSurface.zoomLevel
         resetZoom: visualizationSurface.resetZoom
+        viewMoved: visualizationSurface.viewMoved
+        followShortcut: visualizationSurface.followShortcut
     }
 
     Dialogs.ItunesArtworkDialog {
@@ -2221,6 +2329,9 @@ ApplicationWindow {
         uiBridge: root.uiBridge
         positionText: playbackController.positionText
         infoVisible: viewerController.albumArtInfoVisible
+        infoReveal: albumArtSurface.infoReveal
+        artCursorShape: albumArtSurface.pointerCursorShape
+        infoWidth: albumArtSurface.infoWidth
         zoomLevel: albumArtSurface.zoom
         resetView: albumArtSurface.resetView
         previewActive: viewerController.albumArtPreviewActive
@@ -2261,6 +2372,7 @@ ApplicationWindow {
         infoTopInset: root.useWholeScreenViewerMode
             ? albumArtViewerShell.stripHeight
             : albumArtViewerShell.popupControlsBottom
+        controlsAxisInset: albumArtViewerShell.closeAxisInset
         previewActive: viewerController.albumArtPreviewActive
         previewLabel: viewerController.comparisonLabel
         previewHasCandidate: itunesArtworkDialog.previewShown && itunesArtworkDialog.previewIndex >= 0
@@ -2330,7 +2442,7 @@ ApplicationWindow {
         root.quitStateRequestId = uiBridge.saveStateBeforeQuit()
     }
 
-    function finishStateSaveBeforeClosing(requestId, saved, message) {
+    function finishStateSaveBeforeClosing(requestId, saved, failure) {
         if (requestId === 0 || requestId !== root.quitStateRequestId) {
             // An earlier attempt, superseded by a retry, or one the user
             // has stopped waiting for.
@@ -2341,15 +2453,17 @@ ApplicationWindow {
             quitSaveFailedDialog.dismiss()
             root.closeNow()
         } else {
-            root.showQuitSaveFailedDialog(message)
+            root.showQuitSaveFailedDialog(failure)
         }
     }
 
-    function showQuitSaveFailedDialog(message) {
+    // `failure` says what could not be saved and why, as BridgeClient's
+    // quitSaveFailureMap gives it.
+    function showQuitSaveFailedDialog(failure) {
         // The choice blocks the window, which takes no answer to the popup
         // meanwhile.
         recentErrorsDialog.close()
-        quitSaveFailedDialog.message = message
+        quitSaveFailedDialog.failure = failure
         // The window first, then the dialog above it, which takes the
         // keyboard.
         root.bringWindowForward()
@@ -2395,8 +2509,8 @@ ApplicationWindow {
         // may be stuck, and the user decides whether to wait or quit. The
         // window still closes if the answer is a success that comes later.
         interval: 5000
-        onTriggered: root.showQuitSaveFailedDialog(
-            I18n.i18nc("@info", "The backend did not answer in time; settings and the queue may not have been saved."))
+        onTriggered: root.showQuitSaveFailedDialog({ settings: true, queue: true, scrobbles: false,
+                                                    cause: "notAnswered", detail: "" })
     }
 
     Dialogs.QuitSaveFailedDialog {
@@ -2411,8 +2525,8 @@ ApplicationWindow {
 
     Connections {
         target: uiBridge
-        function onStateSaveFinished(requestId, saved, message) {
-            root.finishStateSaveBeforeClosing(requestId, saved, message)
+        function onStateSaveFinished(requestId, saved, failure) {
+            root.finishStateSaveBeforeClosing(requestId, saved, failure)
         }
         function onLibraryChanged() {
             libraryController.tryApplyPersistedViewState()
@@ -2486,8 +2600,8 @@ ApplicationWindow {
         function onGlobalSearchResultsChanged() {
             globalSearchController.syncSelectionAfterResultsChange()
         }
-        function onBridgeError(message, category, severity, subject) {
-            errorController.report(category, severity, subject, message)
+        function onBridgeError(message, category, severity, subject, detail) {
+            errorController.report(category, severity, subject, message, detail)
         }
         function onBackendFailureChanged() {
             root.reportBackendFailure()

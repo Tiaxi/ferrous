@@ -7,7 +7,9 @@
 #include <QColor>
 #include <QFont>
 #include <QFontMetrics>
+#include <QFontMetricsF>
 #include <QPainter>
+#include <QPen>
 #include <QRect>
 #include <QSize>
 #include <QSizeF>
@@ -24,11 +26,11 @@
 // near an edge clamps inside it.
 namespace CrosshairReadout {
 
-// Between a plate's edge and its text.
-constexpr int kPadding = 3;
 // Between the value's plate and the plot's right edge, and between the
-// time's plate and its bottom edge.
-constexpr int kEdgeMargin = 2;
+// time's plate and its bottom edge: the plot's plates' 5 px to their fill
+// (PlotLayer's plateInset), their 1 px edge outside it, which the rects here
+// hold (at 2 px, the readouts were nearly on the screen's edge).
+constexpr int kEdgeMargin = 4;
 // Between the value's plate and the time's, and a scale along the right edge.
 constexpr int kGap = 4;
 // Between the value's plate and the corner's controls beside it: a gap
@@ -37,6 +39,35 @@ constexpr int kGap = 4;
 // as it did ViewCorner::kLabelGap from it.
 constexpr int kCornerGap = 16;
 constexpr int kRadius = 3;
+
+// The lines' dashes: how long, in logical pixels, and how far apart.
+constexpr double kDash = 4.0;
+constexpr double kDashGap = 3.0;
+
+// How near the playhead, in logical pixels, the crosshair's vertical line
+// gives way to it: the playhead is drawn above the crosshair, so that a seek
+// on the plot, which lands it under the pointer, shows. Its time stays.
+// Within 1 px, a landing a pixel or two off read as a doubled line (H16).
+constexpr double kYieldsWithin = 2.0;
+
+// What is between the dashes, over data as light as they are, such as the
+// waveform's fill or a bright harmonic, where they were lost (1.4:1): the
+// plot's floor at `opacity`, so nothing on the floor itself, and the line no
+// thicker.
+inline QColor dashGapColor(const QColor &floor, double opacity) {
+    QColor gap = floor;
+    gap.setAlphaF(static_cast<float>(floor.alphaF() * opacity));
+    return gap;
+}
+
+// Sets `pen`'s pattern for the dashes, or with `gaps` for what is between
+// them, with `unit` of its widths to a logical pixel.
+inline void setDashes(QPen &pen, bool gaps, double unit = 1.0) {
+    const double on = (gaps ? kDashGap : kDash) * unit;
+    const double off = (gaps ? kDash : kDashGap) * unit;
+    pen.setDashPattern({on, off});
+    pen.setDashOffset(gaps ? on : 0.0);
+}
 
 // A plate's colours. A plate with an edge has it 1 px wide around its fill,
 // as PlotPlate draws one.
@@ -48,22 +79,42 @@ struct Colors {
     bool hasEdge() const { return edge.alpha() > 0; }
 };
 
-// The readout's text: the application's font at the small size of the
-// design (UiPalette.smallPointSize), as the plot's lane labels, so it grows
-// with a larger font: 12 px at the default 10 pt. It is sized in pixels, at
-// Qt's logical 96 dpi as QML's text is, so the plates it is measured for and
-// the images it is drawn in agree whatever the device pixel ratio.
-inline QFont font() {
-    QFont font;
-    const double points = font.pointSizeF() > 0.0 ? font.pointSizeF() : font.pixelSize() * 0.75;
-    font.setPixelSize(std::max(1, static_cast<int>(std::lround(points * 0.9 * 96.0 / 72.0))));
-    return font;
+// The application's font's size, in points.
+inline double applicationPoints() {
+    const QFont font;
+    return font.pointSizeF() > 0.0 ? font.pointSizeF() : font.pixelSize() * 0.75;
 }
 
-// The size of a plate for text `textWidth` wide.
-inline QSize plateSize(int textWidth, const QFontMetrics &metrics, const Colors &colors) {
-    const int edge = colors.hasEdge() ? 2 : 0;
-    return {textWidth + 2 * kPadding + edge, metrics.height() + 2 * kPadding + edge};
+// How much larger than at the default 10 pt what goes with bound text is
+// drawn: UiPalette.fontScale.
+inline double fontScale() {
+    return std::max(1.0, applicationPoints() / 10.0);
+}
+
+// `textScale` below is how much larger than the window's a plot's text is:
+// in a viewer over the whole screen, its strip's type scale
+// (UiPalette.fullscreenTextScale), as its lane heads' labels; 1 elsewhere.
+
+// Between a plate's edge and its text at either side: a lane label's, 6 px
+// at the default font (UiPalette.scaledSize(6)), larger with a larger one
+// and with its text's scale.
+inline int padding(double textScale = 1.0) {
+    return std::max(6, static_cast<int>(std::lround(6.0 * fontScale() * textScale)));
+}
+
+// The readout's text: the application's font, its figures tabular, at the
+// small size of the design (UiPalette.smallPointSize), as the plot's lane labels, so it grows
+// with a larger font: 12 px at the default 10 pt, 14 px on a scale of 1.2.
+// It is sized in pixels, at Qt's logical 96 dpi as QML's text is, so the
+// plates it is measured for and the images it is drawn in agree whatever
+// the device pixel ratio.
+inline QFont font(double textScale = 1.0) {
+    QFont font;
+    font.setPixelSize(std::max(
+        1, static_cast<int>(std::lround(applicationPoints() * 0.9 * textScale * 96.0 / 72.0))));
+    // Tabular figures: the time's digits keep their places as it counts.
+    font.setFeature(QFont::Tag("tnum"), 1);
+    return font;
 }
 
 // How wide `text` can be with other digits in it: as wide as it is with each
@@ -111,6 +162,34 @@ private:
     bool m_measured{false};
 };
 
+// How tall a plate's fill is for text `textHeight` tall: as a lane label's
+// (PlotPlate.labelHeight), its capitals in its font at `textScale` and the
+// room around them, 20 px at the default font; never less than the text's
+// line.
+inline int plateHeight(int textHeight, double textScale = 1.0) {
+    QFont label = font(textScale);
+    label.setWeight(QFont::DemiBold);
+    // Measured once a font: a crosshair lays its plates out every frame.
+    thread_local WidestWidth capitals;
+    const int capitalHeight = capitals.get(label, 0.0, [&label](const QFontMetrics &) {
+        return static_cast<int>(std::ceil(QFontMetricsF(label).tightBoundingRect(QStringLiteral("E")).height()));
+    });
+    const int labelHeight = capitalHeight + 2 * static_cast<int>(std::lround(4.0 * fontScale()));
+    return std::max({20, labelHeight, textHeight});
+}
+
+// The size of a plate for text `textWidth` wide and `textHeight` tall, in
+// the readout's font at `textScale`.
+inline QSize plateSize(int textWidth, int textHeight, const Colors &colors, double textScale = 1.0) {
+    const int edge = colors.hasEdge() ? 2 : 0;
+    return {textWidth + 2 * padding(textScale) + edge, plateHeight(textHeight, textScale) + edge};
+}
+
+inline QSize plateSize(int textWidth, const QFontMetrics &metrics, const Colors &colors,
+                       double textScale = 1.0) {
+    return plateSize(textWidth, metrics.height(), colors, textScale);
+}
+
 // A scale along a plot's right edge: how far its labels reach from the
 // edge, and whether one is beside the bottom edge, where the time's plate
 // goes.
@@ -147,7 +226,8 @@ inline Rows rowsClearOf(const Rows &rows, const QRect &head, int plateHeight) {
 //   or left of the scale along it, and keeps out from under the corner's
 //   controls, kCornerGap from them (see ViewCorner). Where the lane is tall enough, it stays
 //   above the time's.
-// - The time's plate is centred on the vertical line at the bottom edge. It
+// - The time's plate is centred on the vertical line at the bottom edge,
+//   kEdgeMargin in from the plot's ends as from that edge. It
 //   stops left of the scale where one of its labels is beside it, right of
 //   `laneHead` (the lowest lane's label and buttons) where that reaches down
 //   beside it, and in a lane too short to have the value above it, left of
@@ -172,8 +252,8 @@ inline std::pair<QRect, QRect> plateRects(
     // The time's band along the bottom edge, between the lane head and the
     // scale; a time that doesn't fit in it is left out.
     int timeTop = height;
-    int timeLeft = 0;
-    int timeRight = width;
+    int timeLeft = kEdgeMargin;
+    int timeRight = width - kEdgeMargin;
     bool hasTime = !timePlate.isEmpty();
     if (hasTime) {
         timeTop = std::max(0, height - kEdgeMargin - timePlate.height());
@@ -233,7 +313,8 @@ inline std::pair<QRect, QRect> plateRects(
     return {value, time};
 }
 
-// Draws a plate at `rect` with `text` in `font`.
+// Draws a plate at `rect`, plateSize's for `text` in `font`, with the text
+// centred in it, as a lane label's is.
 inline void drawPlate(QPainter &painter, const QRect &rect, const QString &text,
                       const QFont &font, const Colors &colors) {
     // A plate left out has no rect, and draws nothing.
@@ -257,7 +338,9 @@ inline void drawPlate(QPainter &painter, const QRect &rect, const QString &text,
     painter.setFont(font);
     painter.setPen(colors.text);
     const QFontMetrics metrics(font);
-    painter.drawText(QPointF(fill.left() + kPadding, fill.top() + kPadding + metrics.ascent()), text);
+    painter.drawText(QPointF(fill.left() + std::floor((fill.width() - metrics.horizontalAdvance(text)) / 2.0),
+                             fill.top() + std::floor((fill.height() - metrics.height()) / 2.0) + metrics.ascent()),
+                     text);
     painter.restore();
 }
 
@@ -269,6 +352,44 @@ inline QString signedNumber(double value, int decimals) {
     const double rounded = std::round(value * scale) / scale;
     const QString digits = QString::number(std::abs(rounded), 'f', decimals);
     return rounded < 0.0 ? QStringLiteral("\u2212") + digits : digits;
+}
+
+// The crosshair's time, "1:46.0", with `decimals` decimals, 0 to 3:
+// "1:46" with none.
+inline QString formatCrosshairTime(double seconds, int decimals) {
+    decimals = std::clamp(decimals, 0, 3);
+    qint64 unit = 1;
+    for (int decimal = 0; decimal < decimals; ++decimal) {
+        unit *= 10;
+    }
+    // Halfway rounds up, also a rounding error short of it: a pan works out
+    // the one time it holds afresh, from another start, on each move.
+    constexpr double roundingError = 1e-6;
+    const qint64 ticks = std::llround(
+        std::max(0.0, seconds) * static_cast<double>(unit) + roundingError);
+    const qint64 whole = ticks / unit;
+    const qint64 hours = whole / 3600;
+    QString rest = QStringLiteral("%1").arg(whole % 60, 2, 10, QLatin1Char('0'));
+    if (decimals > 0) {
+        rest += QStringLiteral(".%1").arg(ticks % unit, decimals, 10, QLatin1Char('0'));
+    }
+    if (hours > 0) {
+        return QStringLiteral("%1:%2:%3").arg(hours).arg((whole / 60) % 60, 2, 10, QLatin1Char('0')).arg(rest);
+    }
+    return QStringLiteral("%1:%2").arg(whole / 60).arg(rest);
+}
+
+// Its decimals, one rule for both plots, from how long a column of the plot
+// is, `secondsPerColumn`: hundredths below 10 ms, tenths to 100 ms, and
+// whole seconds above, so that it claims no more than the pointer can
+// point at (at 381 % of a 3:49 track, a pixel is 48 ms: "1:23.4", where
+// the waveform read "1:23.43" and the spectrogram "1:23.4"). A column is
+// what the plot resolves: the waveform's device pixel, and the
+// spectrogram's device pixel or its analysis column, whichever is longer.
+inline int crosshairTimeDecimals(double secondsPerColumn) {
+    if (!(secondsPerColumn > 0.0)) return 1;
+    if (secondsPerColumn < 0.01) return 2;
+    return secondsPerColumn <= 0.1 ? 1 : 0;
 }
 
 // The level of silence: "−∞".

@@ -12,7 +12,8 @@ import "." as Preferences
 // one place as the pages change. A page taller than the dialog scrolls.
 // The form takes the page's width: its labels beside the fields while the
 // page has the room for both, above them when it has not, whatever the
-// font; help texts wrap to the fields' column. Its form keeps its height
+// font, and while its fields' column holds what the page needs to read;
+// help texts wrap to the fields' column. Its form keeps its height
 // while the page is out of view, so Configure can open tall enough for
 // every page.
 ScrollView {
@@ -72,6 +73,14 @@ ScrollView {
             narrow: Math.ceil(narrowest)
         }
     }
+    // What a page's fields need to be read in their column beside the
+    // labels, such as Library's paths, where that is more than they are
+    // laid out at: in less, the labels go above them. It widens no window.
+    property real fieldsReadingWidth: 0
+    // That column's width. Not from the form's, which a scroll bar that
+    // comes and goes with the layout narrows.
+    readonly property real fieldsColumnWidth: root.width - 2 * root.pageSideInset
+        - Math.ceil(root.labelColumnWidth) - Kirigami.Units.largeSpacing
     // The page's room besides the form: its insets, and a scroll bar.
     readonly property real chromeWidth: 2 * root.pageSideInset + root.ScrollBar.vertical.width
     // The page's width for the form's wide layout, and its narrowest: the
@@ -80,6 +89,9 @@ ScrollView {
     readonly property real minimumWidth: Math.ceil(root.chromeWidth + root.formNeeds.narrow)
     // The page's height with every row in view, whether or not it is.
     readonly property real wholeHeight: Math.ceil(pageContent.implicitHeight + root.topPadding + root.bottomPadding)
+    // Where the room under the title starts, unscrolled: for what a page
+    // shows in that room instead of a form.
+    readonly property real bodyTop: root.topPadding + pageTitle.y + pageTitle.height + pageTitle.Layout.bottomMargin
 
     FontMetrics {
         id: labelMetrics
@@ -96,16 +108,20 @@ ScrollView {
         spacing: 0
 
         Label {
+            id: pageTitle
             objectName: "preferencesPageTitle"
             Layout.fillWidth: true
             Layout.leftMargin: root.pageSideInset
             Layout.rightMargin: root.pageSideInset
             Layout.topMargin: root.pageTopInset
-            Layout.bottomMargin: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing + 2
+            // 12 px, which keeps the rows about where the smaller title had
+            // them, and every page whole in the window as it opens.
+            Layout.bottomMargin: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
             textFormat: Text.PlainText
             text: root.title
-            // 15 px with the default 10 pt font.
-            font.pointSize: root.uiPalette.basePointSize * 1.125
+            // 17 px with the default 10 pt font, over the groups' semibold
+            // 13 px (at 15 px, only their x told the two ranks apart).
+            font.pointSize: root.uiPalette.basePointSize * 1.3
             font.weight: Font.DemiBold
             color: root.uiPalette.text
             elide: Text.ElideRight
@@ -117,8 +133,9 @@ ScrollView {
             // As wide as the page: its wide layout spreads the fields'
             // column to the page's edge, for the help texts to wrap in.
             // It has that layout while the labels and the fields fit side
-            // by side, whatever the font.
+            // by side, whatever the font, and the fields can be read there.
             wideMode: root.formWidth >= root.formNeeds.wide
+                && root.fieldsColumnWidth >= root.fieldsReadingWidth
             labelColumnWidth: root.labelColumnWidth
             Layout.fillWidth: false
             Layout.preferredWidth: root.formWidth

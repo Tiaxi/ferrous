@@ -192,8 +192,14 @@ struct SpectrogramBackdrop {
     std::shared_ptr<const SpectrogramProjection> projection;
     // Which it is, for the scene node's texture of it.
     quint64 serial{0};
+    // The reserve's pixels [coveredFirst, coveredEnd) have data, without a
+    // gap: it can be the view's whole picture over those.
+    int coveredFirst{0};
+    int coveredEnd{0};
 
     bool isNull() const { return image.isNull(); }
+    double coveredLeftSeconds() const { return leftSeconds + coveredFirst / pixelsPerSecond; }
+    double coveredRightSeconds() const { return leftSeconds + coveredEnd / pixelsPerSecond; }
     double rightSeconds() const {
         return pixelsPerSecond > 0.0 ? leftSeconds + pixels / pixelsPerSecond : leftSeconds;
     }
@@ -212,6 +218,12 @@ struct SpectrogramRasterJob {
     int tileWidth{0};
     // Whether to make those copies: a reserve is uploaded whole.
     bool makeTiles{true};
+    // A reserve's pixel holds the loudest of this many columns,
+    // sampleStride apart, as a column of zoom 1 does of its time, rather
+    // than of all that fall on it: the more a pixel holds, the brighter
+    // the noise in it. 0 for a canvas's pixel.
+    int sampleColumns{0};
+    int sampleStride{1};
     // Older data drawn under the pixels that have no column: the image of
     // the reserve it replaces, the `underlayPixels` of it from its left,
     // and their seconds (see SpectrogramBackdrop).
@@ -246,9 +258,9 @@ struct SpectrogramOverlayLayout {
     // The device pixels it was laid out for.
     QSize size;
     QVector<QRect> lines;
-    // Each line's own colour, where it has one rather than the overlay's:
-    // an invalid colour, or a line past the end of it, has the overlay's.
-    QVector<QColor> lineColors;
+    // The device pixels of plotOutline cased around each line, under it,
+    // as round a scale label's text; 0 for none.
+    int casing{0};
     QVector<SpectrogramOverlayImage> images;
 };
 
@@ -263,6 +275,9 @@ struct SpectrogramRasterResult {
     int drawPixels{0};
     // The job's slots, which tell the columns it had to draw without.
     std::vector<int> columnSlots;
+    // Of a reserve: its longest run of pixels that have data.
+    int coveredFirst{0};
+    int coveredEnd{0};
 };
 
 // What a spectrogram's scene node did in its last frame: the canvas
@@ -314,9 +329,22 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     // What this lane's label and buttons take of it, from its top left; the
     // crosshair's time keeps clear of them. Empty without any.
     Q_PROPERTY(QRectF laneHeadBounds READ laneHeadBounds WRITE setLaneHeadBounds NOTIFY laneHeadBoundsChanged)
-    // What this lane's own label takes of it, from its top left, whichever
-    // lane it is; the lines at rest keep clear of it. Empty without one.
-    Q_PROPERTY(QRectF laneLabelBounds READ laneLabelBounds WRITE setLaneLabelBounds NOTIFY laneLabelBoundsChanged)
+    // The lane at rest, the same for every lane of the pane: how many lines
+    // it has, evenly spaced, while the scale is hidden, and how far down
+    // from its top the plates over the pane reach, which the scale's lines
+    // and labels at rest keep under.
+    Q_PROPERTY(int restLineCount READ restLineCount WRITE setRestLineCount NOTIFY restLineCountChanged)
+    Q_PROPERTY(double restTopClearance READ restTopClearance WRITE setRestTopClearance NOTIFY restTopClearanceChanged)
+    // How far clear of the plot's right edge the frequency scale's ticks
+    // end, in logical pixels, its labels moving with them: beside a column
+    // there, as the level meter's, so the ticks don't run into its edge; 0
+    // without one, the ticks then flush at the edge.
+    Q_PROPERTY(double scaleEdgeClearance READ scaleEdgeClearance WRITE setScaleEdgeClearance NOTIFY scaleEdgeClearanceChanged)
+    // How much larger than the window's its text is, the crosshair's readout
+    // and the scale's labels: in a viewer over the whole screen, its strip's
+    // type scale (UiPalette.fullscreenTextScale), as its lane heads'; 1
+    // elsewhere. A change lays out its overlays again, not its columns.
+    Q_PROPERTY(double textScale READ textScale WRITE setTextScale NOTIFY textScaleChanged)
     // The readout's plates, in the plot's colours (UiPalette's PlotColors).
     // The floor, where the item has no column to draw: before any audio,
     // while a track is analysed, and the part of a rolling view not yet
@@ -343,6 +371,11 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     // mode. False again until a new session's columns fill it.
     Q_PROPERTY(bool viewFilled READ viewFilled NOTIFY viewFilledChanged)
     Q_PROPERTY(bool showTimeLabels READ showTimeLabels WRITE setShowTimeLabels NOTIFY showTimeLabelsChanged)
+    // Where the crosshair's line is, in logical x, for every lane of a plot
+    // alike, the pointer's own too; -1 for none, where a lane on its own
+    // draws it at its pointer. A plot sets it from crosshairHoverChanged,
+    // which tells the pointer's x on the lane, or -1 as it leaves it, also
+    // while the crosshair is hidden.
     Q_PROPERTY(double crosshairSharedX READ crosshairSharedX WRITE setCrosshairSharedX NOTIFY crosshairSharedXChanged)
     Q_PROPERTY(bool channelMuted READ channelMuted WRITE setChannelMuted NOTIFY channelMutedChanged)
     // Whether the playhead is drawn: the plot going out under another as
@@ -378,6 +411,23 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     // moved it rather than following the playhead; see
     // SpectrogramViewFollow::detached.
     Q_PROPERTY(bool detached READ detached NOTIFY detachedChanged)
+    // Whether a middle-drag on this lane pans the view: from the drag
+    // distance to the release. The surface shows a closed hand meanwhile.
+    Q_PROPERTY(bool panning READ panning NOTIFY panningChanged)
+    // Whether a middle press on this lane holds a centered view, which leads
+    // to a pan or to autoscroll: from the press to its release. The lanes'
+    // heads open on no hover meanwhile.
+    Q_PROPERTY(bool panPressed READ panPressed NOTIFY panPressedChanged)
+    // Where, in the scene, that press was, and once it is released, where
+    // it was let go: the pointer's last place the plot knows, as hover goes
+    // to no one while the button is held.
+    Q_PROPERTY(QPointF panScenePosition READ panScenePosition NOTIFY panPressedChanged)
+    // Whether the pointer is on this lane: over it, out to its last pixel
+    // column, or holding a button it pressed on it, through a pan and out
+    // past its edges until the release. Its crosshair shows while it is;
+    // the plot layer's corner row takes it for the pointer on the pane, so
+    // that the two show and hide together.
+    Q_PROPERTY(bool pointerOn READ pointerOn NOTIFY pointerOnChanged)
 
 public:
     explicit SpectrogramItem(QQuickItem *parent = nullptr);
@@ -421,8 +471,14 @@ public:
     void setShowCrosshairTime(bool value);
     QRectF laneHeadBounds() const;
     void setLaneHeadBounds(const QRectF &value);
-    QRectF laneLabelBounds() const;
-    void setLaneLabelBounds(const QRectF &value);
+    int restLineCount() const;
+    void setRestLineCount(int value);
+    double restTopClearance() const;
+    void setRestTopClearance(double value);
+    double scaleEdgeClearance() const;
+    void setScaleEdgeClearance(double value);
+    double textScale() const;
+    void setTextScale(double value);
     QColor floorColor() const;
     void setFloorColor(const QColor &value);
     QColor readoutPlateColor() const;
@@ -470,6 +526,10 @@ public:
 
     SpectrogramViewFollow *viewFollow() const { return m_viewFollow; }
     void setViewFollow(SpectrogramViewFollow *value);
+    bool panning() const { return m_panning; }
+    bool panPressed() const { return m_panPressed; }
+    QPointF panScenePosition() const { return m_panScenePosition; }
+    bool pointerOn() const { return m_pointerOnShown; }
     bool detached() const { return m_viewFollow != nullptr && m_viewFollow->detached(); }
     // The view follows the playhead again, at once.
     Q_INVOKABLE void followPlayhead();
@@ -546,7 +606,10 @@ signals:
     void crosshairReadoutChanged();
     void showCrosshairTimeChanged();
     void laneHeadBoundsChanged();
-    void laneLabelBoundsChanged();
+    void restLineCountChanged();
+    void restTopClearanceChanged();
+    void scaleEdgeClearanceChanged();
+    void textScaleChanged();
     void readoutColorsChanged();
     void floorColorChanged();
     void markerSecondsChanged();
@@ -572,7 +635,19 @@ signals:
     void backendZoomRequested(float zoomLevel);
     void spectrogramWidthChanged(int width);
     void viewFollowChanged();
+    // The view the user moved follows the playhead again in the same track
+    // (see SpectrogramViewFollow::followingAgain), where it showed
+    // `fromStartSeconds` to `fromEndSeconds`: told after visibleRangeChanged
+    // tells where it is now, before detachedChanged, in the order
+    // WaveformEditorItem tells them.
+    void followedAgain(double fromStartSeconds, double fromEndSeconds);
     void detachedChanged();
+    void panningChanged();
+    void panPressedChanged();
+    // A wheel zoomed the plot at `scenePosition`: the pointer acted there,
+    // as when it moves, though it rests where it is.
+    void wheelZoomed(QPointF scenePosition);
+    void pointerOnChanged();
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
@@ -681,6 +756,8 @@ private:
     void reportFollowGeometry();
     // A lane, or the follow, moved the view: a frame for it.
     void followChanged();
+    // The shared view follows the playhead again: where it is now, first.
+    void viewFollowFollowingAgain(bool sameTrack);
     // The plot asked to seek to `seconds`; see SpectrogramViewFollow.
     void noteOwnSeek(double seconds);
     // The fastest autoscroll moves the view, in seconds of the track a
@@ -696,6 +773,7 @@ private:
     // middle-drag: a middle click that did not drag, at `position`, starts
     // it on a centered view that does not show the whole track, which it
     // detaches where it is. A rolling view stays live.
+    void setPanPressed(bool pressed);
     void startAutoscroll(QPointF position);
     // Moves the detached view by `viewsPerSecond` of its width a second for
     // `seconds`, up to kAutoscrollMaxSecondsPerSecond and held within the
@@ -723,6 +801,11 @@ private:
         std::chrono::steady_clock::time_point now);
     void renumberRingForRollingHistoryLocked();
     void updateCanvasFillReadinessLocked();
+    // Whether a centered zoom out's older picture stands in for the whole
+    // of `view`, as far as the track goes, and has to stay: until the ring
+    // holds all of the view, which then replaces it in one frame.
+    bool zoomOutWaitsForViewLocked(const CenteredView &view, const CenteredColumns &columns,
+        double columnsPerSecond) const;
     // Whether the ring holds every column of the current track from
     // firstColumn to lastColumn.
     bool ringHoldsColumnsLocked(qint64 firstColumn, qint64 lastColumn) const;
@@ -816,6 +899,13 @@ private:
     // Drops both, and the reserve being drawn: their times are not the
     // view's any more.
     void invalidateBackdropLocked();
+    // Keeps the ring's columns the canvas was drawn from, as a zoom's
+    // session replaces them, for the crosshair's level while the zoom's
+    // preview shows that canvas (m_shownColumns).
+    void keepShownColumnsLocked();
+    // The kept column at `seconds`, counted as the stream origin's are, or
+    // null without one.
+    const quint8 *shownColumnLocked(double seconds) const;
     // Draws the ring's columns from `seconds` to `endSeconds`, at most
     // `pixelsPerSecond` canvas pixels a second and `width` wide, on a
     // worker, for the reserve.
@@ -895,6 +985,11 @@ private:
     // The width of the widest frequency and level the readout shows, in its
     // font for the top frequency of the band (see CrosshairReadout::plateRects).
     int crosshairWidestValueWidthLocked();
+    // A middle-drag moved the pointer to `pointer`: the crosshair follows it
+    // in every lane, as in a hover.
+    void moveDraggedCrosshair(QPointF pointer);
+    // Ends the pan, if one is under way, and tells panning.
+    void endPan();
     // The time in its own track of `continuousTime` on the view's
     // timeline, or NaN where it is in no track the view knows.
     double crosshairTrackTimeLocked(double continuousTime) const;
@@ -907,9 +1002,12 @@ private:
     // How far below the lane's top the frequency scale's labels start, in
     // logical pixels.
     int frequencyScaleTopClearanceLocked() const;
-    // The lane at rest, without columns: a faint line across it at each
-    // tick of the frequency scale, where a session at the analysis's
-    // settings and the lane's rate will put them, and with the scale shown
+    // The logical pixels from the plot's right edge to a frequency label's
+    // end: its tick's 4 px and the gap, past scaleEdgeClearance.
+    int frequencyScaleLabelGapLocked() const;
+    // The lane at rest, without columns: faint lines across it, evenly
+    // spaced, or with the scale shown at each of its ticks, where a session
+    // at the analysis's settings and the lane's rate will put them, and
     // its labels there too.
     void updateRestGridOverlayLocked(int width, int height);
     // Whether the frame shows every column of the view that there is.
@@ -918,10 +1016,19 @@ private:
     // Sets whether the lane has shown its whole view since its columns
     // came, from either thread, and tells the GUI thread when it changes.
     void publishViewFilledLocked(bool filled);
+    // A zoom's preview's time mapping, which the time scale is laid out on
+    // while the preview shows: the continuous time at device pixel 0 of the
+    // layout, and its device pixels a second.
+    struct TimeGridPreviewMapping {
+        double leftSeconds{0.0};
+        double devicePixelsPerSecond{0.0};
+    };
+    // Lays the time scale out on the view's columns, or on `preview`.
     void updateTimeGridOverlayLocked(
         int width, int height, int padding,
         qint64 displayLeft,
-        bool rollingMode, double columnsPerSecond, double drawX);
+        bool rollingMode, double columnsPerSecond, double drawX,
+        const TimeGridPreviewMapping *preview = nullptr);
     double effectiveZoomLocked() const;
     // The same for data `hop` samples apart drawn at `renderZoom`
     // (ferrous_ffi_spectrogram_effective_zoom); `renderZoom` until a hop
@@ -1158,6 +1265,20 @@ private:
     SpectrogramBackdrop m_backdrop;
     SpectrogramBackdrop m_reserve;
     quint64 m_backdropSerial{0};
+    // The columns a zoom's preview shows, from the ring its session
+    // replaced: copies of its blocks, the slot of each display column from
+    // `left` (-1 without one), how those columns are timed, and the ring
+    // they are of. Empty but while a preview shows them.
+    struct ShownColumns {
+        SpectrogramRingStorage ring;
+        std::vector<int> columnSlots;
+        qint64 left{0};
+        double columnsPerSecond{0.0};
+        qint64 epoch{0};
+        double streamOrigin{0.0};
+        quint64 ringGeneration{0};
+    };
+    ShownColumns m_shownColumns;
     // The reserve being drawn: its serial, whether it is under way, the
     // canvas pixels a second of the zoom it was last drawn for (0 for
     // none), and the seconds last asked of it. And the validity of what is
@@ -1168,6 +1289,9 @@ private:
     double m_reserveZoomPixelsPerSecond{0.0};
     double m_reserveRequestedLeft{0.0};
     double m_reserveRequestedRight{-1.0};
+    // A centered reserve was asked for seconds the ring had no columns of
+    // yet, up to this one: drawn again once it has, or infinity for none.
+    double m_reserveShortUntilSeconds{std::numeric_limits<double>::infinity()};
     quint64 m_backdropValidity{0};
     // What the zoom being waited for was asked of: the clock's epoch and
     // the data's track then, carried over a gapless or Repeat-One
@@ -1384,6 +1508,20 @@ private:
         qint64 shownRight{-1};
     };
     IdleView m_idleView;
+    // A centered frame that showed its canvas as its view's: the canvas's
+    // first column, and where the view placed the playhead, the time scale,
+    // the marker and the crosshair. A jump the canvas cannot follow keeps
+    // them there until the new view's canvas lands (see updatePaintNode).
+    struct ShownFrame {
+        bool valid{false};
+        qint64 canvasLeft{0};
+        quint64 trackToken{0};
+        qint64 displayLeft{0};
+        double drawX{0.0};
+        bool showPlayhead{false};
+        QRectF playheadRect;
+    };
+    ShownFrame m_shownFrame;
     // Wakes playback frames until then; see schedulePlaybackFrame.
     QPointer<PlaybackFrameScheduler> m_frameScheduler;
     // How many playback frames the item has asked for, for tests.
@@ -1403,11 +1541,13 @@ private:
     QPointer<SpectrogramViewFollow> m_viewFollow;
     QMetaObject::Connection m_viewFollowChangedConnection;
     QMetaObject::Connection m_viewFollowDetachedConnection;
+    QMetaObject::Connection m_viewFollowFollowingAgainConnection;
     QMetaObject::Connection m_viewFollowDestroyedConnection;
     // A middle-drag: whether the button is down, whether it has moved far
     // enough to pan, where it was pressed, and where the pan last started
     // from, as the view's left column and the pointer's x.
     bool m_panPressed{false};
+    QPointF m_panScenePosition;
     bool m_panning{false};
     QPointF m_panPressPosition;
     // Whether the press stopped autoscroll, so that its release starts
@@ -1429,7 +1569,16 @@ private:
     bool m_crosshairEnabled{false};
     double m_crosshairOpacity{1.0};
     bool m_hoverActive{false};
+    // Whether a button pressed on the lane is held: the item has the
+    // pointer's grab, and no hover, until the release.
+    bool m_pointerHeld{false};
     QPointF m_hoverPosition;
+    bool pointerOnLocked() const { return m_hoverActive || m_pointerHeld; }
+    // pointerOn as last told, on the GUI thread; publishPointerOn tells a
+    // change.
+    bool m_pointerOnShown{false};
+    void publishPointerOn();
+    void setPointerHeld(bool held);
     double m_crosshairSharedX{-1.0};
     // Its dotted lines are images; their rects below are in device pixels,
     // its labels' in logical ones.
@@ -1439,11 +1588,22 @@ private:
     double m_crosshairCachedDrawX{0.0};
     bool m_crosshairCachedRollingMode{false};
     int m_crosshairCachedBinsPerColumn{0};
+    // The zoom preview's time mapping the crosshair was laid out for, while
+    // it read the scaled canvas (see m_zoomPreviewAnchorSeconds).
+    bool m_crosshairCachedPreview{false};
+    double m_crosshairCachedPreviewAnchorSeconds{0.0};
+    double m_crosshairCachedPreviewAnchorX{0.0};
+    double m_crosshairCachedPreviewPixelsPerSecond{0.0};
     QRect m_crosshairVerticalLineRect;
     QRect m_crosshairHorizontalLineRect;
     bool m_showCrosshairTime{true};
     QRectF m_laneHeadBounds;
-    QRectF m_laneLabelBounds;
+    int m_restLineCount{3};
+    double m_restTopClearance{0.0};
+    // scaleEdgeClearance, whole logical pixels.
+    int m_scaleEdgeClearance{0};
+    // textScale, under the state mutex.
+    double m_textScale{1.0};
     // UiPalette's spectrogramPlot plates, until QML sets them.
     // floorColor, under the state mutex.
     QColor m_floorColor{0, 0, 0};
@@ -1495,6 +1655,9 @@ private:
     double m_timeGridRenderDrawX{0.0};
     bool m_timeGridCachedRollingMode{false};
     int m_timeGridPadding{0};
+    // Whether it was laid out on a zoom's preview, and that mapping.
+    bool m_timeGridCachedPreview{false};
+    TimeGridPreviewMapping m_timeGridPreviewMapping;
 
     // Rolling mode shows a gapless successor after the tracks before it:
     // its position plus this offset.

@@ -115,6 +115,8 @@ qt_add_library(ferrous_ui_core STATIC
     src/QueueRows.cpp
     src/CoverImageProvider.cpp
     src/DiagnosticsLog.cpp
+    src/DiagnosticsLogLayout.cpp
+    src/DiagnosticsLogView.cpp
     src/Localization.cpp
     src/DisplaySleepInhibitor.cpp
     src/GlobalSearchResultsModel.cpp
@@ -251,18 +253,23 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/AlternateShortcuts.qml
         qml/components/AppMenu.qml
         qml/components/AppMenuBarItem.qml
+        qml/components/AppMenuItem.qml
+        qml/components/CaptionButton.qml
         qml/components/CompactDialogWindow.qml
+        qml/components/ConditionalMenuItem.qml
         qml/components/DialogButtons.qml
         qml/components/DialogComboBox.qml
         qml/components/DialogFooter.qml
         qml/components/DialogWindow.qml
         qml/components/FormGroupGap.qml
+        qml/components/FollowNotice.qml
         qml/components/FormHelpText.qml
         qml/components/FullscreenControlsAutoHide.qml
         qml/components/KeyScrollView.qml
         qml/components/KeyHintMenuItem.qml
         qml/components/LaneScrollBar.qml
         qml/components/MenuHeading.qml
+        qml/components/NoCoverTile.qml
         qml/components/NowFadeOut.qml
         qml/components/NowPlayingPanel.qml
         qml/components/MessageLabel.qml
@@ -277,6 +284,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/PopupClosing.qml
         qml/components/RegionHeader.qml
         qml/components/RowBackground.qml
+        qml/components/RowReasonToolTip.qml
         qml/components/ScrobbleIndicator.qml
         qml/components/ShortcutAction.qml
         qml/components/TextToolButton.qml
@@ -331,6 +339,8 @@ qt_add_qml_module(ferrous_ui_qml
     RESOURCES
         qml/assets/lastfm.svg
         qml/assets/lastfm-paused.svg
+        qml/assets/lastfm-strike.svg
+        qml/assets/status-error.svg
         qml/assets/status-offline.svg
         qml/assets/status-warning.svg
         qml/assets/transport-next.svg
@@ -339,7 +349,12 @@ qt_add_qml_module(ferrous_ui_qml
         qml/assets/transport-previous.svg
         qml/assets/transport-stop.svg
         qml/assets/no-art-mark-20.svg
+        qml/assets/no-art-mark-20-light.svg
+        qml/assets/no-art-mark.svg
+        qml/assets/no-art-mark-light.svg
         qml/assets/spectrogram-symbolic.svg
+        qml/assets/waveform-symbolic.svg
+        qml/assets/ferrous-mark-small-symbolic.svg
         qml/assets/ferrous-mark-symbolic.svg
         qml/assets/volume.svg
         qml/assets/volume-muted.svg
@@ -671,6 +686,21 @@ if(BUILD_TESTING)
         TIMEOUT 90
     )
     ferrous_add_default_platform_test(ferrous_ui_foundations_tests drawsOffscreenUnlessAPlatformIsChosen)
+    # The mode switch's glyphs fill whole device pixels: again at 2x.
+    add_test(NAME ferrous_ui_foundations_glyph_2x
+        COMMAND ferrous_ui_foundations_tests modeSwitchWaveformGlyphFillsWholePixels
+            modeSwitchSpectrogramGlyphFillsWholePixels)
+    set_tests_properties(ferrous_ui_foundations_glyph_2x PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=2"
+        TIMEOUT 60
+    )
+    # The mode switch's hover outline on the button's first device pixels.
+    add_test(NAME ferrous_ui_foundations_segment_hover_2x
+        COMMAND ferrous_ui_foundations_tests plotSegmentHoverIsAnOutlineNotTheChosenFill)
+    set_tests_properties(ferrous_ui_foundations_segment_hover_2x PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=2"
+        TIMEOUT 60
+    )
 
     # The transport and the status bar of #373, from the QML sources.
     qt_add_executable(ferrous_transport_status_tests
@@ -769,9 +799,13 @@ if(BUILD_TESTING)
     # The areas that run in shards, as `<area> <shards> <cost>`, the cost
     # each shard's seconds when run alone, as ferrous_add_sharded_test takes
     # it: in one process, transport_input took most of its timeout in the
-    # Debug CI job, and the longest of the run.
+    # Debug CI job, and the longest of the run; in two shards each took
+    # 89-103 s of its 120 s on a busy machine. Its tests have grown since:
+    # 158 cases, 202 s in all, so three shards took 66-70 s each alone and
+    # one ran out its 120 s beside another build. It runs in five (about
+    # 40 s each).
     set(FERROUS_QML_SMOKE_SHARDED_AREAS
-        transport_input 2 22
+        transport_input 5 40
     )
     set(ferrous_smoke_area_names "")
     list(LENGTH FERROUS_QML_SMOKE_AREAS ferrous_smoke_area_values)
@@ -847,6 +881,18 @@ if(BUILD_TESTING)
     ferrous_add_sharded_test(ferrous_ui_main_window_tests 2 35)
     ferrous_add_default_platform_test(ferrous_ui_main_window_tests drawsOffscreenUnlessAPlatformIsChosen)
 
+    # Diagnostics' log view (#724): its cost, its selection and its copy.
+    ferrous_add_app_test(ferrous_diagnostics_log_view_tests
+        tests/tst_diagnostics_log_view.cpp
+    )
+    target_link_libraries(ferrous_diagnostics_log_view_tests PRIVATE ferrous_app_icon)
+    add_test(NAME ferrous_diagnostics_log_view_tests COMMAND ferrous_diagnostics_log_view_tests)
+    set_tests_properties(ferrous_diagnostics_log_view_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        TIMEOUT 120
+    )
+    ferrous_add_default_platform_test(ferrous_diagnostics_log_view_tests drawsOffscreenUnlessAPlatformIsChosen)
+
     # The dialogs of #373, from the QML sources.
     ferrous_add_app_test(ferrous_ui_dialogs_tests
         tests/tst_ui_dialogs.cpp
@@ -855,11 +901,9 @@ if(BUILD_TESTING)
         ferrous_app_icon
         Qt6::QuickTest
     )
-    add_test(NAME ferrous_ui_dialogs_tests COMMAND ferrous_ui_dialogs_tests)
-    set_tests_properties(ferrous_ui_dialogs_tests PROPERTIES
-        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
-        TIMEOUT 180
-    )
+    # Run alone, the binary takes about two and a half minutes, near one
+    # test's 180 s under the load of a parallel run.
+    ferrous_add_sharded_test(ferrous_ui_dialogs_tests 4 40)
     ferrous_add_default_platform_test(ferrous_ui_dialogs_tests drawsOffscreenUnlessAPlatformIsChosen)
 
     # The motion of the main window (#373), in a session of its own: no
@@ -1136,7 +1180,6 @@ if(BUILD_TESTING)
     foreach(test_and_cost IN ITEMS
             ferrous_qml_smoke_album_art:18
             ferrous_qml_smoke_tag_editor:36
-            ferrous_ui_dialogs_tests:40
             ferrous_qml_smoke_waveform:27
             ferrous_qml_smoke_errors:18
             ferrous_qml_smoke_spectrogram:14

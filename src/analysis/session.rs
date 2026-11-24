@@ -2331,8 +2331,8 @@ fn session_end_column(session: &SpectrogramSessionState) -> Option<u64> {
 
 /// [`session_end_column`] as a chunk carries it: 0 if unknown. The UI's
 /// centered view ends there, as the decoder's does, and cannot reckon it
-/// from the hop alone: at the reference hop, zooms just above 1 run the
-/// STFT a column apart, and zoom 1 an eighth of a window apart.
+/// from the hop alone: it goes by the file's frames and the window's size,
+/// and by the end the session reached once it has.
 fn chunk_end_column(session: &SpectrogramSessionState) -> u32 {
     u64_to_u32_saturating(session_end_column(session).unwrap_or(0))
 }
@@ -10485,6 +10485,7 @@ mod tests {
     fn the_decoded_end_column_is_where_sessions_of_the_track_end() {
         for (rate, frames) in [
             (8_000, 48_001),
+            (32_000, 192_123),
             (44_100, 264_601),
             (48_000, 288_517),
             (96_000, 576_111),
@@ -10492,7 +10493,7 @@ mod tests {
             let path = write_frames_fixture("predicted", rate, frames);
             let seconds = f64::from(frames) / f64::from(rate);
             for fft in [512, 2_048, 8_192] {
-                for zoom in [0.3, 1.0, 1.7, 4.0] {
+                for zoom in [0.3, 1.0, 1.0003, 1.7, 4.0] {
                     let expected =
                         centered_view::decoded_end_column(u64::from(frames), fft, zoom, rate);
                     for start in [seconds - 1.5, seconds * 0.5] {

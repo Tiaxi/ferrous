@@ -63,7 +63,15 @@ pub struct BridgeError {
     pub severity: ErrorSeverity,
     /// The file or folder the error is about, if one; empty otherwise.
     pub subject: String,
+    /// What went wrong, in a sentence that names no system error; Recent
+    /// Issues shows its first sentence as the entry's title.
     pub message: String,
+    /// The system's text for it, such as "failed to replace
+    /// /path/settings.txt: Permission denied (os error 13)", which Recent
+    /// Issues shows under the title in secondary ink; empty for none. The
+    /// UI reads it for nothing else but a failed track's reason, which the
+    /// file's rows in the queue and the library tell.
+    pub detail: String,
 }
 
 impl BridgeError {
@@ -74,6 +82,7 @@ impl BridgeError {
             severity: ErrorSeverity::Error,
             subject: String::new(),
             message: message.into(),
+            detail: String::new(),
         }
     }
 
@@ -90,6 +99,27 @@ impl BridgeError {
     pub fn about(mut self, subject: impl Into<String>) -> Self {
         self.subject = subject.into();
         self
+    }
+
+    /// The error, with the system's text `detail`.
+    #[must_use]
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = detail.into();
+        self
+    }
+
+    /// The message and the system's text together, as the log has them:
+    /// "Settings couldn't be saved: failed to replace …". A message written
+    /// as a sentence drops its full stop before the colon, so the line never
+    /// reads "… playback stopped.: …".
+    #[must_use]
+    pub fn logged_message(&self) -> String {
+        if self.detail.is_empty() {
+            self.message.clone()
+        } else {
+            let message = self.message.strip_suffix('.').unwrap_or(&self.message);
+            format!("{message}: {}", self.detail)
+        }
     }
 }
 
@@ -175,13 +205,14 @@ pub(crate) fn log_undelivered(error: &BridgeError) {
         ErrorSeverity::Warning => "warning",
         ErrorSeverity::Error => "error",
     };
+    let message = error.logged_message();
     if error.subject.is_empty() {
-        log_only(error.category, level, &error.message);
+        log_only(error.category, level, &message);
     } else {
         log_only(
             error.category,
             level,
-            &format!("{} ({})", error.message, error.subject),
+            &format!("{message} ({})", error.subject),
         );
     }
 }
@@ -198,6 +229,27 @@ fn log_only(category: ErrorCategory, level: &str, message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_logged_sentence_drops_its_full_stop_before_the_detail() {
+        let error = BridgeError::error(
+            ErrorCategory::Playback,
+            "Couldn't play “a.flac”; playback stopped.",
+        )
+        .with_detail("No valid frames found before end of stream");
+        assert_eq!(
+            error.logged_message(),
+            "Couldn't play “a.flac”; playback stopped: No valid frames found before end of stream"
+        );
+        let plain = BridgeError::error(ErrorCategory::Settings, "Settings couldn't be saved")
+            .with_detail("failed to replace");
+        assert_eq!(
+            plain.logged_message(),
+            "Settings couldn't be saved: failed to replace"
+        );
+        let bare = BridgeError::error(ErrorCategory::Settings, "Settings couldn't be saved.");
+        assert_eq!(bare.logged_message(), "Settings couldn't be saved.");
+    }
 
     #[test]
     fn a_quoted_path_escapes_its_quotes_and_backslashes() {

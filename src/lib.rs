@@ -10,6 +10,7 @@
 pub mod analysis;
 pub mod artwork;
 mod collation;
+mod edit_failure;
 mod file_edit_lock;
 mod file_identity;
 mod folder_cover;
@@ -25,6 +26,7 @@ pub mod playback;
 mod profile_logging;
 mod raw_audio;
 mod safe_save;
+pub mod save_cause;
 pub mod tag_editor;
 mod tag_write;
 #[cfg(test)]

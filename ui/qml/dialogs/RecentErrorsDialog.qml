@@ -35,6 +35,11 @@ Popup {
     // Clear of the window's edges: 6 px from the right, and above the
     // status bar.
     readonly property real edgeMargin: Kirigami.Units.smallSpacing + 2
+    // Between an entry's glyph and its text, and Open Diagnostics…' too.
+    readonly property real glyphTextGap: Kirigami.Units.largeSpacing + 2
+    // The rules under the header and over the footer: the frame's colour.
+    readonly property color ruleColor: Kirigami.ColorUtils.linearInterpolation(
+        root.uiPalette.chrome, root.uiPalette.text, Kirigami.Theme.frameContrast)
     readonly property real statusBarClearance: root.uiPalette.rowHeight + Kirigami.Units.smallSpacing + 2
     // The files of the entries that are in the queue now, by path. It is
     // worked out again whenever the queue's rows change, whatever their
@@ -126,6 +131,34 @@ Popup {
         }
     }
 
+    // At its least: 460 px with the default font, which a larger one scales
+    // into the most it takes.
+    readonly property real leastWidth: 460
+    readonly property real headerWidth: Math.ceil(errorHistoryHeader.implicitWidth
+        + errorHistoryHeader.Layout.leftMargin + errorHistoryHeader.Layout.rightMargin)
+    // The width it opened at, which it holds while it is open: an issue
+    // that arrives wraps in it rather than moving the popup.
+    property real openedWidth: root.leastWidth
+    // Its rows exist from just before it shows, to be measured, until it
+    // has hidden.
+    property bool listed: false
+
+    // What it holds needs across, with each text on one line and the room
+    // of the list's scroll bar.
+    function contentNeeds() {
+        let rows = 0
+        for (let i = 0; i < historyList.count; ++i) {
+            const row = historyList.itemAt(i)
+            if (row) {
+                rows = Math.max(rows, row.naturalWidth)
+            }
+        }
+        const bar = historyView.ScrollBar.vertical
+        return Math.ceil(Math.max(rows + (bar ? bar.implicitWidth : 0),
+            diagnosticsButton.Layout.leftMargin + diagnosticsButton.implicitWidth
+                + errorHistoryHeader.Layout.rightMargin))
+    }
+
     function showNewest() {
         historyView.contentItem.contentY = 0
     }
@@ -153,13 +186,13 @@ Popup {
     focus: true
     // Above the viewer popups.
     z: 100
-    // 460 px with the default font, as much wider as a larger font makes
-    // the text (at 24 pt it kept 460 px, and its heading wrapped after four
-    // words), or as wide as the header needs, which puts its title, how
-    // many are new and Clear All on one line; within the window.
-    width: Math.min(Math.max(root.uiPalette.scaledSize(460), Math.ceil(errorHistoryHeader.implicitWidth
-            + errorHistoryHeader.Layout.leftMargin + errorHistoryHeader.Layout.rightMargin)),
-        root.hostWidth - 2 * root.edgeMargin)
+    // 460 px with the default font. A larger one gives it what its content
+    // needs, up to 460 px scaled with it, which a long path gets (it was
+    // always that, about 1100 px at 24 pt for half as much content; a fixed
+    // 460 px wrapped its heading after four words); or as wide as the
+    // header needs, which puts its title, how many are new and Clear All
+    // on one line; within the window.
+    width: Math.min(Math.max(root.openedWidth, root.headerWidth), root.hostWidth - 2 * root.edgeMargin)
     height: Math.min(root.implicitHeight, root.hostHeight - root.statusBarClearance - root.edgeMargin)
     x: Math.round(root.hostWidth - root.width - root.edgeMargin)
     y: Math.round(root.hostHeight - root.height - root.statusBarClearance)
@@ -175,9 +208,17 @@ Popup {
         root.errorController.dismissLatest()
         // Not visible yet: the refresh below would skip it.
         root.queuedSubjects = ({})
+        root.listed = true
+        root.openedWidth = Math.max(root.leastWidth,
+            Math.min(root.uiPalette.scaledSize(root.leastWidth), root.contentNeeds()))
         root.showNewest()
     }
-    onVisibleChanged: root.refreshQueuedSubjects()
+    onVisibleChanged: {
+        if (!root.visible) {
+            root.listed = false
+        }
+        root.refreshQueuedSubjects()
+    }
     // Over a viewer the keyboard would otherwise stay with the viewer.
     // Opened from the keyboard, the first action has it, with its focus
     // ring, as Tab would give it. Opened with the pointer, no control
@@ -324,6 +365,16 @@ Popup {
             }
         }
 
+        // A hairline under the header, as over the footer: the header is
+        // the popup's, apart from the list it heads (with a rule only over
+        // the footer, the title stood on the first issue).
+        Rectangle {
+            objectName: "errorHistoryHeaderLine"
+            Layout.fillWidth: true
+            implicitHeight: 1
+            color: root.ruleColor
+        }
+
         Components.KeyScrollView {
             id: historyView
             objectName: "errorHistoryView"
@@ -344,7 +395,7 @@ Popup {
                     id: historyList
                     objectName: "errorHistoryList"
                     // Builds rows only while the popup is shown.
-                    model: root.visible ? root.errorController.entries : null
+                    model: root.listed ? root.errorController.entries : null
 
                     delegate: Item {
                         id: historyRow
@@ -354,6 +405,7 @@ Popup {
                         required property int severity
                         required property string subject
                         required property string message
+                        required property string detail
                         required property int count
                         required property double lastSeenMs
                         required property bool unseen
@@ -370,6 +422,15 @@ Popup {
                         readonly property bool showsSubject: historyRow.subject.length > 0
                             && historyRow.message.indexOf(historyRow.subject.split("/").pop()) < 0
                         readonly property Item actionItem: actionButton
+                        // Across with each of its texts on one line.
+                        readonly property real naturalWidth: rowLayout.anchors.leftMargin + rowLayout.anchors.rightMargin
+                            + severityGlyph.implicitWidth + rowLayout.spacing
+                            + Math.max(categoryLabel.implicitWidth + categoryLine.spacing + timeLabel.implicitWidth,
+                                headingLabel.implicitWidth,
+                                historyRow.description.length > 0 ? messageLabel.implicitWidth : 0,
+                                historyRow.showsSubject ? subjectLabel.implicitWidth : 0,
+                                historyRow.detail.length > 0 ? detailLabel.implicitWidth : 0,
+                                historyRow.action !== null ? actionButton.implicitWidth : 0)
 
                         width: historyColumn.width
                         implicitHeight: rowLayout.implicitHeight + Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing + 2
@@ -379,7 +440,25 @@ Popup {
                                 historyRow.title, historyRow.categoryText, historyRow.timeText, historyRow.description)
                             : I18n.i18nc("@info issue title, category, time", "%1 (%2, %3)",
                                 historyRow.title, historyRow.categoryText, historyRow.timeText)
-                        Accessible.description: historyRow.subject
+                        // The file, then the system's text, as the lines show them.
+                        Accessible.description: [historyRow.subject, historyRow.detail]
+                            .filter(function(text) { return text.length > 0 }).join("\n")
+
+                        // A hairline over each entry but the first, from the
+                        // text's left edge, past the glyph column, to the
+                        // row's right margin: entries of several lines read
+                        // apart without crossing the glyphs' column (space
+                        // alone ran them together, while the header and the
+                        // footer have rules). The seam's colour, a step
+                        // quieter than those rules.
+                        Rectangle {
+                            objectName: "errorHistoryEntryLine"
+                            visible: historyRow.index > 0
+                            x: rowLayout.anchors.leftMargin + severityGlyph.width + rowLayout.spacing
+                            width: historyRow.width - x - rowLayout.anchors.rightMargin
+                            height: 1
+                            color: root.uiPalette.seam
+                        }
 
                         RowLayout {
                             id: rowLayout
@@ -389,40 +468,44 @@ Popup {
                             anchors.topMargin: Kirigami.Units.largeSpacing
                             anchors.leftMargin: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
                             anchors.rightMargin: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
-                            spacing: Kirigami.Units.largeSpacing + 2
+                            spacing: root.glyphTextGap
 
-                            // The only mark between an error and a notice: as
-                            // large as a line of text holds, and centred on the
-                            // category's lowercase, the middle of its x-height,
-                            // 2 px under the line's top with the default font
-                            // (it stayed 16 px at the top of a 24 pt line).
+                            // The entry's severity, as the status bar marks
+                            // it: as large as a line of text holds, and
+                            // centred on the title's lowercase, the middle
+                            // of its x-height, beside the words the eye
+                            // reads first (on the category's line above it,
+                            // it hung beside the quietest text).
                             Kirigami.Icon {
+                                id: severityGlyph
                                 objectName: "errorHistoryGlyph"
                                 Layout.alignment: Qt.AlignTop
-                                Layout.topMargin: Math.round(categoryLabel.y + categoryLabel.baselineOffset
-                                    - categoryMetrics.xHeight / 2 - implicitHeight / 2)
+                                Layout.topMargin: Math.round(headingLabel.y + headingLabel.baselineOffset
+                                    - headingMetrics.xHeight / 2 - implicitHeight / 2)
                                 implicitWidth: root.uiPalette.labelIconSize
                                 implicitHeight: root.uiPalette.labelIconSize
-                                source: historyRow.glyph === ErrorUtils.GlyphOffline
-                                    ? Qt.resolvedUrl("../assets/status-offline.svg")
-                                    : (historyRow.glyph === ErrorUtils.GlyphInformation
-                                        ? "help-about"
-                                        : Qt.resolvedUrl("../assets/status-warning.svg"))
+                                // An error's ring with a cross in the negative
+                                // colour, a warning's triangle in the
+                                // secondary one: shape and colour both.
+                                source: Qt.resolvedUrl("../assets/" + ErrorUtils.glyphAsset(historyRow.glyph))
                                 isMask: true
-                                color: historyRow.glyph === ErrorUtils.GlyphWarning
-                                    ? root.uiPalette.negative
-                                    : root.uiPalette.textSecondary
+                                color: ErrorUtils.glyphColor(historyRow.glyph, root.uiPalette)
                                 Accessible.ignored: true
                             }
 
+                            // At the row's top whatever the glyph's margin
+                            // (centred, it moved down by what the glyph
+                            // beside a short entry's title stood below it).
                             ColumnLayout {
                                 Layout.fillWidth: true
+                                Layout.alignment: Qt.AlignTop
                                 spacing: 2
 
                                 // What the issue is about and when, as a
                                 // notification's header line: the quietest
                                 // text of the entry.
                                 RowLayout {
+                                    id: categoryLine
                                     Layout.fillWidth: true
                                     spacing: Kirigami.Units.largeSpacing
 
@@ -437,13 +520,10 @@ Popup {
                                         color: root.uiPalette.textTertiary
                                         Accessible.ignored: true
 
-                                        FontMetrics {
-                                            id: categoryMetrics
-                                            font: categoryLabel.font
-                                        }
                                     }
 
                                     Label {
+                                        id: timeLabel
                                         objectName: "errorHistoryTime"
                                         textFormat: Text.PlainText
                                         text: historyRow.timeText
@@ -457,15 +537,22 @@ Popup {
                                 // The problem itself. A path or a system
                                 // error in it wraps as a message's does.
                                 Components.MessageLabel {
+                                    id: headingLabel
                                     objectName: "errorHistoryHeading"
                                     Layout.fillWidth: true
                                     message: historyRow.title
                                     font.weight: historyRow.unseen ? Font.DemiBold : Font.Normal
                                     color: root.uiPalette.text
                                     Accessible.ignored: true
+
+                                    FontMetrics {
+                                        id: headingMetrics
+                                        font: headingLabel.font
+                                    }
                                 }
 
                                 Components.MessageLabel {
+                                    id: messageLabel
                                     objectName: "errorHistoryMessage"
                                     Layout.fillWidth: true
                                     visible: message.length > 0
@@ -476,12 +563,33 @@ Popup {
                                 }
 
                                 Label {
+                                    id: subjectLabel
                                     objectName: "errorHistorySubject"
                                     Layout.fillWidth: true
                                     visible: historyRow.showsSubject
                                     text: historyRow.subject
                                     textFormat: Text.PlainText
                                     elide: Text.ElideMiddle
+                                    font.pointSize: root.uiPalette.smallPointSize
+                                    // What the action acts on: over the time
+                                    // and the category (it had their ink).
+                                    color: root.uiPalette.textSecondary
+                                    Accessible.ignored: true
+                                }
+
+                                // The system's text, such as "failed to
+                                // replace …: Permission denied (os error
+                                // 13)", under the file, a step quieter than
+                                // it: the title says in plain words what
+                                // went wrong, and the file is what the
+                                // action acts on (in the file's ink, the
+                                // two read as one block).
+                                Components.MessageLabel {
+                                    id: detailLabel
+                                    objectName: "errorHistoryDetail"
+                                    Layout.fillWidth: true
+                                    visible: historyRow.detail.length > 0
+                                    message: historyRow.detail
                                     font.pointSize: root.uiPalette.smallPointSize
                                     color: root.uiPalette.textTertiary
                                     Accessible.ignored: true
@@ -501,44 +609,37 @@ Popup {
                                     rightPadding: Kirigami.Units.smallSpacing + 2
                                     // Link-coloured small text on a flat button: the style
                                     // draws the text of its own background, so both are
-                                    // drawn here.
-                                    // The tint under the text while hovered or pressed,
-                                    // the press a clear step past the hover, 1.65:1 on
-                                    // the popup's window colour, as the transport's
-                                    // (at 10% it read as the hover); the
-                                    // link is darker where the tint takes it under
-                                    // 4.5:1 on the window colour.
+                                    // drawn here, in the states Breeze gives the dialogs'
+                                    // other flat actions, Preview, Apply, the Reverts and
+                                    // this popup's own two: the accent's outline alone on
+                                    // hover (it was a grey fill of its own), and pressed,
+                                    // the accent at 30 % within it, at once, as theirs are.
+                                    // The link is darker or lighter where that fill takes
+                                    // it under 4.6:1 on the window colour, a margin over
+                                    // 4.5:1 that the fill's rounding to pixels cannot take
+                                    // away (at 4.5:1 it drew at 4.49:1 in Breeze Light).
                                     readonly property color tint: actionButton.down
-                                        ? root.uiPalette.pressedOn(root.uiPalette.chrome)
-                                        : (actionButton.hovered ? root.uiPalette.hover : "transparent")
+                                        ? ColorUtils.withAlpha(root.uiPalette.accent, 0.3)
+                                        : "transparent"
                                     contentItem: Label {
                                         textFormat: Text.PlainText
                                         text: actionButton.text
                                         font.pointSize: root.uiPalette.smallPointSize
                                         color: actionButton.tint.a > 0
-                                            ? root.uiPalette.linkOn(ColorUtils.drawnOver(actionButton.tint,
-                                                                                         root.uiPalette.chrome))
+                                            ? root.uiPalette.readableOn(root.uiPalette.link,
+                                                [ColorUtils.drawnOver(actionButton.tint, root.uiPalette.chrome)], 4.6)
                                             : root.uiPalette.link
                                         Accessible.ignored: true
                                     }
                                     background: Rectangle {
-                                        radius: 3
+                                        radius: Kirigami.Units.cornerRadius
                                         color: actionButton.tint
-                                        border.width: actionButton.visualFocus ? 2 : 0
-                                        border.color: root.uiPalette.focusRing
-
-                                        // The hover and the release fade; the press
-                                        // shows on its first frame. The button tells
-                                        // `pressed` before `down`, which the tint
-                                        // follows, so the fade is off by the time the
-                                        // tint turns.
-                                        Behavior on color {
-                                            enabled: Kirigami.Units.shortDuration > 0 && !actionButton.pressed
-                                            ColorAnimation {
-                                                duration: Kirigami.Units.shortDuration
-                                                easing.type: Easing.OutCubic
-                                            }
-                                        }
+                                        border.width: actionButton.visualFocus
+                                            ? 2
+                                            : (actionButton.down || actionButton.hovered ? 1 : 0)
+                                        border.color: actionButton.visualFocus
+                                            ? root.uiPalette.focusRing
+                                            : root.uiPalette.accent
                                     }
                                     onActiveFocusChanged: {
                                         if (activeFocus) {
@@ -555,21 +656,25 @@ Popup {
         }
 
         Rectangle {
+            objectName: "errorHistoryFooterLine"
             Layout.fillWidth: true
             Layout.topMargin: Kirigami.Units.smallSpacing
             Layout.bottomMargin: Kirigami.Units.smallSpacing
             implicitHeight: 1
-            color: Kirigami.ColorUtils.linearInterpolation(
-                root.uiPalette.chrome, root.uiPalette.text, Kirigami.Theme.frameContrast)
+            color: root.ruleColor
         }
 
         // On the header's x, with the glyph of Help's Diagnostics…, as Clear
         // All has its own (they were the only dialog actions with none).
-        // Not ⓘ, which marks a notice in the list.
+        // Not ⓘ, which marks a notice in the list. Its glyph is on the
+        // entries' glyphs, the same size, and its caption on their text, as
+        // far from the glyph as theirs (at the button's own spacing it was
+        // a second text column, 6 px left of the headings).
         Components.TextToolButton {
             id: diagnosticsButton
             objectName: "errorHistoryDiagnosticsButton"
             Layout.leftMargin: errorHistoryHeader.Layout.leftMargin - diagnosticsButton.leftPadding
+            spacing: root.glyphTextGap
             flat: true
             text: I18n.i18nc("@action:button", "Open Diagnostics…")
             icon.name: "view-list-details"

@@ -30,6 +30,17 @@ pub fn spawn_engine(
     spawn_with_clock(analysis_tx, event_tx, exit_tx, Instant::now)
 }
 
+/// The simulation, which plays to no device anyway.
+#[cfg(test)]
+pub fn spawn_engine_on_test_output(
+    analysis_tx: Sender<AnalysisCommand>,
+    event_tx: Sender<PlaybackEvent>,
+    failure: &Arc<OnceLock<String>>,
+    exit_tx: Sender<EngineExit>,
+) -> Sender<PlaybackCommand> {
+    spawn_engine(analysis_tx, event_tx, failure, exit_tx)
+}
+
 /// Spawn the simulation with time that passes only when the test advances
 /// `clock`, so a test decides when playback reaches a track boundary.
 #[cfg(test)]
@@ -91,6 +102,7 @@ fn spawn_with_clock(
             queue: GaplessQueue::new(),
             about_to_finish_fired: false,
             track_token_counter: 0,
+            track_change: None,
             channel_mix: ChannelMix::default(),
             event_tx,
             analysis_tx,
@@ -110,9 +122,18 @@ fn spawn_with_clock(
             // advances while it plays.
             runtime.snapshot.position_sampled_at = super::monotonic_now();
             runtime.snapshot.position_advancing = runtime.snapshot.state == PlaybackState::Playing;
-            let _ = runtime
-                .event_tx
-                .send(PlaybackEvent::Snapshot(runtime.snapshot.clone()));
+            let snapshot = runtime.snapshot.clone();
+            let event = match runtime.track_change.take() {
+                Some(change) => PlaybackEvent::TrackChanged {
+                    path: change.path,
+                    queue_index: change.queue_index,
+                    kind: change.kind,
+                    track_token: change.track_token,
+                    snapshot,
+                },
+                None => PlaybackEvent::Snapshot(snapshot),
+            };
+            let _ = runtime.event_tx.send(event);
         }
         let _ = exit_tx.send(EngineExit::default());
     });
@@ -129,9 +150,19 @@ struct MockPlaybackRuntime {
     /// stream. It asks again only for a restarted or new stream.
     about_to_finish_fired: bool,
     track_token_counter: u64,
+    /// The track change of the command being applied, which is sent with
+    /// the snapshot the command leaves, as the `GStreamer` backend does.
+    track_change: Option<MockTrackChange>,
     channel_mix: ChannelMix,
     event_tx: Sender<PlaybackEvent>,
     analysis_tx: Sender<AnalysisCommand>,
+}
+
+struct MockTrackChange {
+    path: PathBuf,
+    queue_index: usize,
+    kind: TrackChangeKind,
+    track_token: u64,
 }
 
 impl MockPlaybackRuntime {
@@ -147,6 +178,12 @@ impl MockPlaybackRuntime {
     fn handle_command(&mut self, cmd: PlaybackCommand) {
         match cmd {
             PlaybackCommand::LoadQueue(paths) => self.load_queue(paths),
+            PlaybackCommand::PlayQueue(paths) => {
+                if !paths.is_empty() {
+                    self.load_queue(paths);
+                    self.snapshot.state = PlaybackState::Playing;
+                }
+            }
             PlaybackCommand::AddToQueue(paths) => {
                 let cancelled = self.queue.add_to_queue(paths);
                 self.continue_after_cancelled_advance(cancelled);
@@ -186,6 +223,12 @@ impl MockPlaybackRuntime {
                     self.switch_manually(target.path, target.index);
                 }
             }
+            PlaybackCommand::StartAt(idx) => {
+                if let Some(target) = self.queue.set_current(idx) {
+                    self.switch_manually(target.path, target.index);
+                    self.snapshot.state = PlaybackState::Playing;
+                }
+            }
             PlaybackCommand::Next => self.advance_manually(true),
             PlaybackCommand::Previous => self.advance_manually(false),
             PlaybackCommand::Play => {
@@ -209,26 +252,7 @@ impl MockPlaybackRuntime {
                 self.snapshot.position = Duration::ZERO;
                 self.snapshot.current_queue_index = None;
             }
-            PlaybackCommand::Seek(pos) => {
-                self.snapshot.seek_serial += 1;
-                // Like the GStreamer backend, a stopped track is not
-                // seekable.
-                if self.snapshot.current.is_none() || self.snapshot.state == PlaybackState::Stopped
-                {
-                    return;
-                }
-                // Like the GStreamer backend, keep the seek away from a
-                // successor the pipeline was given.
-                self.queue.hold_handoffs();
-                let _ = self.queue.cancel_pending();
-                self.queue.release_handoffs();
-                self.about_to_finish_fired = false;
-                self.snapshot.position = pos.min(self.snapshot.duration);
-                self.snapshot.seek_landed_serial = self.snapshot.seek_serial;
-                let _ = self.event_tx.send(PlaybackEvent::Seeked {
-                    position: self.snapshot.position,
-                });
-            }
+            PlaybackCommand::Seek(pos) => self.seek(pos),
             PlaybackCommand::Cue { position, expected } => self.cue(position, expected),
             PlaybackCommand::SetVolume(vol) => {
                 self.snapshot.volume = vol.clamp(0.0, 1.0);
@@ -248,6 +272,24 @@ impl MockPlaybackRuntime {
             PlaybackCommand::Poll => self.poll(),
         }
     }
+    fn seek(&mut self, pos: Duration) {
+        self.snapshot.seek_serial += 1;
+        // Like the GStreamer backend, a stopped track is not seekable.
+        if self.snapshot.current.is_none() || self.snapshot.state == PlaybackState::Stopped {
+            return;
+        }
+        // Like the GStreamer backend, keep the seek away from a successor
+        // the pipeline was given.
+        self.queue.hold_handoffs();
+        let _ = self.queue.cancel_pending();
+        self.queue.release_handoffs();
+        self.about_to_finish_fired = false;
+        self.snapshot.position = pos.min(self.snapshot.duration);
+        self.snapshot.seek_landed_serial = self.snapshot.seek_serial;
+        let _ = self.event_tx.send(PlaybackEvent::Seeked {
+            position: self.snapshot.position,
+        });
+    }
     /// The `GStreamer` backend restarts the current track when it drops a
     /// successor the pipeline was given, which asks for a successor again.
     fn continue_after_cancelled_advance(&mut self, cancelled: Option<CancelledAdvance>) {
@@ -264,7 +306,7 @@ impl MockPlaybackRuntime {
         self.snapshot.current_queue_index = Some(queue_index);
         self.snapshot.duration = TRACK_DURATION;
         self.snapshot.track_token = track_token;
-        let _ = self.event_tx.send(PlaybackEvent::TrackChanged {
+        self.track_change = Some(MockTrackChange {
             path,
             queue_index,
             kind,

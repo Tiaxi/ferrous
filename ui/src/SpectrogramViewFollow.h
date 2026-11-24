@@ -34,6 +34,11 @@ class SpectrogramViewFollow : public QObject {
     // at once on followPlayhead(), a seek other than the plot's own, a track
     // change, or a reset of the zoom. A view gliding back is not detached.
     Q_PROPERTY(bool detached READ detached NOTIFY detachedChanged)
+    // Whether autoscroll runs. As one change is announced, this is never
+    // false while detached is true for a view that autoscroll moves: it is
+    // told as autoscroll starts before the view detaches, and as it stops
+    // after the view follows again.
+    Q_PROPERTY(bool autoscrolling READ autoscrollingShown NOTIFY autoscrollingChanged)
 
 public:
     // How long the analysis waits at least between the anchors of a view
@@ -47,19 +52,27 @@ public:
         double anchorFraction{0.5};
         // Where the playhead starts the glide back, or infinity for none.
         double reattachSeconds{std::numeric_limits<double>::infinity()};
+        // While a drag pans the view, the time at the pointer, from the
+        // pan's continuous, clamped transform; NaN otherwise. The view is
+        // placed on whole columns, so the time a lane reads at the pointer
+        // from where it draws them wobbles by up to half a column.
+        double panPointerSeconds{std::numeric_limits<double>::quiet_NaN()};
     };
 
     explicit SpectrogramViewFollow(QObject *parent = nullptr);
 
     bool detached() const { return m_detached; }
+    bool autoscrollingShown() const { return m_autoscrollingShown; }
     Snapshot snapshot() const;
     // How a view of `snapshot` is placed with the playhead at `position`.
     static ViewFollow::State stateAt(const Snapshot &snapshot, double position);
 
     // The view stays where it is, with `anchorSeconds` at `fraction` of its
     // width: a pan or a zoom about the pointer. A view newly detached forgets
-    // the plot's own seek, and glides back only once a pan has ended.
-    void detach(double anchorSeconds, double fraction);
+    // the plot's own seek, and glides back only once a pan has ended. A pan
+    // tells the time at the pointer, `panPointerSeconds` (see Snapshot).
+    void detach(double anchorSeconds, double fraction,
+                double panPointerSeconds = std::numeric_limits<double>::quiet_NaN());
     // Whether a drag pans the view: until it ends, nothing glides back.
     void setPanning(bool panning);
     // Whether autoscroll moves the view: until it stops, nothing glides
@@ -90,7 +103,15 @@ public:
     Q_INVOKABLE void followPlayhead() { reattach(); }
 
 signals:
+    // A detached view follows the playhead again: told before
+    // detachedChanged, so that the lanes publish where their view is now
+    // first, as the waveform does. `sameTrack` for a view brought back in
+    // the track it was moved in, by Follow Playhead, a reset of the zoom or
+    // a seek; not for a track change, a gapless successor or Repeat-One,
+    // nor for a view that playback reached.
+    void followingAgain(bool sameTrack);
     void detachedChanged();
+    void autoscrollingChanged();
     // Where the view is placed changed; queued to the lanes.
     void changed();
     // Where the analysis decodes the view of the track of `trackToken`:
@@ -98,7 +119,9 @@ signals:
     void backendAnchorChanged(quint64 trackToken, double centerSeconds);
 
 private:
-    void publish();
+    // Tells what changed; `sameTrack` as for followingAgain.
+    void publish(bool sameTrack = false);
+    void publishAutoscrolling();
     void sendBackendAnchor();
     double reattachPointLocked() const;
     // Whether the user holds the view where it is, dragging it or
@@ -112,6 +135,7 @@ private:
     ViewFollow::State m_state;
     double m_anchorSeconds{0.0};
     double m_anchorFraction{0.5};
+    double m_panPointerSeconds{std::numeric_limits<double>::quiet_NaN()};
     bool m_reattachArmed{false};
     bool m_panning{false};
     bool m_autoscrolling{false};
@@ -125,8 +149,10 @@ private:
     PlaybackClockState m_clockState;
     bool m_clockKnown{false};
 
-    // GUI thread: what detached and the analysis were last told.
+    // GUI thread: what detached, autoscrolling and the analysis were last
+    // told.
     bool m_detached{false};
+    bool m_autoscrollingShown{false};
     quint64 m_sentToken{0};
     double m_sentCenter{std::numeric_limits<double>::quiet_NaN()};
     qint64 m_sentAtMs{0};

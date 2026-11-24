@@ -378,8 +378,11 @@ ApplicationWindow {
     QObject *confirm = root->findChild<QObject *>(QStringLiteral("replaceCoverConfirmDialog"));
     QVERIFY(dialog != nullptr && confirm != nullptr);
     // Typographic apostrophes, as everywhere else.
-    const QString details = confirm->property("details").toString();
-    QVERIFY2(!details.contains(QLatin1Char('\'')) && details.contains(QStringLiteral("album\u2019s cover image")),
+    auto *consequence = confirm->findChild<QQuickItem *>(QStringLiteral("replaceCoverEmbedCaseOutcome"));
+    auto *warning = confirm->findChild<QQuickItem *>(QStringLiteral("replaceCoverWarning"));
+    QVERIFY(consequence != nullptr && warning != nullptr);
+    const QString details = consequence->property("text").toString();
+    QVERIFY2(!details.contains(QLatin1Char('\'')) && details.contains(QStringLiteral("album\u2019s tracks")),
              qPrintable(details));
     // Replace from iTunes has a window of its own, which its question opens
     // in.
@@ -412,12 +415,34 @@ ApplicationWindow {
     QTRY_VERIFY(confirm->property("opened").toBool());
     QCOMPARE(confirm->property("message").toString(),
              QStringLiteral("Replace the album art of “Album A” by Artist A?"));
+    QQuickItem *artLine = visibleItemNamed(dialogWindow, QStringLiteral("itunesArtworkCurrentDetails"));
+    QVERIFY(artLine != nullptr);
+    QCOMPARE(artLine->property("text").toString(), QStringLiteral("Image details aren\u2019t available."));
     QVERIFY(applied().isEmpty());
-    // What Replace does, in two short sentences (one sentence of 31 words
-    // was too long): the folder's cover image, or the tracks' embedded art.
-    QCOMPARE(confirm->property("details").toString(),
-             QStringLiteral("The new artwork replaces the album\u2019s cover image file or, if it has none, the artwork "
-                            "embedded in its tracks. Ferrous keeps no copy of the current album art."));
+    // What Replace does on disk, a row for each case (one sentence of 31
+    // words was too long, then one paragraph of conditions): a cover file
+    // where the track's folder has any JPEG or PNG, which Ferrous shows as
+    // its cover (a back scan alone counts, so "a cover image" was not true
+    // of it), otherwise the embedded art of the album's tracks in that
+    // folder ("the album's tracks" read as the whole album's, in every
+    // folder). Only what is overwritten is lost, and the art is "album art"
+    // throughout, as in the question. It says which file is overwritten,
+    // and when one is added instead, as artwork's write_folder_cover does
+    // ("becomes its cover file" left that open).
+    const auto textOf = [confirm](const char *name) {
+        auto *label = confirm->findChild<QQuickItem *>(QString::fromLatin1(name));
+        return label != nullptr ? label->property("text").toString() : QString();
+    };
+    // This bridge doesn't say whether the cover has a cover's name, so the
+    // question gives both cases; see
+    // itunesReplaceStatesTheOutcomeThatApplies for each one alone.
+    QCOMPARE(textOf("replaceCoverFolderCaseLead"), QStringLiteral("If the folder has a JPEG or PNG image"));
+    QCOMPARE(textOf("replaceCoverFolderCaseOutcome"),
+             QStringLiteral("Ferrous overwrites its cover file, such as cover.jpg, or adds one beside its images."));
+    QCOMPARE(textOf("replaceCoverEmbedCaseLead"), QStringLiteral("If it has none"));
+    QCOMPARE(details, QStringLiteral("Ferrous writes the new art into this album\u2019s tracks in this folder."));
+    QCOMPARE(warning->property("text").toString(), QStringLiteral("Ferrous keeps no copy of what it overwrites."));
+    QVERIFY2(!details.contains(QStringLiteral("artwork")), qPrintable(details));
     // A window of its own above Replace from iTunes', with Replace's icon
     // beside Cancel's.
     auto *confirmWindow = qobject_cast<QQuickWindow *>(confirm);
@@ -481,6 +506,11 @@ ApplicationWindow {
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
     QTRY_VERIFY(dialog->property("opened").toBool());
     QVERIFY(QTest::qWaitForWindowExposed(dialogWindow));
+    // Its current art's line doesn't say the lead again ("No current album
+    // art is available" under "Current album art").
+    QQuickItem *currentDetails = visibleItemNamed(dialogWindow, QStringLiteral("itunesArtworkCurrentDetails"));
+    QVERIFY(currentDetails != nullptr);
+    QCOMPARE(currentDetails->property("text").toString(), QStringLiteral("This track has no album art."));
     // Nor does a quick second click on Apply: the window hides at once.
     QQuickItem *apply = visibleItemNamed(dialogWindow, QStringLiteral("itunesArtworkApplyButton"));
     QVERIFY(apply != nullptr);

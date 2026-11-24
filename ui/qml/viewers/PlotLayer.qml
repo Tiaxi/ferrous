@@ -27,8 +27,14 @@ Item {
     property var laneLabels: []
     // The lane under the pointer, from the plot, which takes hover; or -1.
     property int hoveredLane: -1
-    // Whether the pointer is over the pane, from the item that holds the
-    // plot and this layer: a handler here would take hover from the plot.
+    // Whether the pointer is on the plot, from the plot itself (its
+    // pointerOn): over it to its last pixel column, or holding a button
+    // pressed on it, through a pan. The plot's crosshair shows while it
+    // is, and the corner's row with it.
+    property bool plotPointerOn: false
+    // Whether the pointer is over the rest of the pane, from the item that
+    // holds the plot and this layer: a handler here would take hover from
+    // the plot.
     property bool paneHovered: false
     // Whether the viewer's controls show; the main pane's always do.
     property bool controlsVisible: true
@@ -41,11 +47,19 @@ Item {
     // pointer over the pane or its lane, a moment apart.
     property bool controlsAutoHide: false
     property var pointerActivity: null
-    // What the viewer keeps clear on the right of the mode switch.
-    property real trailingInset: 0
     // What the viewer keeps clear along the top edge, under its title strip:
-    // the mode switch and the lane heads keep below it.
+    // the lane heads keep below it. Their labels do only while the controls
+    // show; hidden, each is where its lane alone puts it.
     property real topInset: 0
+    // How much larger than the window's the plot's own text is, the lane
+    // heads': in a viewer over the whole screen, its strip's type scale
+    // (UiPalette.fullscreenTextScale), so the screen has one (at the
+    // window's size they were 12 px under the strip's 16 px); 1 elsewhere.
+    property real textScale: 1
+    // How far in from the plot's left edge the lane heads are: the plates'
+    // inset, or under a viewer's title strip its title's, so that their
+    // left edges are one line.
+    property real laneHeadInset: root.plateInset
     // Whether the plot waits for the track's analysis.
     property bool analysing: false
     // Where the plot draws markerSeconds, NaN while it does not.
@@ -53,22 +67,31 @@ Item {
     // Opens Recent Issues.
     property var openIssues: function() {}
     // The shown plot's zoom, 1 at the default, and what resets it. While it
-    // is zoomed, a readout and Reset show it left of the mode switch, in the
-    // main pane and in both viewers alike: [Zoom ↺] [mode] [✕ of a viewer].
+    // is zoomed, a readout and Reset are left of the mode switch in the
+    // main pane, and show with it; a viewer has them in its own controls,
+    // in the same order.
     property real zoomLevel: 1.0
     property var resetZoom: null
-    // Whether the viewer shows the mode switch and the zoom in its own
-    // controls, the fullscreen viewer's title strip: then they are not on
-    // the plot, and its corner is the view's.
+    // Whether the user moved the view away from the playhead and it stays
+    // there: the zoom's plate then says so, also at the default zoom, and
+    // the corner's row shows at rest too. Never while autoscroll runs
+    // (#655). Follow Playhead's shortcut is for its tooltip.
+    property bool viewMoved: false
+    property bool viewAutoscrolling: false
+    // Whether a middle press holds the plot, from the press to its release:
+    // it leads to a pan or to autoscroll.
+    property bool viewPanPressed: false
+    // Where, in this layer, it was let go: hover goes to no one while the
+    // button is held, so `pointerPosition` is where it was pressed until the
+    // release brings the pointer's place.
+    property point viewPanLetGoAt: Qt.point(0, 0)
+    property string followShortcut: ""
+    // Whether a viewer shows the mode switch and the zoom in its own
+    // controls, on its corner plate or in its title strip: then they are
+    // not on the plot, whose switch and zoom are the main pane's alone.
     property bool controlsInViewer: false
-    // In the windowed viewer, whose Close is right of the mode switch, the
-    // corner is one plate: the zoom, the mode switch and the viewer's own
-    // controls on it, each group set off by a 1 px divider, rather than a
-    // row of plates. The viewer keeps its controls bare on it.
-    readonly property bool cornerJoined: root.trailingInset > 0
-    // The divider's inset from the plate's top and bottom: the buttons'
-    // 4 px of plate and 2 px more, so it is shorter than the glyphs' boxes.
-    readonly property real dividerInset: 6
+    // Whether the pointer is on the plate of those controls over the plot.
+    property bool viewerPlateHovered: false
 
     // The mode's plot colours, also while the plot is bare, before any
     // audio and while it waits for its data: the floor is the mode's own
@@ -100,9 +123,49 @@ Item {
                                                     zoomPlate.visible ? zoomPlate.height : 0) + 1)
 
     // Lanes shorter than this, such as each of 5.1's in the main window,
-    // have compact heads: 72 px with the default font, where a
-    // 20 px label and its 28 px buttons would take most of the lane.
+    // have compact heads: 72 px with the default font, where a full
+    // head, as tall as the mode switch, would take half the lane.
     readonly property real compactLaneHeight: 4 * Kirigami.Units.gridUnit
+    // A pane's heads are one size: compact when its shortest lane is
+    // shorter than that (lane by lane, 5.1's 431 px gave L a 72 px lane
+    // and a full head over five compact ones). A function, so that a head
+    // made as the lane count changes is made at that count's size.
+    function headsCompact() {
+        return root.shortestLane() < root.compactLaneHeight
+    }
+    function shortestLane() {
+        let least = root.height
+        for (let index = 0; index < root.laneCount; ++index) {
+            least = Math.min(least, root.laneHeight(index))
+        }
+        return least
+    }
+    // How far into its lane a head `headHeight` tall is: 5 px, as the mode
+    // switch, or in lanes too short for that, centred on them, so that its
+    // label never runs into the next lane.
+    function headInset(headHeight) {
+        const lane = root.shortestLane()
+        return lane >= root.plateInset + headHeight
+            ? root.plateInset : Math.floor((lane - headHeight) / 2)
+    }
+    // The widest of the lanes' labels, which every head's label cell is
+    // wide enough for, so that M and S are at one x in every lane.
+    readonly property real widestLabel: {
+        // Read the font, for the width to follow it.
+        laneLabelMetrics.font
+        let widest = 0
+        for (let index = 0; index < root.laneCount; ++index) {
+            widest = Math.max(widest, laneLabelMetrics.advanceWidth(root.laneLabels[index] || ""))
+        }
+        return widest
+    }
+    FontMetrics {
+        id: laneLabelMetrics
+        font.family: root.uiPalette.baseFont.family
+        font.pointSize: (root.headsCompact() ? root.uiPalette.compactPointSize : root.uiPalette.smallPointSize)
+            * root.textScale
+        font.weight: Font.DemiBold
+    }
     // The plates' inset from the plot's corners: the lane heads' and the
     // mode switch's.
     readonly property int plateInset: 5
@@ -111,10 +174,10 @@ Item {
     property point pointerPosition: Qt.point(0, 0)
     property bool pointerKnown: false
     // Whether the pointer is on one of the plot's plates: a lane's label or
-    // its buttons, the mode switch or the zoom.
+    // its buttons, the mode switch or the zoom, or the viewer's own plate.
     readonly property bool plateHovered: {
-        if (modeSwitch.pointerHovered || (zoomPlate.visible && zoomPlate.pointerHovered)
-                || (cornerPlate.visible && cornerHover.hovered))
+        if (root.viewerPlateHovered || modeSwitch.pointerHovered
+                || (zoomPlate.visible && zoomPlate.pointerHovered))
             return true
         for (let i = 0; i < laneHeads.count; ++i) {
             const head = laneHeads.itemAt(i)
@@ -124,9 +187,13 @@ Item {
         return false
     }
     // How much of the plot's crosshair and its readout show: none while the
-    // pointer is on a plate, where they ran under it and through it,
-    // fading over shortDuration, OutCubic; at once with animations off.
-    property real crosshairLevel: root.plateHovered ? 0 : 1
+    // pointer is on a plate, where they ran under it and through it, nor
+    // while autoscroll runs, whose pointer steers its speed rather than
+    // reads the plot, as with the lane heads' buttons: its time churned
+    // under the pointer at every frame, and went and came as the pointer
+    // left the window and came back (H18). Fading over shortDuration,
+    // OutCubic; at once with animations off.
+    property real crosshairLevel: root.plateHovered || root.viewAutoscrolling ? 0 : 1
     Behavior on crosshairLevel {
         enabled: Kirigami.Units.shortDuration > 0
         NumberAnimation {
@@ -137,6 +204,24 @@ Item {
 
     function laneTop(index) { return PlotLanes.top(index, root.laneCount, root.height) }
     function laneHeight(index) { return PlotLanes.laneHeight(index, root.laneCount, root.height) }
+
+    // The lane the pane's messages (Analysing…, a file that ends early on
+    // the spectrogram) are centred in: the middle one, or the upper of the
+    // two middle ones.
+    // Centred on the plot, stereo's and every even count's seam ran through
+    // them, between the warning and its link (H26).
+    readonly property int messageLane: Math.floor((Math.max(1, root.laneCount) - 1) / 2)
+    // Where a message `height` tall is in it, on a whole pixel, in the plot.
+    function messageY(height) {
+        const centred = root.laneTop(root.messageLane) + (root.laneHeight(root.messageLane) - height) / 2
+        return Math.round(Math.max(0, Math.min(root.height - height, centred)))
+    }
+    // Whether a message `height` tall, with its room around it, is longer
+    // than its lane, as in a short pane of eight: then it is on an opaque
+    // plate, which the seams it crosses go under.
+    function messageNeedsPlate(height) {
+        return height + 2 * Kirigami.Units.smallSpacing > root.laneHeight(root.messageLane)
+    }
 
     // "4:02", as the Recent Issues entry says it.
     function formatCut(seconds) {
@@ -149,71 +234,80 @@ Item {
             : minutes + ":" + secs
     }
 
-    // The windowed viewer's corner, under its controls: from the zoom, or
-    // the mode switch, out to the viewer's Close, at the mode switch's
-    // height, which the zoom and the viewer's controls share.
-    Item {
-        id: cornerPlate
-        objectName: "plotCornerPlate"
-        z: 2
-        visible: root.cornerJoined && modeSwitch.visible
-        x: zoomPlate.visible ? zoomPlate.x : modeSwitch.x
-        y: modeSwitch.y
-        width: modeSwitch.x + modeSwitch.width + root.trailingInset - x
-        height: modeSwitch.height
+    // The corner is one row, which shows and hides together: the zoom's
+    // plate and the mode switch, while the pointer is on the pane or
+    // keyboard focus is on either, and at rest while the view is moved. On
+    // the plot it shows on the plot's own state, the crosshair's, so that
+    // the two show and hide together (on the lanes' hover, the row went at
+    // the seam between the waveform's lanes while the crosshair stayed).
+    // It also holds while autoscroll runs, which the pointer started on
+    // the pane and takes to the window's edge: there it faded out, and in
+    // again as autoscroll stopped on the moved view (H16). It adds nothing
+    // to the row: "Not following" waits until autoscroll stops (#655).
+    readonly property bool cornerWanted: root.controlsAutoHide || root.beforeAudio || root.plotPointerOn
+        || root.paneHovered || modeSwitch.pointerHovered || modeSwitch.focusInside
+        || zoomPlate.focusInside || root.viewAutoscrolling
 
-        Components.PlotPlate {
-            id: cornerPlateFill
-            anchors.fill: parent
-            revealed: modeSwitch.revealed
-            fadeLevel: root.controlsLevel
-            plotColors: root.plotColors
-            uiPalette: root.uiPalette
-            // Presses between the groups stay on it.
-            takesPointer: true
-            Accessible.ignored: true
+    // As a view follows again, "Not following" leaves the plate as it came
+    // (PlotZoomPlate's notice): with the row staying, its text fades out
+    // as the plate narrows to its new width. With the row fading out, it
+    // goes with the view's cut, the plate taking its zoom's width in that
+    // frame, or going with it at the default zoom, and fading with the row:
+    // with its words gone at the cut, the plate faded at its width, an empty
+    // room of 89 px beside the zoom for 35-49 ms (H23). Autoscroll takes it
+    // at once, and so does a plate that doesn't show.
+    // One state, 0 none, 1 shown, 2 leaving, set here alone: the plate's
+    // two flags of it, each bound to its own of this layer's, changed one
+    // after the other as it ended, and its notice showed between them
+    // (H17).
+    property int _notice: 0
+    // Whether the hand of a middle press holds the plot: from the press
+    // until the pointer next moves after the release. It holds the plot,
+    // not a lane's buttons, which no lane under it opens meanwhile: from
+    // the drag's threshold alone, the head under it opened on the press,
+    // closed as the pan began and opened again on the release (H20).
+    // A seek on the plot (its right press) holds it as well, from the press
+    // until the pointer next moves from where it pressed: it acts on the
+    // data, not on a lane's buttons. A click that came with its pointer's
+    // move, after a pan, opened lane L's Mute and Solo as the playhead
+    // landed (H22). `_handSeekAt` is that press's place, or null while the
+    // hold is a pan's, which `viewPanLetGoAt` ends.
+    property bool _handHolds: false
+    property var _handSeekAt: null
+    onViewPanPressedChanged: {
+        if (root.viewPanPressed) {
+            root._handHolds = true
+            root._handSeekAt = null
         }
-
-        HoverHandler {
-            id: cornerHover
-            onPointChanged: {
-                if (root.pointerActivity) {
-                    root.pointerActivity(point.scenePosition.x, point.scenePosition.y)
-                }
-            }
+    }
+    // The plot seeks where the pointer pressed it.
+    function plotSeeked() {
+        root._handHolds = true
+        root._handSeekAt = root.pointerPosition
+    }
+    onPointerPositionChanged: {
+        if (!root._handHolds || root.viewPanPressed)
+            return
+        const at = root._handSeekAt !== null ? root._handSeekAt : root.viewPanLetGoAt
+        if (root.pointerPosition.x !== at.x || root.pointerPosition.y !== at.y) {
+            root._handHolds = false
+            root._handSeekAt = null
         }
-
-        // Between the zoom and the mode switch, while the zoom shows, and
-        // between the mode switch and the viewer's controls: in the 1 px
-        // the groups leave between them, 4 px of plate from each group's
-        // buttons, so a focus ring 3 px out never meets it.
-        Rectangle {
-            objectName: "plotCornerDivider"
-            visible: zoomPlate.visible
-            x: modeSwitch.x - 1 - cornerPlate.x
-            y: root.dividerInset
-            width: 1
-            height: Math.max(0, cornerPlate.height - 2 * root.dividerInset)
-            opacity: cornerPlateFill.opacity
-            color: root.plotColors.plotPlateEdge
-        }
-        Rectangle {
-            objectName: "plotCornerDivider"
-            x: modeSwitch.x + modeSwitch.width - cornerPlate.x
-            y: root.dividerInset
-            width: 1
-            height: Math.max(0, cornerPlate.height - 2 * root.dividerInset)
-            opacity: cornerPlateFill.opacity
-            color: root.plotColors.plotPlateEdge
-        }
+    }
+    onViewMovedChanged: root._notice = root.viewMoved ? 1
+        : root.cornerWanted && !root.viewAutoscrolling && !root.controlsInViewer && modeSwitch.revealLevel > 0
+            && Kirigami.Units.shortDuration > 0 ? 2 : 0
+    onViewAutoscrollingChanged: {
+        if (root.viewAutoscrolling && root._notice === 2)
+            root._notice = 0
     }
 
     // The mode switch comes first in the Tab order, then each lane's Mute
     // and Solo. It shows while the pointer is over the pane or keyboard
     // focus is on it, as Mute and Solo do: in rolling mode, its corner is
     // the newest part of the plot. Before any audio the plot has nothing
-    // to cover, and the switch shows, so a mode can be picked first. In a
-    // viewer, it shows with the viewer's controls.
+    // to cover, and the switch shows, so a mode can be picked first. A
+    // viewer has a switch of its own.
     Components.PlotModeSwitch {
         id: modeSwitch
         z: 2
@@ -222,15 +316,12 @@ Item {
         // 5 px in, as the lane heads are, their plates' tops on one line
         // with its own.
         anchors.topMargin: root.topInset + root.plateInset
-        anchors.rightMargin: (root.meterShown ? root.meterWidth : 0) + root.plateInset + root.trailingInset
-        // In a viewer, it hides and shows with the viewer's controls, at
-        // their level; hidden, it takes no pointer. In the fullscreen
-        // viewer's strip instead, it is not here.
+        anchors.rightMargin: (root.meterShown ? root.meterWidth : 0) + root.plateInset
+        // Not in a viewer, which has it in its own controls. It comes back
+        // to the pane at the level of those; hidden, it takes no pointer.
         visible: !root.controlsInViewer && (root.controlsVisible || root.controlsLevel > 0)
-        revealed: root.controlsAutoHide || root.beforeAudio || root.paneHovered || root.hoveredLane >= 0
-            || modeSwitch.pointerHovered || modeSwitch.focusInside
+        revealed: root.cornerWanted || root.viewMoved
         fadeLevel: root.controlsLevel
-        bare: root.cornerJoined
         plotColors: root.plotColors
         uiPalette: root.uiPalette
         selectedMode: root.visualizationMode
@@ -238,26 +329,32 @@ Item {
         pointerActivity: root.pointerActivity
     }
 
-    // The zoom, left of the mode switch as far as a viewer's controls are
-    // right of it, so that the corner's plates read as one row:
-    // shown whenever the plot is zoomed, not only with the switch, as
-    // nothing else shows it. It keeps its place while the switch hides. In
-    // a viewer, it hides and shows with the viewer's controls, at their
-    // level.
+    // The zoom, left of the mode switch, their edges 6 px apart, so that
+    // the corner's plates read as one row: while the plot is zoomed, it
+    // shows and hides with the switch (shown without it, it floated 68 px
+    // from the corner). At rest the seek bar's band is the zoom's cue, and
+    // the wheel zooms with the pointer on the pane, where the readout
+    // shows as it changes. It keeps its place and its Tab stop while it is
+    // hidden. "Not following" grows it to the left, so Reset never moves
+    // from under the pointer.
     Components.PlotZoomPlate {
         id: zoomPlate
         z: 2
         anchors.top: modeSwitch.top
         anchors.right: modeSwitch.left
-        // On the windowed viewer's one plate, the divider's 1 px apart.
-        anchors.rightMargin: root.cornerJoined ? 1 : 4
-        bare: root.cornerJoined
+        // Each plate's 1 px edge is outside it: at 4 px between the plates,
+        // their edges were 2 px apart, pinched together (H19).
+        anchors.rightMargin: 6 + 2
         available: !root.controlsInViewer && (root.controlsVisible || root.controlsLevel > 0)
+        revealed: modeSwitch.revealed
         fadeLevel: root.controlsLevel
         plotColors: root.plotColors
         uiPalette: root.uiPalette
         zoomLevel: root.zoomLevel
         resetView: root.resetZoom
+        notice: root._notice
+        onNoticeLeft: root._notice = 0
+        followShortcut: root.followShortcut
         pointerActivity: root.pointerActivity
     }
 
@@ -275,22 +372,18 @@ Item {
                        bounds.width, bounds.height)
     }
 
-    // What each lane's head takes of its lane, from the lane's top left,
-    // by the lane's index; empty for a lane that shows none. The lines of
-    // a lane at rest keep clear of it.
-    readonly property var laneHeadBoundsByLane: {
-        const bounds = []
+    // How far down from their lanes' tops the heads reach, at most, their
+    // plates whether shown or not, so that the lines of the lanes at rest,
+    // which keep under it, never move with those.
+    readonly property real laneHeadsFoot: {
+        let foot = 0
         for (let index = 0; index < laneHeads.count; ++index) {
             const head = laneHeads.itemAt(index)
-            if (!head || !head.visible) {
-                bounds.push(Qt.rect(0, 0, 0, 0))
-                continue
+            if (head && head.visible) {
+                foot = Math.max(foot, head.y + head.height + 1 - root.laneTop(index))
             }
-            const occupied = head.occupiedBounds
-            bounds.push(Qt.rect(head.x + occupied.x, head.y - root.laneTop(index) + occupied.y,
-                                occupied.width, occupied.height))
         }
-        return bounds
+        return foot
     }
 
     // The lane labels, with Mute and Solo.
@@ -299,19 +392,33 @@ Item {
         model: root.laneCount
 
         delegate: Components.PlotLaneHead {
+            id: laneHead
             required property int index
+            // How much lower than in the other lanes the head is in this
+            // one, as a viewer's title strip reaches into it.
+            readonly property real stripShift: Math.max(0, root.topInset - root.laneTop(index))
             objectName: "plotLaneHead"
-            z: 1
-            x: root.plateInset
-            // The buttons' plate 5 px in, as the mode switch, and the label
-            // centred on it: the head's own top is the label's.
-            y: Math.max(root.laneTop(index), root.topInset) + root.plateInset + plateReach
+            // Over the other lanes' labels while its plate shows, which in
+            // lanes shorter than it lies on theirs.
+            z: buttonsRevealed ? 1.5 : 1
+            x: root.laneHeadInset
+            laneRoom: root.shortestLane()
+            plateShift: Math.max(root.topInset - y, Math.min(0, root.height - y - height))
+            // The plate 5 px in, as the mode switch, whose height it has,
+            // and the label centred in it.
+            y: Math.max(root.laneTop(index), root.topInset) + root.headInset(height)
+            // The label at rest as far in from the lane's left as from its
+            // top: a short lane's plate is less far down; a viewer's heads
+            // are further in, on its title's line.
+            labelX: Math.max(0, labelY + root.headInset(height) - root.laneHeadInset)
+            widestLabel: root.widestLabel
             visible: label.length > 0
             plotColors: root.plotColors
             uiPalette: root.uiPalette
             label: root.laneLabels[index] || ""
             channelIndex: index
-            compact: root.laneHeight(index) < root.compactLaneHeight
+            compact: root.headsCompact()
+            textScale: root.textScale
             muted: (root.uiBridge.mutedChannels || [])[index] === true
             soloed: (root.uiBridge.soloedChannels || [])[index] === true
             // Before any audio the lanes at rest are named, with nothing
@@ -320,12 +427,43 @@ Item {
             controlsShown: root.controlsVisible
             controlsLevel: root.controlsLevel
             revealedWithControls: root.controlsAutoHide
-            laneHovered: root.hoveredLane === index
+            // Not while autoscroll runs, whose pointer steers its speed
+            // across the lanes, not at their buttons: their plates came
+            // and went as it crossed them (H17). Nor while a middle press
+            // holds the plot (_handHolds): they opened under its drag (H19).
+            laneHovered: root.hoveredLane === index && !root.viewAutoscrolling
+                && !root._handHolds
             pointerPosition: root.pointerPosition
             pointerKnown: root.pointerKnown
             pointerActivity: root.pointerActivity
             toggleMute: function() { root.uiBridge.toggleChannelMute(index) }
             toggleSolo: function() { root.uiBridge.soloChannel(index) }
+            // The label has two places where the strip reaches into the
+            // lane, under the strip and, with the controls hidden, as far
+            // into the lane as the others' (left under a strip that was
+            // gone, it was stranded 38 px down, in the state a listener sees
+            // most). It cross-fades between them on the controls' level, so
+            // nothing travels or jumps as the strip shows and hides, while
+            // the strip's text is out of its place at rest (PlotLanes).
+            readonly property real underStrip: laneHead.stripShift > 0
+                ? PlotLanes.labelUnderStripLevel(root.controlsLevel) : 1
+            labelLevel: laneHead.underStrip
+
+            Components.PlotPlate {
+                objectName: "plotLaneRestLabel"
+                x: laneHead.labelX
+                y: laneHead.labelY - laneHead.stripShift
+                width: laneHead.labelWidth
+                visible: laneHead.stripShift > 0 && laneHead.underStrip < 1
+                fadeLevel: 1 - laneHead.underStrip
+                plotColors: root.plotColors
+                uiPalette: root.uiPalette
+                text: laneHead.label
+                compact: laneHead.compact
+                textScale: laneHead.textScale
+                // The head's label is the one that is read.
+                Accessible.ignored: true
+            }
         }
     }
 
@@ -348,6 +486,7 @@ Item {
         onTriggered: root._analysingShown = root._awaiting
     }
     Component.onCompleted: {
+        root._notice = root.viewMoved ? 1 : 0
         if (root._awaiting) {
             analysingDelay.restart()
         }
@@ -356,11 +495,26 @@ Item {
     // Over the plot, a Text rather than a Label: the desktop style's Label
     // has a hover handler, which would take the hover from the view. Unlike
     // a Label, a Text is not read by assistive technology unless it says so.
+    Rectangle {
+        objectName: "plotAnalysingPlate"
+        z: 1
+        visible: analysingText.visible && root.messageNeedsPlate(analysingText.height)
+        x: analysingText.x - Kirigami.Units.largeSpacing
+        y: analysingText.y - Kirigami.Units.smallSpacing
+        width: analysingText.width + 2 * Kirigami.Units.largeSpacing
+        height: analysingText.height + 2 * Kirigami.Units.smallSpacing
+        radius: 4
+        color: Qt.rgba(root.plotColors.plotPlate.r, root.plotColors.plotPlate.g, root.plotColors.plotPlate.b, 1)
+        border.width: 1
+        border.color: root.plotColors.plotPlateEdge
+    }
+
     Text {
+        id: analysingText
         objectName: "plotAnalysingText"
         z: 1
-        anchors.centerIn: parent
-        anchors.horizontalCenterOffset: -root.meterWidth / 2
+        x: Math.round((root.plotWidth - width) / 2)
+        y: root.messageY(height)
         visible: root._analysingShown
         textFormat: Text.PlainText
         text: I18n.i18nc("@info:status the visualization waits for its data", "Analysing…")
@@ -370,22 +524,44 @@ Item {
         Accessible.name: text
     }
 
-    // A file that ends early: centred in the empty part of the plot after
-    // the cut, with the Recent Issues entry it matches.
+    // A file that ends early: across the empty part of the plot after the
+    // cut, with the Recent Issues entry it matches. The spectrogram's seams
+    // run on past the cut, so there it is in the messages' lane; the
+    // waveform draws nothing past it, seams neither, so there it is centred
+    // on the whole height of that bare part (in the lane, it floated high
+    // over nothing in stereo, H29).
     Item {
         id: endsEarly
         objectName: "plotEndsEarly"
         z: 1
         readonly property real cutEdge: Math.max(0, Math.ceil(root.markerX) + 1)
+        readonly property bool undivided: root.visualizationMode === 1
         x: cutEdge
         width: Math.max(0, root.plotWidth - cutEdge)
         height: root.height
         visible: root.cutSeconds >= 0 && !isNaN(root.markerX)
             && width >= endsEarlyColumn.implicitWidth + 2 * Kirigami.Units.largeSpacing
 
+        Rectangle {
+            objectName: "plotEndsEarlyPlate"
+            visible: !endsEarly.undivided && root.messageNeedsPlate(endsEarlyColumn.height)
+            x: endsEarlyColumn.x - Kirigami.Units.largeSpacing
+            y: endsEarlyColumn.y - Kirigami.Units.smallSpacing
+            width: endsEarlyColumn.width + 2 * Kirigami.Units.largeSpacing
+            height: endsEarlyColumn.height + 2 * Kirigami.Units.smallSpacing
+            radius: 4
+            color: Qt.rgba(root.plotColors.plotPlate.r, root.plotColors.plotPlate.g, root.plotColors.plotPlate.b, 1)
+            border.width: 1
+            border.color: root.plotColors.plotPlateEdge
+        }
+
         Column {
             id: endsEarlyColumn
-            anchors.centerIn: parent
+            objectName: "plotEndsEarlyColumn"
+            x: Math.round((parent.width - width) / 2)
+            y: endsEarly.undivided
+                ? Math.round(Math.max(0, (parent.height - height) / 2))
+                : root.messageY(height)
             spacing: Kirigami.Units.smallSpacing
 
             Row {
@@ -459,7 +635,7 @@ Item {
         visible: root.meterShown
         laneCount: root.laneCount
         // Playing: paused, stopped or with no track, the column is a trough
-        // with the marks' ticks alone, still reserved.
+        // with its unlit ladder and the marks' ticks alone, still reserved.
         active: root.trackLoaded && root.uiBridge.connected
             && root.uiBridge.playbackState === "Playing"
         sourcePath: visible && root.trackLoaded ? root.uiBridge.currentTrackPath : ""
@@ -478,17 +654,17 @@ Item {
         // ticks, paused and stopped with a track too.
         troughColor: root.beforeAudio ? root.plotColors.meterRestTrough : root.plotColors.meterTrough
         fillColor: root.plotColors.meterFill
+        // Before any audio, no ladder: the pane waits with its marks alone.
+        unlitColor: root.beforeAudio ? "transparent" : root.plotColors.meterUnlit
         peakColor: root.plotColors.meterPeak
         clipOffColor: root.plotColors.meterClipOff
         clipColor: root.uiPalette.negative
         tickColor: root.beforeAudio ? root.plotColors.meterRestTick : root.plotColors.meterTick
-        topSeamColor: root.plotColors.meterTopSeam
-        // On the waveform, whose colour the bar has, the bar is framed by
-        // its trough, so it reads as an instrument rather than as the
-        // waveform's tail. Its marks and scale are the same in both modes.
-        framed: root.visualizationMode === 1
-        // Out to the pane's edge, in the main window and in the viewers
-        // alike: its bar is far wider than the queue's scrollbar above it.
+        // At rest, its edge as quiet as its marks.
+        keylineColor: root.beforeAudio ? root.plotColors.meterRestTick : root.plotColors.meterKeyline
+        // One geometry in both modes; only the colours differ. Out to the
+        // pane's edge, in the main window and in the viewers alike: its
+        // column is far wider than the queue's scrollbar above it.
     }
 
     // Each lane's column, for its tooltip and for assistive technology:

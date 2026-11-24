@@ -3,6 +3,7 @@
 #include "SpectrogramItem.h"
 #include "SpectrogramColorMap.h"
 #include "FerrousBridgeFfi.h"
+#include "SceneGraphParentNode.h"
 
 #include "SpectrogramSeekTrace.h"
 #include "SpectrogramTraceLogging.h"
@@ -125,20 +126,17 @@ const QColor kOverlayColor(190, 190, 200, 150);
 // Scale text, 12 px plotText, in a 1 px outline of plotOutline.
 const QColor kScaleTextColor(0xec, 0xec, 0xec);
 const QColor kScaleOutlineColor(0, 0, 0);
-// plotTick.
-const QColor kScaleTickColor(236, 236, 236, 191);
-// The lane at rest, before it has columns: a line across it at each of the
-// scale's ticks in white 20%, #433858 and 1.78:1 on the floor (at 11%,
-// 1.3:1, the never-played pane read as an empty slab, and the seam between
-// its lanes as one more of its lines), over the lane seam at rest, which is
-// darker than the floor, and while the scale shows, the scale's text in
+// plotTick: the scale's ink at 60 %, a step under its labels, so beside the
+// level meter its peak tick stays the one full-white mark at the edge.
+const QColor kScaleTickColor(236, 236, 236, 153);
+// The lane at rest, before it has columns: lines across it in white 11%,
+// #2e2145 and 1.3:1 on the floor, under the seam between lanes at rest,
+// whose lit edge (UiPalette's plotRestLaneSeamEdge, 2.6:1) outranks them so
+// it reads as the lanes' boundary (in white 20%, 1.78:1, the lines were
+// louder than the seam and the two lanes read as one grid), evenly spaced,
+// or while the scale shows, at its ticks, with the scale's text in
 // plotTextSecondary.
-const QColor kRestGridLineColor(255, 255, 255, 51);
-// A rest line in the band of a plate over the lane, its label or the mode
-// switch, within kRestQuietReach of its top or foot: white 10 %, some
-// 1.3:1, so that beside the plate it reads as the grid going on behind it
-// rather than a connector cut into it.
-const QColor kRestGridQuietLineColor(255, 255, 255, 26);
+const QColor kRestGridLineColor(255, 255, 255, 28);
 const QColor kRestScaleTextColor(236, 236, 236, 184);
 // The playhead: a 1 px light core cased in 1 px of black 60% on each side.
 // The core is all but opaque, as the playhead has always been translucent:
@@ -146,8 +144,12 @@ const QColor kRestScaleTextColor(236, 236, 236, 184);
 // the canvas fragments a zoom preview scales (spectrogramSceneGraphDrawsTheCanvas).
 const QColor kPlayheadColor(0xe8, 0xe8, 0xe8, 254);
 const QColor kPlayheadCasingColor(0, 0, 0, 153);
-// The crosshair: dashed white 35%.
-const QColor kCrosshairLineColor(255, 255, 255, 89);
+// The crosshair: dashed white 62%, with the floor at 80% between the
+// dashes. One carries the 1 px line over dark texture, the other over bright
+// harmonics; at 35% and 60% it was lost in mid-bright texture (2.3:1), and
+// at 55% the shared time line faded over the brighter parts of both lanes.
+const QColor kCrosshairLineColor(255, 255, 255, 158);
+constexpr double kCrosshairGapOpacity = 0.8;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
 std::atomic<quint64> g_lastLoggedSeekProfileIncidentGeneration{0};
 std::atomic<quint64> g_lastLoggedSeekProfileSummaryGeneration{0};
@@ -284,6 +286,12 @@ bool configureTextureNode(
     const QRectF &source,
     QSGTexture *placeholderTexture);
 
+// A node that other nodes join while it is in the scene: the canvas's
+// spans and an overlay's images, casings and lines.
+QSGNode *newParentNode() {
+    return new SceneGraphParentNode();
+}
+
 // An overlay image placed for a frame, with the image itself when the scene
 // node has no texture of it yet.
 struct SpectrogramPlacedOverlayImage {
@@ -295,20 +303,23 @@ struct SpectrogramPlacedOverlayImage {
 // What an overlay draws in a frame, in logical pixels.
 struct SpectrogramOverlayFrame {
     QVector<QRectF> lines;
-    // As SpectrogramOverlayLayout's lineColors.
-    QVector<QColor> lineColors;
+    // The lines' casings, in plotOutline under them.
+    QVector<QRectF> casings;
     QVector<SpectrogramPlacedOverlayImage> images;
 };
 
-// An overlay's nodes: rectangles for its lines, then its images above them.
+// An overlay's nodes: its images, then rectangles for its lines' casings
+// and its lines above them, so a label's shade never dims a tick.
 struct SpectrogramOverlayLayer {
     QSGNode *root{nullptr};
     // The root of a layer that fades as a whole, or null.
     QSGOpacityNode *opacity{nullptr};
-    QSGNode *linesRoot{nullptr};
     QSGNode *imagesRoot{nullptr};
-    QVector<QSGSimpleRectNode *> lines;
+    QSGNode *casingsRoot{nullptr};
+    QSGNode *linesRoot{nullptr};
     QVector<QSGSimpleTextureNode *> images;
+    QVector<QSGSimpleRectNode *> casings;
+    QVector<QSGSimpleRectNode *> lines;
 
     explicit SpectrogramOverlayLayer(bool fades = false) {
         if (fades) {
@@ -317,10 +328,12 @@ struct SpectrogramOverlayLayer {
         } else {
             root = new QSGNode();
         }
-        linesRoot = new QSGNode();
-        imagesRoot = new QSGNode();
-        root->appendChildNode(linesRoot);
+        imagesRoot = newParentNode();
+        casingsRoot = newParentNode();
+        linesRoot = newParentNode();
         root->appendChildNode(imagesRoot);
+        root->appendChildNode(casingsRoot);
+        root->appendChildNode(linesRoot);
     }
 };
 
@@ -489,10 +502,14 @@ struct SpectrogramCanvasBand {
     QSGTexture *texture{nullptr};
 };
 
-struct SpectrogramSceneNode final : public QSGNode {
+// A parent node, as the crosshair under it fades: the software renderer
+// places a node whose opacity changes by what it keeps of its parent, and,
+// of a plain node, kept nothing, so the faded crosshair drew at the
+// window's origin (#755).
+struct SpectrogramSceneNode final : public SceneGraphParentNode {
     SpectrogramSceneNode() {
         background = new QSGSimpleRectNode();
-        tilesRoot = new QSGNode();
+        tilesRoot = newParentNode();
         latest = new QSGSimpleTextureNode();
         pastEnd = new QSGSimpleRectNode();
         playheadCasing = new QSGSimpleRectNode();
@@ -545,24 +562,28 @@ struct SpectrogramSceneNode final : public QSGNode {
         SpectrogramOverlayLayer &layer,
         const SpectrogramOverlayFrame &frame,
         const QColor &lineColor,
-        QQuickWindow *window) {
-        while (layer.lines.size() < frame.lines.size()) {
-            auto *line = new QSGSimpleRectNode();
-            layer.linesRoot->appendChildNode(line);
-            layer.lines.push_back(line);
-        }
-        for (int i = 0; i < layer.lines.size(); ++i) {
-            QSGSimpleRectNode *line = layer.lines[i];
-            const QRectF rect = i < frame.lines.size() ? frame.lines[i] : QRectF();
-            const QColor color = i < frame.lineColors.size() && frame.lineColors[i].isValid()
-                ? frame.lineColors[i] : lineColor;
-            if (line->color() != color) {
-                line->setColor(color);
+        QQuickWindow *window,
+        const QColor &casingColor = QColor()) {
+        const auto showRects = [](QSGNode *parent, QVector<QSGSimpleRectNode *> &nodes,
+                                  const QVector<QRectF> &rects, const QColor &color) {
+            while (nodes.size() < rects.size()) {
+                auto *node = new QSGSimpleRectNode();
+                parent->appendChildNode(node);
+                nodes.push_back(node);
             }
-            if (line->rect() != rect) {
-                line->setRect(rect);
+            for (int i = 0; i < nodes.size(); ++i) {
+                QSGSimpleRectNode *node = nodes[i];
+                const QRectF rect = i < rects.size() ? rects[i] : QRectF();
+                if (node->color() != color) {
+                    node->setColor(color);
+                }
+                if (node->rect() != rect) {
+                    node->setRect(rect);
+                }
             }
-        }
+        };
+        showRects(layer.casingsRoot, layer.casings, frame.casings, casingColor);
+        showRects(layer.linesRoot, layer.lines, frame.lines, lineColor);
         int shown = 0;
         for (const SpectrogramPlacedOverlayImage &placed : frame.images) {
             QSGTexture *texture = overlayTextures.value(placed.key);
@@ -1259,14 +1280,16 @@ void rasterColumn(
     }
 }
 
-// The loudest of up to 64 display columns that share one pixel.
+// The loudest of up to 64 display columns, `stride` apart, that share one
+// pixel.
 template <typename Source>
 void rasterPeakHold(
     QImage &canvas,
     int x,
     qint64 colFirst,
     qint64 colLast,
-    SpectrogramRowMaxima<Source> &maxima) {
+    SpectrogramRowMaxima<Source> &maxima,
+    qint64 stride = 1) {
     if (colFirst == colLast) {
         rasterColumn(canvas, x, colFirst, maxima);
         return;
@@ -1275,11 +1298,11 @@ void rasterPeakHold(
     const SpectrogramProjection &projection = maxima.projection();
     // Cap to a reasonable max to avoid pathological cases.
     const int rangeCols = static_cast<int>(
-        std::min(colLast - colFirst + 1, static_cast<qint64>(64)));
+        std::min((colLast - colFirst) / stride + 1, static_cast<qint64>(64)));
     std::array<const quint8 *, 64> columns{};
     int validCount = 0;
     for (int i = 0; i < rangeCols; ++i) {
-        if (const quint8 *bins = source.column(colFirst + i)) {
+        if (const quint8 *bins = source.column(colFirst + i * stride)) {
             columns[static_cast<size_t>(validCount++)] = bins;
         }
     }
@@ -1458,20 +1481,98 @@ QString fpsCounterText(int fps) {
 }
 
 // The scale's text: the small text of the design, 12 px at the default
-// 10 pt font (UiPalette.smallPointSize).
-QFont scaleLabelFont() {
+// 10 pt font (UiPalette.smallPointSize), `textScale` times that (see
+// SpectrogramItem::textScale).
+QFont scaleLabelFont(double textScale) {
     QFont font = QGuiApplication::font();
     const double points = font.pointSizeF() > 0.0 ? font.pointSizeF() : font.pixelSize() * 0.75;
-    font.setPointSizeF(points * 0.9);
+    font.setPointSizeF(points * 0.9 * textScale);
     return font;
 }
 
 // A scale label's outline, around its text on every side.
 constexpr int kScaleLabelOutline = 1;
 
-// The logical size of a scale label of `text`, with its outline.
-QSize scaleLabelSize(const QString &text) {
-    const QFontMetrics metrics(scaleLabelFont());
+// A scale label's shade: plotOutline at 55 % under its outline, reaching
+// 2 px past it and softening over the last. Over hot data, where the 1 px
+// outline alone left the numerals busy, each label gets a dark surround of
+// its own; on the plot's floor it is all but the floor, so the scale stays
+// outlined text there, never a plate or a ruler. Not part of the label's
+// layout: it spills past its rect.
+constexpr int kScaleLabelShade = 2;
+constexpr int kScaleLabelShadeAlpha = 140;
+
+// The device pixels a label's image reaches past its rect on each side:
+// a scale label's shade's; none for the rest.
+int overlayImageMargin(const SpectrogramOverlayImage &image, double scale) {
+    return image.kind == SpectrogramOverlayImage::ScaleLabel ? devicePixels(kScaleLabelShade, scale) : 0;
+}
+
+// `ink` over its shade, which reaches `reach` device pixels past its
+// opaque pixels, its last pixel soft.
+QImage shadedScaleLabel(const QImage &ink, int reach) {
+    const int width = ink.width();
+    const int height = ink.height();
+    // The offsets within reach, with how much each covers.
+    struct Offset {
+        int dx;
+        int dy;
+        double coverage;
+    };
+    std::vector<Offset> disk;
+    for (int dy = -reach; dy <= reach; ++dy) {
+        for (int dx = -reach; dx <= reach; ++dx) {
+            const double coverage = std::clamp(reach + 0.5 - std::hypot(dx, dy), 0.0, 1.0);
+            if (coverage > 0.0) disk.push_back({dx, dy, coverage});
+        }
+    }
+    std::vector<double> cover(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0.0);
+    for (int y = 0; y < height; ++y) {
+        const auto *row = reinterpret_cast<const QRgb *>(ink.constScanLine(y));
+        for (int x = 0; x < width; ++x) {
+            if (qAlpha(row[x]) < 128) continue;
+            for (const Offset &offset : disk) {
+                const int sx = x + offset.dx;
+                const int sy = y + offset.dy;
+                if (sx < 0 || sy < 0 || sx >= width || sy >= height) continue;
+                double &at = cover[static_cast<std::size_t>(sy) * static_cast<std::size_t>(width)
+                    + static_cast<std::size_t>(sx)];
+                at = std::max(at, offset.coverage);
+            }
+        }
+    }
+    QImage shaded(ink.size(), QImage::Format_ARGB32_Premultiplied);
+    shaded.setDevicePixelRatio(ink.devicePixelRatio());
+    for (int y = 0; y < height; ++y) {
+        auto *row = reinterpret_cast<QRgb *>(shaded.scanLine(y));
+        for (int x = 0; x < width; ++x) {
+            const double at = cover[static_cast<std::size_t>(y) * static_cast<std::size_t>(width)
+                + static_cast<std::size_t>(x)];
+            // Black, premultiplied as it is.
+            row[x] = qRgba(0, 0, 0, static_cast<int>(std::lround(at * kScaleLabelShadeAlpha)));
+        }
+    }
+    QPainter painter(&shaded);
+    painter.drawImage(QPointF(0.0, 0.0), ink);
+    painter.end();
+    return shaded;
+}
+
+// The logical pixels between a rest line and its scale label's outline.
+constexpr double kRestLineLabelGap = 6.0;
+
+// A frequency label's tick, in logical pixels: 4 px long, on the label's
+// outer side.
+constexpr double kFrequencyScaleTickLength = 4.0;
+
+// The logical pixels from the scale's edge to a frequency label's end: its
+// tick, at the edge, and 4 px between the tick and the label.
+constexpr int kFrequencyScaleLabelGap = 8;
+
+// The logical size of a scale label of `text` at `textScale`, with its
+// outline.
+QSize scaleLabelSize(const QString &text, double textScale) {
+    const QFontMetrics metrics(scaleLabelFont(textScale));
     return {metrics.horizontalAdvance(text) + 2 * kScaleLabelOutline,
             metrics.height() + 2 * kScaleLabelOutline};
 }
@@ -1486,12 +1587,13 @@ struct FrequencyScaleTick {
 
 // The frequency scale's ticks in a lane `width` x `height` device pixels,
 // `scale` to a logical one, whose rows show `rowBins` (frequencyRowBins):
-// round numbers of kilohertz, one to a label, each label 10 px from the
-// lane's right edge and centred on its tick. Labels closer to the lane's
-// top than `topClearance` logical pixels are left out, ticks and all.
+// round numbers of kilohertz, one to a label, each label `labelGap` from
+// the lane's right edge and centred on its tick, in text at `textScale`.
+// Labels closer to the lane's top than `topClearance` logical pixels are
+// left out, ticks and all.
 QVector<FrequencyScaleTick> frequencyScaleTicks(
     const std::vector<int> &rowBins, int bins, double binHz,
-    int width, int height, double scale, int topClearance) {
+    int width, int height, double scale, int topClearance, int labelGap, double textScale) {
     QVector<FrequencyScaleTick> ticks;
     if (width <= 0 || height <= 0 || bins <= 1 || binHz <= 0.0
         || static_cast<int>(rowBins.size()) != height) {
@@ -1499,9 +1601,8 @@ QVector<FrequencyScaleTick> frequencyScaleTicks(
     }
     const int logicalWidth = std::max(1, static_cast<int>(std::floor(width / scale + 1e-6)));
     const int logicalHeight = std::max(1, static_cast<int>(std::floor(height / scale + 1e-6)));
-    constexpr int kLabelGap = 10;
     // A label's height and 12 px: 5 kHz apart in a lane of about 125 px.
-    const int minPixelSpacing = scaleLabelSize(QStringLiteral("0")).height() + 12;
+    const int minPixelSpacing = scaleLabelSize(QStringLiteral("0"), textScale).height() + 12;
 
     // Nyquist, or with the frequency cap, the cap.
     const double topHz = static_cast<double>(bins - 1) * binHz;
@@ -1529,27 +1630,37 @@ QVector<FrequencyScaleTick> frequencyScaleTicks(
             continue;
         }
         const QString label = formatFrequencyLabel(freq);
-        const QSize size = scaleLabelSize(label);
+        const QSize size = scaleLabelSize(label, textScale);
         const int labelY = static_cast<int>(std::round(pixelY / scale)) - size.height() / 2;
         if (labelY < topClearance || labelY + size.height() > logicalHeight) {
             continue;
         }
         prevPixelY = pixelY;
         ticks.push_back({pixelY, label,
-            QRectF(logicalWidth - kLabelGap - size.width(), labelY, size.width(), size.height())});
+            QRectF(logicalWidth - labelGap - size.width(), labelY, size.width(), size.height())});
     }
     return ticks;
 }
 
-// The name of an overlay image's texture; a readout's plate is in `plate`.
+// The name of an overlay image's texture; a readout's plate is in `plate`,
+// and its text, and a scale label's, at `textScale`.
 QString overlayImageKey(
-    const SpectrogramOverlayImage &image, double scale, const CrosshairReadout::Colors &plate) {
-    const QString colors = image.kind == SpectrogramOverlayImage::ReadoutPlate
-        ? QStringLiteral("%1|%2|%3|")
-              .arg(plate.fill.rgba(), 0, 16)
-              .arg(plate.text.rgba(), 0, 16)
-              .arg(plate.edge.rgba(), 0, 16)
-        : QString();
+    const SpectrogramOverlayImage &image, double scale, const CrosshairReadout::Colors &plate,
+    const QColor &floor, double textScale) {
+    QString colors;
+    if (image.kind == SpectrogramOverlayImage::DashedColumn
+        || image.kind == SpectrogramOverlayImage::DashedRow) {
+        colors = QStringLiteral("%1|").arg(floor.rgba(), 0, 16);
+    } else {
+        // Its text's size.
+        colors = QStringLiteral("%1|").arg(textScale, 0, 'g', 17);
+    }
+    if (image.kind == SpectrogramOverlayImage::ReadoutPlate) {
+        colors += QStringLiteral("%1|%2|%3|")
+            .arg(plate.fill.rgba(), 0, 16)
+            .arg(plate.text.rgba(), 0, 16)
+            .arg(plate.edge.rgba(), 0, 16);
+    }
     return QStringLiteral("%1|%2|%3|%4%5")
         .arg(static_cast<int>(image.kind))
         .arg(scale, 0, 'g', 17)
@@ -1568,15 +1679,18 @@ QSize overlayImagePixels(const SpectrogramOverlayImage &image, double scale) {
         return {length, lineWidth};
     default:
         return {
-            std::max(1, static_cast<int>(std::ceil(image.rect.width() * scale - 1e-6))),
-            std::max(1, static_cast<int>(std::ceil(image.rect.height() * scale - 1e-6)))};
+            std::max(1, static_cast<int>(std::ceil(image.rect.width() * scale - 1e-6)))
+                + 2 * overlayImageMargin(image, scale),
+            std::max(1, static_cast<int>(std::ceil(image.rect.height() * scale - 1e-6)))
+                + 2 * overlayImageMargin(image, scale)};
     }
 }
 
 // An overlay image at `scale` device pixels to a logical one; a readout's
-// plate is in `plate`.
+// plate is in `plate`, and its text, and a scale label's, at `textScale`.
 QImage renderOverlayImage(
-    const SpectrogramOverlayImage &image, double scale, const CrosshairReadout::Colors &plate) {
+    const SpectrogramOverlayImage &image, double scale, const CrosshairReadout::Colors &plate,
+    const QColor &floor, double textScale) {
     const bool dashedColumn = image.kind == SpectrogramOverlayImage::DashedColumn;
     if (dashedColumn || image.kind == SpectrogramOverlayImage::DashedRow) {
         const int lineWidth = deviceLineWidth(scale);
@@ -1588,16 +1702,22 @@ QImage renderOverlayImage(
         QPen dashPen(kCrosshairLineColor);
         dashPen.setWidth(lineWidth);
         dashPen.setCapStyle(Qt::FlatCap);
-        // Dashes of 4 logical pixels, 3 apart.
-        dashPen.setDashPattern({4.0 * scale / lineWidth, 3.0 * scale / lineWidth});
-        painter.setPen(dashPen);
+        QPen gapPen = dashPen;
+        gapPen.setColor(CrosshairReadout::dashGapColor(floor, kCrosshairGapOpacity));
+        CrosshairReadout::setDashes(dashPen, false, scale / lineWidth);
+        CrosshairReadout::setDashes(gapPen, true, scale / lineWidth);
         // A one-pixel pen draws the pixels at its coordinates, a wider one
         // the pixels around them.
         const double offset = lineWidth > 1 ? lineWidth * 0.5 : 0.0;
-        if (dashedColumn) {
-            painter.drawLine(QPointF(offset, 0.0), QPointF(offset, length));
-        } else {
-            painter.drawLine(QPointF(0.0, offset), QPointF(length, offset));
+        const QLineF along = dashedColumn
+            ? QLineF(offset, 0.0, offset, length)
+            : QLineF(0.0, offset, length, offset);
+        // Each pixel is a dash's or a gap's: where antialiasing is off, one
+        // both reach is the dash's.
+        painter.setCompositionMode(QPainter::CompositionMode_Source);
+        for (const QPen &pen : {gapPen, dashPen}) {
+            painter.setPen(pen);
+            painter.drawLine(along);
         }
         return line;
     }
@@ -1608,20 +1728,22 @@ QImage renderOverlayImage(
         QPainter painter(&readout);
         CrosshairReadout::drawPlate(
             painter, QRect(QPoint(0, 0), image.rect.size().toSize()), image.text,
-            CrosshairReadout::font(), plate);
+            CrosshairReadout::font(textScale), plate);
         painter.end();
         return readout;
     }
     // A scale label: its text in a 1 px outline, at device resolution, as
-    // Text.Outline draws it.
+    // Text.Outline draws it, over its shade past its rect.
+    const int margin = overlayImageMargin(image, scale);
     QImage label(overlayImagePixels(image, scale), QImage::Format_ARGB32_Premultiplied);
     label.setDevicePixelRatio(scale);
     label.fill(Qt::transparent);
     QPainter painter(&label);
     painter.setRenderHint(QPainter::TextAntialiasing, true);
-    const QFont font = scaleLabelFont();
+    const QFont font = scaleLabelFont(textScale);
     painter.setFont(font);
-    const QPointF origin(kScaleLabelOutline, kScaleLabelOutline + QFontMetrics(font).ascent());
+    const QPointF origin(kScaleLabelOutline + margin / scale,
+                         kScaleLabelOutline + margin / scale + QFontMetrics(font).ascent());
     painter.setPen(kScaleOutlineColor);
     for (int dx = -kScaleLabelOutline; dx <= kScaleLabelOutline; ++dx) {
         for (int dy = -kScaleLabelOutline; dy <= kScaleLabelOutline; ++dy) {
@@ -1632,35 +1754,33 @@ QImage renderOverlayImage(
         ? kRestScaleTextColor : kScaleTextColor);
     painter.drawText(origin, image.text);
     painter.end();
-    return label;
+    return margin > 0 ? shadedScaleLabel(label, margin) : label;
 }
 
-// The crosshair's readout of a level: "−62 dB", or "−∞ dB" for silence.
-QString crosshairDecibels(double db) {
+// The crosshair's readout of a level: "−62 dB", "−∞ dB" for silence, or
+// "— dB" for NaN, a level not known. A level under `floorDb`, the colour
+// map's floor, which draws it as the floor, is "< −132 dB": a number under
+// what the plot can show read as a measurement ("−145 dB", H26).
+QString crosshairDecibels(double db, double floorDb = -std::numeric_limits<double>::infinity()) {
     static const QString format = i18nc("@info level in decibels; %1 is a number", "%1 dB");
+    const auto number = [](long rounded) {
+        return rounded < 0 ? QStringLiteral("\u2212%1").arg(-rounded) : QString::number(rounded);
+    };
+    if (std::isnan(db)) return format.arg(QStringLiteral("\u2014"));
     if (!std::isfinite(db)) return format.arg(QStringLiteral("\u2212\u221e"));
-    const long rounded = std::lround(db);
-    return format.arg(rounded < 0 ? QStringLiteral("\u2212%1").arg(-rounded) : QString::number(rounded));
+    if (db < floorDb) {
+        static const QString under = i18nc(
+            "@info level in decibels under the lowest the plot shows; %1 is a number such as \u2212132",
+            "< %1 dB");
+        return under.arg(number(std::lround(floorDb)));
+    }
+    return format.arg(number(std::lround(db)));
 }
 
 // The crosshair's readout of a frequency: "4.4 kHz", or "440 Hz".
 QString crosshairFrequency(double hz) {
     if (hz >= 1000.0) return kilohertzFormat().arg(hz / 1000.0, 0, 'f', 1);
     return hertzFormat().arg(qRound(hz));
-}
-
-// The crosshair's readout of a time in the track: "1:46.0".
-QString crosshairTime(double seconds) {
-    const long tenths = std::lround(std::max(0.0, seconds) * 10.0);
-    const long whole = tenths / 10;
-    const long hours = whole / 3600;
-    const QString rest = QStringLiteral("%1.%2")
-        .arg(whole % 60, 2, 10, QLatin1Char('0'))
-        .arg(tenths % 10);
-    if (hours > 0) {
-        return QStringLiteral("%1:%2:%3").arg(hours).arg((whole / 60) % 60, 2, 10, QLatin1Char('0')).arg(rest);
-    }
-    return QStringLiteral("%1:%2").arg(whole / 60).arg(rest);
 }
 
 } // namespace
@@ -1943,6 +2063,17 @@ void SpectrogramItem::followChanged() {
     requestPlaybackFrame();
 }
 
+void SpectrogramItem::viewFollowFollowingAgain(bool sameTrack) {
+    // Where the view is now, rather than a frame later, so that whatever
+    // shows it, such as the seek bar's band, has it as the view follows.
+    const double fromStart = m_visibleStartSeconds;
+    const double fromEnd = m_visibleEndSeconds;
+    publishVisibleRange();
+    if (sameTrack) {
+        emit followedAgain(fromStart, fromEnd);
+    }
+}
+
 void SpectrogramItem::setViewFollow(SpectrogramViewFollow *value) {
     if (value == nullptr) {
         value = m_ownViewFollow;
@@ -1955,6 +2086,7 @@ void SpectrogramItem::setViewFollow(SpectrogramViewFollow *value) {
     const bool wasDetached = detached();
     disconnect(m_viewFollowChangedConnection);
     disconnect(m_viewFollowDetachedConnection);
+    disconnect(m_viewFollowFollowingAgainConnection);
     disconnect(m_viewFollowDestroyedConnection);
     {
         QMutexLocker lock(&m_stateMutex);
@@ -1967,6 +2099,10 @@ void SpectrogramItem::setViewFollow(SpectrogramViewFollow *value) {
             Qt::QueuedConnection);
         m_viewFollowDetachedConnection = connect(
             value, &SpectrogramViewFollow::detachedChanged, this, &SpectrogramItem::detachedChanged);
+        // Direct: before detachedChanged, as the waveform tells them.
+        m_viewFollowFollowingAgainConnection = connect(
+            value, &SpectrogramViewFollow::followingAgain, this,
+            &SpectrogramItem::viewFollowFollowingAgain);
         if (value != m_ownViewFollow) {
             // A shared one that goes leaves the lane its own.
             m_viewFollowDestroyedConnection = connect(
@@ -2788,8 +2924,8 @@ void SpectrogramItem::setDisplayMode(int value) {
         }
     }
     // A switch between rolling and centered follows the playhead.
-    m_panPressed = false;
-    m_panning = false;
+    setPanPressed(false);
+    endPan();
     followPlayhead();
     emit displayModeChanged();
     if (redraw) {
@@ -2894,20 +3030,85 @@ void SpectrogramItem::setLaneHeadBounds(const QRectF &value) {
     update();
 }
 
-QRectF SpectrogramItem::laneLabelBounds() const {
+int SpectrogramItem::restLineCount() const {
     QMutexLocker lock(&m_stateMutex);
-    return m_laneLabelBounds;
+    return m_restLineCount;
 }
 
-void SpectrogramItem::setLaneLabelBounds(const QRectF &value) {
+void SpectrogramItem::setRestLineCount(int value) {
+    value = std::max(0, value);
     {
         QMutexLocker lock(&m_stateMutex);
-        if (m_laneLabelBounds == value) {
+        if (m_restLineCount == value) {
             return;
         }
-        m_laneLabelBounds = value;
+        m_restLineCount = value;
     }
-    emit laneLabelBoundsChanged();
+    emit restLineCountChanged();
+    update();
+}
+
+double SpectrogramItem::restTopClearance() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_restTopClearance;
+}
+
+void SpectrogramItem::setRestTopClearance(double value) {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_restTopClearance == value) {
+            return;
+        }
+        m_restTopClearance = value;
+    }
+    emit restTopClearanceChanged();
+    update();
+}
+
+double SpectrogramItem::scaleEdgeClearance() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_scaleEdgeClearance;
+}
+
+void SpectrogramItem::setScaleEdgeClearance(double value) {
+    const int clearance = std::isfinite(value) ? std::max(0, static_cast<int>(std::lround(value))) : 0;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_scaleEdgeClearance == clearance) {
+            return;
+        }
+        m_scaleEdgeClearance = clearance;
+        // The scale's ticks and labels move, and the crosshair's readout
+        // keeps clear of them.
+        m_freqGridDirty = true;
+        m_crosshairDirty = true;
+    }
+    emit scaleEdgeClearanceChanged();
+    update();
+}
+
+double SpectrogramItem::textScale() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_textScale;
+}
+
+void SpectrogramItem::setTextScale(double value) {
+    if (!std::isfinite(value) || value <= 0.0) {
+        value = 1.0;
+    }
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_textScale == value) {
+            return;
+        }
+        m_textScale = value;
+        // Its text is measured again and its labels and plates laid out
+        // again, on the render thread; the columns are kept.
+        m_freqGridDirty = true;
+        m_timeGridDirty = true;
+        m_crosshairDirty = true;
+    }
+    emit textScaleChanged();
     update();
 }
 
@@ -2923,6 +3124,8 @@ void SpectrogramItem::setFloorColor(const QColor &value) {
             return;
         }
         m_floorColor = value;
+        // It is between the crosshair's dashes, and names their textures.
+        m_crosshairDirty = true;
     }
     emit floorColorChanged();
     update();
@@ -3588,16 +3791,57 @@ bool SpectrogramItem::ringHoldsColumnsLocked(qint64 firstColumn, qint64 lastColu
     return true;
 }
 
+bool SpectrogramItem::zoomOutWaitsForViewLocked(
+    const CenteredView &view, const CenteredColumns &columns, double columnsPerSecond) const {
+    if (m_precomputedCanvasRolling
+        || m_precomputedCanvasTrackToken != m_precomputedTrackToken
+        || m_precomputedCanvasZoomLevel <= 0.0
+        || m_precomputedCanvasColumnsPerSecond <= 0.0) {
+        return false;
+    }
+    const qint64 first = std::max<qint64>(0, view.left);
+    qint64 last = view.right;
+    if (columns.end > 0) {
+        // A length the file does not tell can overshoot its columns, which
+        // end a few windows short of it.
+        constexpr qint64 kTailSlack = 64;
+        last = std::min(last, columns.end - (columns.endKnown ? 1 : kTailSlack));
+    }
+    if (last < first || ringHoldsColumnsLocked(first, last)) {
+        return false;
+    }
+    // What stands in, in seconds from the stream origin: the canvas before
+    // the zoom, and the reserve as far as it has data.
+    double left = (static_cast<double>(m_precomputedCanvasDisplayLeft)
+        - m_precomputedCanvasSubpixelOffset / m_precomputedCanvasZoomLevel)
+            / m_precomputedCanvasColumnsPerSecond + m_precomputedCanvasStreamOrigin;
+    double right = left + static_cast<double>(m_canvasFilledCols)
+        / (m_precomputedCanvasZoomLevel * m_precomputedCanvasColumnsPerSecond);
+    if (!m_reserve.isNull() && !m_reserve.rolling
+        && m_reserve.validity == m_backdropValidity
+        && m_reserve.coveredEnd > m_reserve.coveredFirst
+        && m_reserve.coveredLeftSeconds() <= right && m_reserve.coveredRightSeconds() >= left) {
+        left = std::min(left, m_reserve.coveredLeftSeconds());
+        right = std::max(right, m_reserve.coveredRightSeconds());
+    }
+    // The few columns a view's ends round by.
+    constexpr double kSlackColumns = 16.0;
+    const double slack = kSlackColumns / columnsPerSecond;
+    return left <= static_cast<double>(first) / columnsPerSecond + m_streamOrigin + slack
+        && right >= static_cast<double>(last) / columnsPerSecond + m_streamOrigin - slack;
+}
+
 void SpectrogramItem::updateCanvasFillReadinessLocked() {
     if (m_zoomFillActive && m_awaitingZoomData) {
         // The data is not for the requested zoom yet.
         return;
     }
     if (m_zoomFillActive) {
-        // Only a centered zoom-in, or a centered seek, waits for the ring
-        // to cover the display.  Elsewhere the new data fills in as it
-        // arrives, which beats a preview held until almost the whole
-        // zoomed-out track has decoded.
+        // A centered zoom-in or seek waits for the ring to cover the
+        // display, and a centered zoom-out while an older picture fills it,
+        // which the new columns would split.  Elsewhere the new data fills
+        // in as it arrives, which beats a preview held until almost the
+        // whole zoomed-out track has decoded.
         const double currentPixelsPerSecond = currentPixelsPerSecondLocked();
         const bool zoomChanged = m_precomputedCanvasPixelsPerSecond > 0.0
             && std::abs(currentPixelsPerSecond / m_precomputedCanvasPixelsPerSecond - 1.0)
@@ -3605,8 +3849,27 @@ void SpectrogramItem::updateCanvasFillReadinessLocked() {
         const bool waitForCoverage = m_displayMode == 1
             && (!zoomChanged || currentPixelsPerSecond > m_precomputedCanvasPixelsPerSecond);
         if (!waitForCoverage) {
+            std::optional<CenteredView> replacing;
+            if (m_displayMode == 1 && zoomChanged && !m_seekFillActive && m_precomputedHopSize > 0) {
+                const double cps = static_cast<double>(m_precomputedSampleRateHz)
+                    / static_cast<double>(m_precomputedHopSize);
+                const CenteredView view = centeredViewLocked(
+                    std::max(0.0, currentRenderPositionSecondsLocked(m_now())),
+                    canvasWidthLocked(), canvasHeightLocked(), std::max(0.001, canvasZoomLocked()), cps);
+                if (zoomOutWaitsForViewLocked(view, centeredColumnsLocked(), cps)) {
+                    return;
+                }
+                replacing = view;
+            }
             m_zoomFillActive = false;
+            m_seekFillActive = false;
             m_precomputedCanvasDirty = true;
+            if (replacing && isVisible()) {
+                // Now, not at the next frame, so that a wait for the whole
+                // view costs no frame of its own.
+                requestPrecomputedRasterLocked(canvasWidthLocked(), canvasHeightLocked(),
+                    replacing->left, replacing->right, false);
+            }
             return;
         }
     }
@@ -3859,12 +4122,15 @@ void SpectrogramItem::feedPrecomputedChunk(
 
     // Early hop change detection: activate canvas freeze BEFORE any
     // reset processing that might call invalidateCanvas().  The freeze
-    // is only needed for finer-hop zoom-in restarts; on coarser-hop
-    // zoom-outs, preserving the old centered image makes the view look
-    // stuck at 1.0 until almost the full zoomed-out track has decoded.
+    // is for finer-hop zoom-in restarts, and for the zoom outs asked for,
+    // which hold it only while an older picture fills the view (see
+    // updateCanvasFillReadinessLocked): further out, preserving the old
+    // centered image makes the view look stuck at 1.0 until almost the
+    // full zoomed-out track has decoded.
     if (hopSize > 0
         && hopSize != m_precomputedHopSize
-        && (m_precomputedHopSize <= 0 || hopSize < m_precomputedHopSize)
+        && (m_precomputedHopSize <= 0 || hopSize < m_precomputedHopSize
+            || resetRestartsForZoomLocked(trackToken, hopSize))
         && m_displayMode == 1
         && !m_canvas.isNull()) {
         m_zoomFillActive = true;
@@ -4894,8 +5160,10 @@ void SpectrogramItem::applyPrecomputedResetLocked(
         && bins == m_ring.bins();
     if (!preserveRollingHistory && restartsForZoom) {
         // A zoom's session replaces the ring's columns, which the canvas
-        // shows only part of: the reserve keeps them, around the view.
+        // shows only part of: the reserve keeps them, around the view, and
+        // the crosshair's level reads them while the preview shows them.
         reserveRingBeforeResetLocked();
+        keepShownColumnsLocked();
     }
     if (!preserveRollingHistory) {
         ++m_ringGeneration;
@@ -5293,6 +5561,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     SpectrogramZoomPreview backdropMap;
     // The reserve, the same way: its image is not wrapped.
     bool reserveShown = false;
+    // The reserve shows instead of the canvas (a centered zoom out).
+    bool canvasHidden = false;
     QImage reserveImage;
     quint64 reserveSerial = 0;
     int reservePixels = 0;
@@ -5405,36 +5675,47 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         const auto placeOverlay = [&](const SpectrogramOverlayLayout &layout,
                                       int shift,
                                       SpectrogramOverlayFrame &frame,
-                                      QRectF shown = QRectF()) {
+                                      QRectF shown = QRectF(),
+                                      double yieldX = std::numeric_limits<double>::quiet_NaN()) {
             // `shift` moves it that many device pixels left. With
             // `shown`, lines that start outside it are left out, and
-            // so are images centred outside it.
+            // so are images centred outside it. A dashed column within
+            // CrosshairReadout::kYieldsWithin of `yieldX` is left out.
             if (shown.isNull()) shown = pane;
-            for (qsizetype i = 0; i < layout.lines.size(); ++i) {
-                const QRect &line = layout.lines[i];
+            for (const QRect &line : layout.lines) {
                 const QRectF rect((line.x() - shift) / scale, line.y() / scale,
                     line.width() / scale, line.height() / scale);
                 if (rect.intersects(pane) && rect.left() >= shown.left()
                     && rect.left() <= shown.right()) {
                     frame.lines.push_back(rect);
-                    frame.lineColors.push_back(layout.lineColors.value(i));
+                    if (layout.casing > 0) {
+                        const double casing = layout.casing / scale;
+                        frame.casings.push_back(
+                            rect.adjusted(-casing, -casing, casing, casing).intersected(pane));
+                    }
                 }
             }
             for (const SpectrogramOverlayImage &image : layout.images) {
-                // Whole device pixels, one texel to each.
+                // Whole device pixels, one texel to each, a label's shade
+                // reaching past its rect.
                 const QSize pixels = overlayImagePixels(image, scale);
+                const int margin = overlayImageMargin(image, scale);
                 const QRectF rect(
-                    std::round((image.rect.x() * scale) - shift) / scale,
-                    std::round(image.rect.y() * scale) / scale,
+                    (std::round((image.rect.x() * scale) - shift) - margin) / scale,
+                    (std::round(image.rect.y() * scale) - margin) / scale,
                     pixels.width() / scale,
                     pixels.height() / scale);
                 if (!rect.intersects(pane) || rect.center().x() < shown.left()
                     || rect.center().x() > shown.right()) {
                     continue;
                 }
+                if (image.kind == SpectrogramOverlayImage::DashedColumn
+                    && std::abs(rect.left() - yieldX) <= CrosshairReadout::kYieldsWithin + 1e-9) {
+                    continue;
+                }
                 SpectrogramPlacedOverlayImage placed{image.key, rect, QImage()};
                 if (!node->overlayTextures.contains(placed.key)) {
-                    placed.image = renderOverlayImage(image, scale, m_readoutColors);
+                    placed.image = renderOverlayImage(image, scale, m_readoutColors, m_floorColor, m_textScale);
                 }
                 frame.images.push_back(std::move(placed));
             }
@@ -5703,6 +5984,27 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 columnsToNextPixel = (unsnapped - snapped + 1.0 - kScrollPixelEpsilon) / canvasZoom;
             }
 
+            // A jump the canvas cannot follow, as Follow Playhead or a seek
+            // makes within the columns the ring holds, leaves the canvas of
+            // the view before it where it was until the new view's
+            // rasterization lands (see staleCanvasAlignmentLocked). Until
+            // then the frame is that view's: the playhead, the time scale,
+            // the marker and the crosshair stay as it placed them, rather
+            // than show the new view over its columns, and they move with
+            // the columns, in one frame.
+            const bool frameHeld = !rollingMode && hasCanvas && !canvasIsView && !preview.active
+                && m_canvas.width() == cw && m_canvas.height() == ch
+                && std::abs(canvasZoom - m_precomputedCanvasZoomLevel) <= 0.001
+                && m_shownFrame.valid
+                && m_shownFrame.canvasLeft == m_precomputedCanvasDisplayLeft
+                && m_shownFrame.trackToken == m_precomputedCanvasTrackToken
+                && m_precomputedCanvasTrackToken == m_precomputedTrackToken
+                && m_shownFrame.displayLeft != displayLeft;
+            // Where the overlays are placed: the view's start, and where
+            // its first column is drawn.
+            const qint64 overlayLeft = frameHeld ? m_shownFrame.displayLeft : displayLeft;
+            const double overlayDrawX = frameHeld ? m_shownFrame.drawX : drawX;
+
             if (zoomPreviewShown && !rollingMode) {
                 // The playhead, as the preview places the time it scales
                 // about.
@@ -5713,6 +6015,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         * m_precomputedCanvasColumnsPerSecond * m_precomputedCanvasZoomLevel));
             }
             m_zoomPreviewShown = zoomPreviewShown;
+            if (!zoomPreviewShown) {
+                // The columns it showed are not on screen any more.
+                m_shownColumns = {};
+            }
             if (zoomPreviewShown) {
                 // In logical pixels, where clicks are.
                 m_zoomPreviewAnchorSeconds =
@@ -5812,6 +6118,41 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 reserveSerial = m_reserve.serial;
                 reservePixels = m_reserve.pixels;
             }
+            if (reserveShown && !rollingMode) {
+                // A zoom out of a centered view is one picture in each of
+                // its frames: the older canvas, smaller, beside the reserve
+                // was two resolutions and exposures with an edge through
+                // every lane. Where the reserve has all that the older
+                // layers show, and more of the view, it is shown alone. A
+                // rolling view's history is not decoded again, and keeps
+                // its layers for as long as it shows.
+                const auto inView = [cw](double x) { return std::clamp(x, 0.0, static_cast<double>(cw)); };
+                // Within a pixel of the reserve, whose ends round to one.
+                const double slack = reserveMap.scale + 1.0;
+                const double left = inView(reserveMap.map(m_reserve.coveredFirst));
+                const double right = inView(reserveMap.map(m_reserve.coveredEnd));
+                const auto replaces = [&](double from, double to) {
+                    from = inView(from);
+                    to = inView(to);
+                    return left <= from + slack && right >= to - slack
+                        && (left < from - slack || right > to + slack);
+                };
+                if (zoomPreviewShown && preview.scale < 1.0) {
+                    double from = preview.map(canvasDrawX);
+                    double to = preview.map(canvasDrawX + static_cast<double>(drawCols));
+                    if (backdropShown) {
+                        from = std::min(from, backdropMap.map(0.0));
+                        to = std::max(to, backdropMap.map(backdropPixels));
+                    }
+                    canvasHidden = replaces(from, to);
+                }
+                if (backdropShown
+                    && (canvasHidden
+                        || (backdropMap.scale < 1.0 - 1e-3
+                            && replaces(backdropMap.map(0.0), backdropMap.map(backdropPixels))))) {
+                    backdropShown = false;
+                }
+            }
             if (canvasTimed && shownPixelsPerSecond > 0.0) {
                 // The view's seconds, and how many seconds it shows.
                 const double viewLeft = timeAt(0.0);
@@ -5831,8 +6172,21 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     m_reserveZoomPixelsPerSecond = shownPixelsPerSecond;
                     m_reserveRequestedLeft = viewLeft - viewSeconds / 2.0;
                     m_reserveRequestedRight = viewRight + viewSeconds / 2.0;
-                    requestReserveLocked(m_reserveRequestedLeft, m_reserveRequestedRight,
-                        shownPixelsPerSecond / 2.0, cw, ch, rollingMode);
+                    // One that has all of that already stands in as it is:
+                    // drawn again from other columns, the zoom out's
+                    // picture changed a frame after it came.
+                    const qint64 end = rollingMode ? 0 : centeredColumnsLocked().end;
+                    const bool has = !rollingMode && reserveShown && end > 0
+                        && m_reserve.coveredEnd > m_reserve.coveredFirst
+                        && m_reserve.coveredLeftSeconds() - 1.0 / m_reserve.pixelsPerSecond
+                            <= std::max(m_streamOrigin, m_reserveRequestedLeft)
+                        && m_reserve.coveredRightSeconds() + 1.0 / m_reserve.pixelsPerSecond
+                            >= std::min(static_cast<double>(end) / columnsPerSecond + m_streamOrigin,
+                                m_reserveRequestedRight);
+                    if (!has) {
+                        requestReserveLocked(m_reserveRequestedLeft, m_reserveRequestedRight,
+                            shownPixelsPerSecond / 2.0, cw, ch, rollingMode);
+                    }
                 } else if (!zoomPreviewWanted
                     && canvasIsView
                     && !canvasFreeze
@@ -5851,7 +6205,13 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         && (rollingMode
                             ? viewLeft <= m_reserveRequestedRight
                             : viewRight + margin <= m_reserveRequestedRight);
-                    if (!covered) {
+                    // And again once the ring has what the last one was
+                    // short of: without it a zoom out showed the floor, or
+                    // another reserve's picture, at that end.
+                    const bool completes = !rollingMode && !m_reservePending
+                        && static_cast<double>(m_precomputedMaxColumnIndex) / columnsPerSecond + m_streamOrigin
+                            >= m_reserveShortUntilSeconds;
+                    if (!covered || completes) {
                         m_reserveZoomPixelsPerSecond = 0.0;
                         m_reserveRequestedLeft = viewLeft - (rollingMode ? 2.0 : 1.0) * viewSeconds;
                         m_reserveRequestedRight = rollingMode ? viewRight : viewRight + viewSeconds;
@@ -5864,13 +6224,22 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             // A view the user moved shows the playhead only while it is in it.
             const bool playheadOutside = playheadPixel < 0
                 || (followMode == ViewFollow::Mode::Detached && playheadPixel >= cw);
-            if (!rollingMode && !playheadOutside) {
+            if (frameHeld) {
+                showPlayhead = m_shownFrame.showPlayhead;
+                playheadRect = m_shownFrame.playheadRect;
+            } else if (!rollingMode && !playheadOutside) {
                 showPlayhead = true;
                 playheadRect = QRectF(
                     static_cast<double>(std::clamp(playheadPixel, 0, cw - 1)) / scale,
                     0.0,
                     static_cast<double>(deviceLineWidth(scale)) / scale,
                     static_cast<double>(ch) / scale);
+            }
+            if (!rollingMode && hasCanvas && canvasIsView && !preview.active) {
+                m_shownFrame = {true, m_precomputedCanvasDisplayLeft, m_precomputedCanvasTrackToken,
+                    displayLeft, drawX, showPlayhead, playheadRect};
+            } else if (!frameHeld) {
+                m_shownFrame.valid = false;
             }
 
             // With its canvas in place, a view that scrolls changes only
@@ -5973,27 +6342,45 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             // wider than the widget with right-side padding. Each frame
             // shifts it by the combined displayLeft + drawX delta, and it is
             // laid out again only when the shift exhausts the padding.
-            // The time grid and the crosshair's readout follow the data,
-            // not the scaled preview, so they wait for the data.
-            if (m_gridEnabled && m_showTimeLabels && m_binsPerColumn > 1 && !zoomPreviewShown) {
+            // A zoom's preview shows the canvas scaled, and the time scale
+            // with it, on the preview's mapping: left out until the zoom's
+            // data came, it blinked out at every wheel notch and on Reset
+            // Zoom (H21).
+            if (m_gridEnabled && m_showTimeLabels && m_binsPerColumn > 1) {
                 const int timeGridPadding = devicePixels(400.0, scale);
+                const bool onPreview = zoomPreviewShown && m_zoomPreviewPixelsPerSecond > 0.0;
+                // The preview's mapping, as clicks and the crosshair read it.
+                TimeGridPreviewMapping previewMapping;
+                if (onPreview) {
+                    previewMapping.leftSeconds = m_zoomPreviewAnchorSeconds
+                        - m_zoomPreviewAnchorX / m_zoomPreviewPixelsPerSecond;
+                    previewMapping.devicePixelsPerSecond = m_zoomPreviewPixelsPerSecond * scale;
+                }
                 // The pixel shift accounts for both displayLeft advancement
                 // and drawX changes (critical in rolling mode where drawX
-                // varies during the initial canvas fill phase).
-                const double rawShift =
-                    static_cast<double>(displayLeft - m_timeGridRenderDisplayLeft) * canvasZoom
-                    - (drawX - m_timeGridRenderDrawX);
-                int shift = static_cast<int>(std::round(rawShift));
+                // varies during the initial canvas fill phase), or, on a
+                // preview, for how far its mapping has moved.
+                const double rawShift = onPreview
+                    ? (previewMapping.leftSeconds - m_timeGridPreviewMapping.leftSeconds)
+                        * previewMapping.devicePixelsPerSecond
+                    : static_cast<double>(overlayLeft - m_timeGridRenderDisplayLeft) * canvasZoom
+                        - (overlayDrawX - m_timeGridRenderDrawX);
+                int shift = std::isfinite(rawShift) ? static_cast<int>(std::round(rawShift)) : -1;
                 const bool timeStale = m_timeGridDirty
                     || !m_timeGrid.valid
                     || m_timeGrid.size != QSize(cw + timeGridPadding, ch)
                     || shift < 0 || shift > m_timeGridPadding
-                    || rollingMode != m_timeGridCachedRollingMode;
+                    || rollingMode != m_timeGridCachedRollingMode
+                    || onPreview != m_timeGridCachedPreview
+                    || (onPreview
+                        && previewMapping.devicePixelsPerSecond
+                            != m_timeGridPreviewMapping.devicePixelsPerSecond);
                 if (timeStale) {
                     const double cps =
                         static_cast<double>(m_precomputedSampleRateHz)
                         / static_cast<double>(m_precomputedHopSize);
-                    updateTimeGridOverlayLocked(cw, ch, timeGridPadding, displayLeft, rollingMode, cps, drawX);
+                    updateTimeGridOverlayLocked(cw, ch, timeGridPadding, overlayLeft, rollingMode,
+                        cps, overlayDrawX, onPreview ? &previewMapping : nullptr);
                     shift = 0;
                 }
                 // Within 48 px of the left edge, and of the mode switch and
@@ -6009,27 +6396,35 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 const double cps = static_cast<double>(m_precomputedSampleRateHz)
                     / static_cast<double>(m_precomputedHopSize);
                 const double deviceX = timeToPixelX(
-                    m_markerSeconds + m_gaplessPositionOffset, displayLeft, rollingMode,
-                    m_rollingEpoch, cps, drawX, canvasZoomLocked());
+                    m_markerSeconds + m_gaplessPositionOffset, overlayLeft, rollingMode,
+                    m_rollingEpoch, cps, overlayDrawX, canvasZoomLocked());
                 markerX = std::round(deviceX / scale);
             }
 
             // Crosshair overlay — laid out again on mouse move or display
             // parameter change. Shown on the hovered pane (full crosshair)
             // and on non-hovered panes when crosshairSharedX >= 0 (vertical
-            // line + bottom time label).
+            // line + bottom time label). A zoom's preview keeps it: hidden
+            // until the zoom's data came, it blinked out for a fifth of a
+            // second at every wheel notch and on Reset Zoom (H21).
             if (m_crosshairEnabled
-                && (m_hoverActive || m_crosshairSharedX >= 0.0)
-                && !zoomPreviewShown) {
+                && (pointerOnLocked() || m_crosshairSharedX >= 0.0)) {
                 // The readout reads the data under the crosshair, which
                 // the view moves on: the hovered pane's frequency and
-                // level, and the lowest pane's time.
+                // level, and the lowest pane's time. In a zoom's preview,
+                // where the scaled canvas shows it, which playback moves.
                 bool crosshairTimeStale = false;
-                if (m_hoverActive || m_showCrosshairTime) {
+                if (pointerOnLocked() || m_showCrosshairTime) {
                     crosshairTimeStale =
-                        displayLeft != m_crosshairCachedDisplayLeft
-                        || !qFuzzyCompare(drawX / scale + 1.0, m_crosshairCachedDrawX + 1.0)
-                        || rollingMode != m_crosshairCachedRollingMode;
+                        overlayLeft != m_crosshairCachedDisplayLeft
+                        || !qFuzzyCompare(overlayDrawX / scale + 1.0, m_crosshairCachedDrawX + 1.0)
+                        || rollingMode != m_crosshairCachedRollingMode
+                        || zoomPreviewShown != m_crosshairCachedPreview
+                        || (zoomPreviewShown
+                            && (m_zoomPreviewAnchorSeconds != m_crosshairCachedPreviewAnchorSeconds
+                                || m_zoomPreviewAnchorX != m_crosshairCachedPreviewAnchorX
+                                || m_zoomPreviewPixelsPerSecond
+                                    != m_crosshairCachedPreviewPixelsPerSecond));
                 }
                 const bool crosshairStale = m_crosshairDirty
                     || !m_crosshair.valid
@@ -6040,9 +6435,15 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     const double cps =
                         static_cast<double>(m_precomputedSampleRateHz)
                         / static_cast<double>(m_precomputedHopSize);
-                    updateCrosshairOverlayLocked(cw, ch, displayLeft, rollingMode, cps, drawX);
+                    updateCrosshairOverlayLocked(cw, ch, overlayLeft, rollingMode, cps, overlayDrawX);
                 }
-                placeOverlay(m_crosshair, 0, crosshairFrame);
+                // The playhead is above the crosshair: where a seek on the
+                // plot lands it under the pointer, the dashes over it read
+                // as the hover line, and the landing didn't show. Within a
+                // pixel of it the vertical line gives way; the time stays.
+                placeOverlay(m_crosshair, 0, crosshairFrame, QRectF(),
+                    showPlayhead && m_playheadVisible
+                        ? playheadRect.left() : std::numeric_limits<double>::quiet_NaN());
             }
         } else if (!m_columns.empty() && m_binsPerColumn > 0) {
             // Appended rows are drawn one to a logical pixel.
@@ -6180,7 +6581,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     node->ensureTileFragments(static_cast<int>(node->bands.size()) + 1);
     QSGTexture *canvasPlaceholder = node->canvasPlaceholder();
     int fragmentCursor = 0;
-    if (hasCanvas && node->canvasSize == canvasSize) {
+    if (hasCanvas && !canvasHidden && node->canvasSize == canvasSize) {
         auto configureSegment = [&](int canvasOffset, int length, double targetX) {
             int remainingLength = length;
             int segmentOffset = canvasOffset;
@@ -6277,8 +6678,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     // The scale and the crosshair: ticks, and small images one texel to a
     // device pixel.
     node->showOverlay(node->restGridLayer, restGridFrame, kRestGridLineColor, currentWindow);
-    node->showOverlay(node->freqGridLayer, freqGridFrame, kScaleTickColor, currentWindow);
-    node->showOverlay(node->timeGridLayer, timeGridFrame, kScaleTickColor, currentWindow);
+    node->showOverlay(node->freqGridLayer, freqGridFrame, kScaleTickColor, currentWindow, kScaleOutlineColor);
+    node->showOverlay(node->timeGridLayer, timeGridFrame, kScaleTickColor, currentWindow, kScaleOutlineColor);
     node->showOverlay(node->crosshairLayer, crosshairFrame, QColor(), currentWindow);
     if (node->crosshairLayer.opacity->opacity() != crosshairOpacity) {
         node->crosshairLayer.opacity->setOpacity(crosshairOpacity);
@@ -6456,12 +6857,16 @@ void SpectrogramItem::hoverMoveEvent(QHoverEvent *event) {
     QMutexLocker lock(&m_stateMutex);
     m_hoverActive = true;
     m_hoverPosition = event->position();
-    if (m_crosshairEnabled) {
+    const bool shown = m_crosshairEnabled;
+    if (shown) {
         m_crosshairDirty = true;
     }
     lock.unlock();
-    if (m_crosshairEnabled) {
-        emit crosshairHoverChanged(event->position().x());
+    publishPointerOn();
+    // Told while the crosshair is hidden too, so that the line it shows
+    // again is where the pointer is in every lane.
+    emit crosshairHoverChanged(event->position().x());
+    if (shown) {
         update();
     }
 }
@@ -6470,12 +6875,16 @@ void SpectrogramItem::hoverEnterEvent(QHoverEvent *event) {
     QMutexLocker lock(&m_stateMutex);
     m_hoverActive = true;
     m_hoverPosition = event->position();
-    if (m_crosshairEnabled) {
+    const bool shown = m_crosshairEnabled;
+    if (shown) {
         m_crosshairDirty = true;
     }
     lock.unlock();
-    if (m_crosshairEnabled) {
-        emit crosshairHoverChanged(event->position().x());
+    publishPointerOn();
+    // Told while the crosshair is hidden too, so that the line it shows
+    // again is where the pointer is in every lane.
+    emit crosshairHoverChanged(event->position().x());
+    if (shown) {
         update();
     }
 }
@@ -6483,12 +6892,44 @@ void SpectrogramItem::hoverEnterEvent(QHoverEvent *event) {
 void SpectrogramItem::hoverLeaveEvent(QHoverEvent *) {
     QMutexLocker lock(&m_stateMutex);
     m_hoverActive = false;
-    if (m_crosshairEnabled) {
+    const bool shown = m_crosshairEnabled;
+    if (shown) {
         m_crosshairDirty = true;
     }
     lock.unlock();
+    publishPointerOn();
+    emit crosshairHoverChanged(-1.0);
+    if (shown) {
+        update();
+    }
+}
+
+void SpectrogramItem::publishPointerOn() {
+    bool on = false;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        on = pointerOnLocked();
+    }
+    if (on == m_pointerOnShown) {
+        return;
+    }
+    m_pointerOnShown = on;
+    emit pointerOnChanged();
+}
+
+void SpectrogramItem::setPointerHeld(bool held) {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_pointerHeld == held) {
+            return;
+        }
+        m_pointerHeld = held;
+        if (m_crosshairEnabled) {
+            m_crosshairDirty = true;
+        }
+    }
+    publishPointerOn();
     if (m_crosshairEnabled) {
-        emit crosshairHoverChanged(-1.0);
         update();
     }
 }
@@ -6501,8 +6942,10 @@ void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
     // stops it is its own (see ViewAutoscroll).
     if (event->button() == Qt::MiddleButton && m_zoomEnabled) {
         event->accept();
-        m_panPressed = m_displayMode == 1;
-        m_panning = false;
+        setPointerHeld(true);
+        m_panScenePosition = mapToScene(event->position());
+        setPanPressed(m_displayMode == 1);
+        endPan();
         m_panPressPosition = event->position();
         m_panStopsAutoscroll = m_autoscroll.takeStopPress(event->timestamp());
         return;
@@ -6537,6 +6980,7 @@ void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
             return;
         }
         event->accept();
+        setPointerHeld(true);
         noteOwnSeek(seconds);
         emit seekRequested(seconds);
         return;
@@ -6584,6 +7028,7 @@ void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
     }
 
     event->accept();
+    setPointerHeld(true);
     noteOwnSeek(seconds);
     emit seekRequested(seconds);
 }
@@ -6613,23 +7058,22 @@ double SpectrogramItem::viewSecondsAtLocked(double x) const {
 }
 
 void SpectrogramItem::mouseMoveEvent(QMouseEvent *event) {
+    const QPointF pointer = event->position();
+    // A rolling view's middle-drag pans nothing and moves the crosshair too.
+    if (event->buttons().testFlag(Qt::MiddleButton)) {
+        moveDraggedCrosshair(pointer);
+    }
     if (!m_panPressed) {
         event->ignore();
         return;
     }
     event->accept();
     SpectrogramViewFollow *follow = m_viewFollow.data();
-    const QPointF pointer = event->position();
     double anchorSeconds = 0.0;
+    double pointerSeconds = 0.0;
     bool startsPan = false;
     {
         QMutexLocker lock(&m_stateMutex);
-        // The crosshair keeps to the pointer, which holds the time it
-        // grabbed.
-        if (m_hoverActive) {
-            m_hoverPosition = pointer;
-            m_crosshairDirty = true;
-        }
         if (follow == nullptr || m_displayMode != 1) {
             return;
         }
@@ -6649,8 +7093,26 @@ void SpectrogramItem::mouseMoveEvent(QMouseEvent *event) {
             }
             m_panning = true;
             startsPan = true;
-            m_panOriginLeft = static_cast<double>(view.left);
-            m_panOriginX = m_panPressPosition.x();
+            // The time grabbed is the one the crosshair showed at the press:
+            // where the view was drawn, which a view that follows the
+            // playhead draws a fraction of a column off its whole columns
+            // (taking them, the time slipped a pixel as the drag started).
+            // Not from one laid out over a zoom's preview, whose time is
+            // the scaled canvas's, nor while a preview shows.
+            const bool fromCrosshair = m_crosshair.valid && !m_crosshairCachedRollingMode
+                && !m_crosshairCachedPreview && !m_zoomPreviewShown;
+            m_panOriginLeft = fromCrosshair
+                ? static_cast<double>(m_crosshairCachedDisplayLeft)
+                    - m_crosshairCachedDrawX / std::max(1e-9, effectiveZoomLocked())
+                : static_cast<double>(view.left);
+            // And at the device pixel the crosshair was drawn on, whose time
+            // it showed: from the pointer's own x, which a compositor places
+            // between pixels, the time slipped by up to a pixel's as the drag
+            // started (1:09.95, then 1:09.96 throughout).
+            m_panOriginX = fromCrosshair
+                ? static_cast<double>(crosshairDeviceColumnLocked(
+                      m_panPressPosition.x(), std::max(1, canvasWidthLocked()))) / m_canvasScale
+                : m_panPressPosition.x();
         }
         // The column grabbed stays under the pointer. Held at an end of the
         // track, the pan starts again from there, so that a move back moves
@@ -6666,17 +7128,48 @@ void SpectrogramItem::mouseMoveEvent(QMouseEvent *event) {
         // Anchored at its middle, whole columns from the track's start.
         anchorSeconds = (std::round(left) + 0.5 * static_cast<double>(view.windowColumns))
             / view.columnsPerSecond;
+        // The time grabbed, before that rounding: what the lanes' readout
+        // shows at the pointer while the pan lasts.
+        pointerSeconds = (left + pointer.x() * m_canvasScale / view.canvasZoom)
+            / view.columnsPerSecond;
     }
     if (startsPan) {
         // Where it glides back from is reckoned from the view's width.
         reportFollowGeometry();
         follow->setPanning(true);
+        emit panningChanged();
     }
-    follow->detach(anchorSeconds, 0.5);
+    follow->detach(anchorSeconds, 0.5, pointerSeconds);
     followChanged();
 }
 
+void SpectrogramItem::moveDraggedCrosshair(QPointF pointer) {
+    bool shown = false;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (!pointerOnLocked() || m_hoverPosition == pointer) {
+            return;
+        }
+        m_hoverPosition = pointer;
+        shown = m_crosshairEnabled;
+        if (shown) {
+            m_crosshairDirty = true;
+        }
+    }
+    // The lane that has the button gets no hover while it is held: it tells
+    // the plot where the pointer is itself.
+    emit crosshairHoverChanged(pointer.x());
+    if (shown) {
+        update();
+    }
+}
+
 void SpectrogramItem::mouseReleaseEvent(QMouseEvent *event) {
+    // The button pressed on the lane is let go: from here the pointer is on
+    // it while it hovers it.
+    if (event->buttons() == Qt::NoButton) {
+        setPointerHeld(false);
+    }
     if (event->button() != Qt::MiddleButton || !m_panPressed) {
         event->ignore();
         return;
@@ -6687,6 +7180,7 @@ void SpectrogramItem::mouseReleaseEvent(QMouseEvent *event) {
     const bool click = !m_panning && ViewAutoscroll::isClick(m_panPressPosition, event->position())
         && !m_panStopsAutoscroll;
     const QPointF pressed = m_panPressPosition;
+    m_panScenePosition = mapToScene(event->position());
     mouseUngrabEvent();
     if (click) {
         startAutoscroll(pressed);
@@ -6799,14 +7293,15 @@ void SpectrogramItem::autoscrollStopped() {
 }
 
 void SpectrogramItem::mouseUngrabEvent() {
+    setPointerHeld(false);
     if (!m_panPressed) {
         return;
     }
-    m_panPressed = false;
+    setPanPressed(false);
     if (!m_panning) {
         return;
     }
-    m_panning = false;
+    endPan();
     SpectrogramViewFollow *follow = m_viewFollow.data();
     if (follow == nullptr) {
         return;
@@ -6821,6 +7316,22 @@ void SpectrogramItem::mouseUngrabEvent() {
     // A playhead already past the re-attach point, or past the view, leaves
     // the view where it was put.
     follow->arm(position);
+}
+
+void SpectrogramItem::setPanPressed(bool pressed) {
+    if (m_panPressed == pressed) {
+        return;
+    }
+    m_panPressed = pressed;
+    emit panPressedChanged();
+}
+
+void SpectrogramItem::endPan() {
+    if (!m_panning) {
+        return;
+    }
+    m_panning = false;
+    emit panningChanged();
 }
 
 void SpectrogramItem::wheelEvent(QWheelEvent *event) {
@@ -6842,6 +7353,7 @@ void SpectrogramItem::wheelEvent(QWheelEvent *event) {
         return;
     }
     event->accept();
+    emit wheelZoomed(mapToScene(event->position()));
 
     constexpr double kZoomStepFactor = 1.25;
     SpectrogramViewFollow *follow = m_viewFollow.data();
@@ -6938,10 +7450,19 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
     m_crosshairCachedDrawX = logicalDrawX;
     m_crosshairCachedRollingMode = rollingMode;
     m_crosshairCachedBinsPerColumn = m_binsPerColumn;
-    // Determine the effective X for the vertical crosshair line.
-    // Hovered pane uses its own mouse position; non-hovered panes
-    // use the shared X coordinate propagated from the hovered pane.
-    const bool localHover = m_hoverActive;
+    // While a zoom's preview shows the canvas scaled, the readout reads it
+    // as it shows: the time where a click there seeks (viewSecondsAtLocked).
+    const bool preview = m_zoomPreviewShown && m_zoomPreviewPixelsPerSecond > 0.0;
+    m_crosshairCachedPreview = m_zoomPreviewShown;
+    m_crosshairCachedPreviewAnchorSeconds = m_zoomPreviewAnchorSeconds;
+    m_crosshairCachedPreviewAnchorX = m_zoomPreviewAnchorX;
+    m_crosshairCachedPreviewPixelsPerSecond = m_zoomPreviewPixelsPerSecond;
+    // The vertical line is at the plot's one x in every lane, the pointer's
+    // own too, so that all draw it on one column in every frame: the lane
+    // with the pointer drew its own, which the others' shared x was not in
+    // every frame (2 px apart at a drag's start, H15). A lane on its own,
+    // with none shared, draws it at its pointer.
+    const bool localHover = pointerOnLocked();
     const bool hasSharedX = m_crosshairSharedX >= 0.0;
     if (!m_crosshairEnabled || (!localHover && !hasSharedX)
         || width <= 0 || height <= 0) {
@@ -6951,7 +7472,7 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
 
     // The crosshair is on the device column and row under the pointer.
     const int deviceX = crosshairDeviceColumnLocked(
-        localHover ? m_hoverPosition.x() : m_crosshairSharedX, width);
+        hasSharedX ? m_crosshairSharedX : m_hoverPosition.x(), width);
     const int deviceY = crosshairDeviceColumnLocked(m_hoverPosition.y(), height);
     const int lineWidth = deviceLineWidth(scale);
     m_crosshair.valid = true;
@@ -6963,6 +7484,10 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
         QRectF(deviceX / scale, 0.0, lineWidth / scale, height / scale), QString()});
     const double lineX = static_cast<double>(deviceX) / scale;
     const double lineY = static_cast<double>(deviceY) / scale;
+    // The time at the line, in the columns' time, as the preview shows it.
+    const double previewSeconds = preview
+        ? m_zoomPreviewAnchorSeconds + (lineX - m_zoomPreviewAnchorX) / m_zoomPreviewPixelsPerSecond
+        : std::numeric_limits<double>::quiet_NaN();
 
     // The readout, on the axes: the frequency and the level at the pointer
     // on the hovered pane's right edge, and the time on the bottom edge of
@@ -6974,45 +7499,80 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
             QRectF(0.0, lineY, width / scale, lineWidth / scale), QString()});
         const double freqHz = pixelToFrequencyHzLocked(deviceY, height);
         if (freqHz >= 0.0) {
-            valueText = crosshairFrequency(freqHz);
-            const double columnF = static_cast<double>(displayLeft)
-                + (lineX - logicalDrawX) / std::max(1e-9, effectiveZoomLocked());
-            const qint64 displayIndex = static_cast<qint64>(std::floor(columnF));
-            const quint8 *bins = ringColumnLocked(displayIndex, rollingMode);
+            // The level of the column at the line: in a preview, the one it
+            // shows at that time, of the ring the zoom's session replaced,
+            // or else of the columns at hand. Read from the session's own,
+            // which come from the playhead on, it said "— dB" for a frame
+            // at each wheel notch and on Reset Zoom (H23).
+            const double columnF = preview
+                ? previewSeconds * columnsPerSecond
+                    + (rollingMode ? static_cast<double>(m_rollingEpoch) : 0.0)
+                : static_cast<double>(displayLeft)
+                    + (lineX - logicalDrawX) / std::max(1e-9, effectiveZoomLocked());
+            const quint8 *bins = preview ? shownColumnLocked(previewSeconds + m_streamOrigin) : nullptr;
+            int binCount = bins != nullptr ? m_shownColumns.ring.bins() : m_ring.bins();
+            if (bins == nullptr && std::isfinite(columnF)) {
+                bins = ringColumnLocked(static_cast<qint64>(std::floor(columnF)), rollingMode);
+            }
             const int row = height - 1 - deviceY;
+            // Without one, the level's field stays, with a dash for its
+            // number, so the readout keeps its form.
+            QString level = crosshairDecibels(std::numeric_limits<double>::quiet_NaN());
             if (bins != nullptr && row >= 0 && row < static_cast<int>(m_iToBin.size())) {
                 const int bin = m_iToBin[static_cast<size_t>(row)];
-                if (bin >= 0 && bin < m_ring.bins()) {
+                if (bin >= 0 && bin < binCount) {
                     // 1..255 spans -150..0 dBFS; 0 is silence.
                     const int value = bins[bin];
-                    const double db = value == 0
+                    level = crosshairDecibels(value == 0
                         ? -std::numeric_limits<double>::infinity()
-                        : (static_cast<double>(value - 1) / 254.0) * 150.0 - 150.0;
-                    valueText = i18nc("@info %1 is a frequency, %2 a level", "%1, %2",
-                                      valueText, crosshairDecibels(db));
+                        : (static_cast<double>(value - 1) / 254.0) * 150.0 - 150.0,
+                        -SpectrogramColorMap::clampedDbRange(m_dbRange));
                 }
             }
+            valueText = i18nc("@info %1 is a frequency, %2 a level", "%1, %2",
+                              crosshairFrequency(freqHz), level);
         }
     }
     QString timeText;
     if (m_showCrosshairTime) {
-        const double trackTime = crosshairTrackTimeLocked(pixelToTimeSeconds(
-            lineX, displayLeft, rollingMode,
-            m_rollingEpoch, columnsPerSecond, logicalDrawX, effectiveZoomLocked()));
+        // While a drag pans the view, the time it grabbed, from the pan's
+        // continuous transform: from the view's whole columns, it rolled
+        // across a digit and back mid-drag (1:10.0, 1:09.9, 1:10.0).
+        const double panPointerSeconds =
+            rollingMode || preview ? std::numeric_limits<double>::quiet_NaN()
+                                   : followSnapshotLocked().panPointerSeconds;
+        double continuousTime = previewSeconds;
+        if (!preview) {
+            continuousTime = std::isfinite(panPointerSeconds)
+                ? panPointerSeconds
+                : pixelToTimeSeconds(lineX, displayLeft, rollingMode, m_rollingEpoch,
+                      columnsPerSecond, logicalDrawX, effectiveZoomLocked());
+        }
+        const double trackTime = crosshairTrackTimeLocked(continuousTime);
         if (std::isfinite(trackTime)) {
-            timeText = crosshairTime(trackTime);
+            // As finely as the view resolves it, by the waveform's rule: a
+            // device pixel, or an analysis column where that is longer.
+            const double devicePixelsPerSecond = preview
+                ? m_zoomPreviewPixelsPerSecond * scale
+                : columnsPerSecond * std::max(1e-9, effectiveZoomLocked() * scale);
+            const double secondsPerColumn = std::max(
+                1.0 / devicePixelsPerSecond, 1.0 / columnsPerSecond);
+            timeText = CrosshairReadout::formatCrosshairTime(
+                trackTime, CrosshairReadout::crosshairTimeDecimals(secondsPerColumn));
         }
     }
 
-    const QFontMetrics metrics(CrosshairReadout::font());
-    const auto plateFor = [&](const QString &text) {
+    const QFontMetrics metrics(CrosshairReadout::font(m_textScale));
+    const auto plateFor = [&](const QString &text, int textWidth) {
         return text.isEmpty()
             ? QSize()
-            : CrosshairReadout::plateSize(metrics.horizontalAdvance(text), metrics, m_readoutColors);
+            : CrosshairReadout::plateSize(textWidth, metrics, m_readoutColors, m_textScale);
     };
     const int logicalWidth = std::max(1, static_cast<int>(std::floor(width / scale + 1e-6)));
     const int logicalHeight = std::max(1, static_cast<int>(std::floor(height / scale + 1e-6)));
-    const QSize timePlate = plateFor(timeText);
+    // The time's plate is as wide as its widest digits, so it doesn't
+    // twitch as they change.
+    const QSize timePlate = plateFor(timeText, CrosshairReadout::widestDigitsWidth(timeText, metrics));
     // The frequency scale, and whether a label of it is beside the time.
     CrosshairReadout::RightScale rightScale;
     if (m_gridEnabled && m_freqGrid.valid) {
@@ -7026,12 +7586,12 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
     // Whether a plate shows goes by the widest text it can have, so it
     // doesn't come and go as the level and time under the pointer change.
     const auto widestPlate = [&](int textWidth) {
-        return CrosshairReadout::plateSize(textWidth, metrics, m_readoutColors).width();
+        return CrosshairReadout::plateSize(textWidth, metrics, m_readoutColors, m_textScale).width();
     };
     const auto [valueRect, timeRect] = CrosshairReadout::plateRects(
         logicalWidth, logicalHeight,
         static_cast<int>(std::floor(lineX)), static_cast<int>(std::floor(lineY)),
-        plateFor(valueText), timePlate, m_reservedCorner, rightScale,
+        plateFor(valueText, metrics.horizontalAdvance(valueText)), timePlate, m_reservedCorner, rightScale,
         m_laneHeadBounds.isEmpty() ? QRect() : m_laneHeadBounds.toAlignedRect(),
         widestPlate(crosshairWidestValueWidthLocked()),
         timeText.isEmpty()
@@ -7054,7 +7614,7 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
 int SpectrogramItem::crosshairWidestValueWidthLocked() {
     const double topHz = topFrequencyHzLocked();
     return m_crosshairWidestValue.get(
-        CrosshairReadout::font(), topHz, [topHz](const QFontMetrics &metrics) {
+        CrosshairReadout::font(m_textScale), topHz, [topHz](const QFontMetrics &metrics) {
             // Each form at its most digits, as the readout's formatters write
             // them: the hertz just under a kilohertz, which round up to
             // "1000 Hz", and the top of the band, which can round up in
@@ -7062,10 +7622,11 @@ int SpectrogramItem::crosshairWidestValueWidthLocked() {
             const double underKilohertz = std::nextafter(1000.0, 0.0);
             int widest = 0;
             for (const double hz : {std::min(topHz, underKilohertz), topHz}) {
-                for (const double db : {-150.0, -std::numeric_limits<double>::infinity()}) {
+                for (const QString &level : {crosshairDecibels(-150.0), crosshairDecibels(-151.0, -150.0),
+                                             crosshairDecibels(-std::numeric_limits<double>::infinity())}) {
                     widest = std::max(widest, CrosshairReadout::widestDigitsWidth(
                         i18nc("@info %1 is a frequency, %2 a level", "%1, %2",
-                              crosshairFrequency(hz), crosshairDecibels(db)),
+                              crosshairFrequency(hz), level),
                         metrics));
                 }
             }
@@ -7104,7 +7665,7 @@ double SpectrogramItem::crosshairTrackTimeLocked(double continuousTime) const {
 
 void SpectrogramItem::nameOverlayImagesLocked(SpectrogramOverlayLayout &layout) const {
     for (SpectrogramOverlayImage &image : layout.images) {
-        image.key = overlayImageKey(image, m_canvasScale, m_readoutColors);
+        image.key = overlayImageKey(image, m_canvasScale, m_readoutColors, m_floorColor, m_textScale);
     }
 }
 
@@ -7140,20 +7701,30 @@ void SpectrogramItem::updateFreqGridOverlayLocked(int width, int height) {
     }
     m_freqGrid.valid = true;
 
-    // The frequency scale, inside the plot on its right: a 6 px tick at the
-    // edge for each label, and the label 10 px from the edge, centred on
-    // its tick. Ticks on the canvas's device rows; labels laid out in
-    // logical pixels.
+    // The frequency scale, inside the plot on its right: for each label a
+    // 4 px tick on the label's outer side, and the label
+    // kFrequencyScaleLabelGap before the tick's end, centred on its tick:
+    // "15 kHz -|". The ticks end flush at the plot's edge; beside the level
+    // meter they end scaleEdgeClearance short of it, the labels moving
+    // with them (ticks 3 px from the meter's seam still read with its
+    // marks as one cluster of white ticks, H29; a tick on the label's plot
+    // side read as a minus sign, "- 15 kHz"). Ticks on the canvas's device
+    // rows; labels laid out in logical pixels.
     const double scale = m_canvasScale;
     const int lineWidth = deviceLineWidth(scale);
-    const int tickWidth = devicePixels(6.0, scale);
-    constexpr int kLabelGap = 10;
+    const int tickWidth = devicePixels(kFrequencyScaleTickLength, scale);
+    const int tickEnd = std::max(
+        0, width - (m_scaleEdgeClearance > 0 ? devicePixels(m_scaleEdgeClearance, scale) : 0));
+    const int labelGap = frequencyScaleLabelGapLocked();
+    // Each tick cased in the labels' outline, so it reads over hot data as
+    // they do (bare, it vanished into a bright broadband field, H29).
+    m_freqGrid.casing = devicePixels(kScaleLabelOutline, scale);
     for (const FrequencyScaleTick &tick : frequencyScaleTicks(
              m_iToBin, m_binsPerColumn, binHzLocked(), width, height, scale,
-             frequencyScaleTopClearanceLocked())) {
-        m_freqScaleWidth = std::max(
-            m_freqScaleWidth, kLabelGap + static_cast<int>(tick.labelRect.width()));
-        m_freqGrid.lines.push_back(QRect(width - tickWidth, tick.pixelY, tickWidth, lineWidth));
+             frequencyScaleTopClearanceLocked(), labelGap, m_textScale)) {
+        m_freqScaleWidth = std::max(m_freqScaleWidth, labelGap + static_cast<int>(tick.labelRect.width()));
+        m_freqGrid.lines.push_back(
+            QRect(std::max(0, tickEnd - tickWidth), tick.pixelY, std::min(tickWidth, tickEnd), lineWidth));
         m_freqGrid.images.push_back(
             {SpectrogramOverlayImage::ScaleLabel, tick.label, 0, tick.labelRect, QString()});
     }
@@ -7168,70 +7739,58 @@ int SpectrogramItem::frequencyScaleTopClearanceLocked() const {
     return std::max(kTopClearance, static_cast<int>(std::ceil(m_reservedCorner.height())) + 2);
 }
 
+int SpectrogramItem::frequencyScaleLabelGapLocked() const {
+    return kFrequencyScaleLabelGap + m_scaleEdgeClearance;
+}
+
 void SpectrogramItem::updateRestGridOverlayLocked(int width, int height) {
     // width and height are in device pixels.
     m_restGrid = SpectrogramOverlayLayout{};
     m_restGrid.size = QSize(width, height);
-    if (width <= 0 || height <= 0 || m_analysisFftSize <= 1 || m_sampleRateHz <= 0) {
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+    const double scale = m_canvasScale;
+    const int lineWidth = deviceLineWidth(scale);
+    // Every line runs the lane's width, none cut for a plate: the plates
+    // are over the lane's top band, which has none (cut beside the plates,
+    // at a length of its own in each lane, and dimmer there, the first line
+    // read as a broken one).
+    if (!m_gridEnabled) {
+        // With nothing to label, evenly spaced: a silent lane (the ticks'
+        // rows left the band over the top one some 80 px to the others' 45).
+        m_restGrid.valid = true;
+        for (int line = 1; line <= m_restLineCount; ++line) {
+            const int y = static_cast<int>(
+                std::lround(static_cast<double>(height) * line / (m_restLineCount + 1)));
+            m_restGrid.lines.push_back(QRect(0, y, width, lineWidth));
+        }
+        return;
+    }
+    if (m_analysisFftSize <= 1 || m_sampleRateHz <= 0) {
         return;
     }
     m_restGrid.valid = true;
-    // The bins and rows a session at the analysis's settings will have at
-    // the lane's rate, for the ticks the scale will then show.
+    // With the scale shown, a line at each of its ticks, with its label:
+    // the bins and rows a session at the analysis's settings will have at
+    // the lane's rate, for the ticks the scale will then show. Each lane
+    // leaves out those beside the plates in any, so the lanes are alike.
     const int bins = shownFrequencyBins(m_analysisFftSize, m_sampleRateHz, m_frequencyCap);
     const double binHz = static_cast<double>(m_sampleRateHz) / static_cast<double>(m_analysisFftSize);
     const std::vector<int> rowBins = frequencyRowBins(height, bins, binHz, m_logScale, nullptr);
-    const double scale = m_canvasScale;
-    const int lineWidth = deviceLineWidth(scale);
-    // With the scale hidden there are no labels to keep clear of the lane's
-    // head and the mode switch: every tick has its line, so the lines are
-    // evenly spaced (with the top one left out, the lane's top band was some
-    // 80 px to the others' 45).
-    const int topClearance = m_gridEnabled ? frequencyScaleTopClearanceLocked() : 0;
-    // A line on a row beside a plate, the mode switch's in the corner or the
-    // lane's label, or within kPlateReach under or over it, ends, or
-    // starts, kPlateGap clear of it, rather than run along its edge, as the
-    // first line did along the switch's foot, 1 px under it. One rule for
-    // every lane: within 8 px rather than 4 (at 4 px, at 1600x1000, the
-    // first lane's top line, 4 px under its label, ran on while the
-    // second's, 3 px under its, was cut). Every tick keeps its line. The
-    // plates' rects are logical, with their 1 px edges.
-    constexpr double kPlateGap = 6.0;
-    constexpr double kPlateReach = 8.0;
-    // A line within kRestQuietReach of a plate's top or foot, in its band,
-    // is quieter (kRestGridQuietLineColor), its cuts kept.
-    constexpr double kRestQuietReach = 4.0;
-    const double logicalWidth = static_cast<double>(width) / scale;
-    const QRectF corner = m_reservedCorner.isEmpty()
-        ? QRectF()
-        : QRectF(logicalWidth - m_reservedCorner.width(), 0.0, m_reservedCorner.width(), m_reservedCorner.height());
-    const auto besidePlate = [&](const QRectF &plate, double row, double rowHeight) {
-        return !plate.isEmpty() && row + rowHeight > plate.top() - kPlateReach && row < plate.bottom() + kPlateReach;
-    };
+    // With the scale's 2 px under them, as the corner's lane leaves.
+    const int topClearance = std::max(
+        frequencyScaleTopClearanceLocked(), static_cast<int>(std::ceil(m_restTopClearance)) + 2);
     for (const FrequencyScaleTick &tick : frequencyScaleTicks(
-             rowBins, bins, binHz, width, height, scale, topClearance)) {
-        // Across the lane, where the scale's tick is, with the scale hidden
-        // too: the pane at rest is an instrument waiting, not a hole. The
-        // label over it, where the scale's goes, only with the scale shown.
-        const double row = static_cast<double>(tick.pixelY) / scale;
-        const double rowHeight = static_cast<double>(lineWidth) / scale;
-        const int left = besidePlate(m_laneLabelBounds, row, rowHeight)
-            ? std::clamp(static_cast<int>(std::ceil((m_laneLabelBounds.right() + kPlateGap) * scale)), 0, width)
-            : 0;
-        const int right = besidePlate(corner, row, rowHeight)
-            ? std::clamp(static_cast<int>(std::floor((corner.left() - kPlateGap) * scale)), 0, width)
-            : width;
-        m_restGrid.lines.push_back(QRect(left, tick.pixelY, std::max(0, right - left), lineWidth));
-        const bool inPlateBand = std::ranges::any_of(
-            std::array{m_laneLabelBounds, corner}, [&](const QRectF &plate) {
-                return !plate.isEmpty() && row + rowHeight > plate.top() - kRestQuietReach
-                    && row < plate.bottom() + kRestQuietReach;
-            });
-        m_restGrid.lineColors.push_back(inPlateBand ? kRestGridQuietLineColor : QColor());
-        if (m_gridEnabled) {
-            m_restGrid.images.push_back(
-                {SpectrogramOverlayImage::RestScaleLabel, tick.label, 0, tick.labelRect, QString()});
-        }
+             rowBins, bins, binHz, width, height, scale, topClearance, frequencyScaleLabelGapLocked(),
+             m_textScale)) {
+        // Each ends 6 px before its label, whose digits it ran through, and
+        // so clear of the meter's seam beside it too.
+        const int end = std::max(
+            0, static_cast<int>(std::floor((tick.labelRect.left() - kRestLineLabelGap) * scale + 1e-6)));
+        m_restGrid.lines.push_back(QRect(0, tick.pixelY, end, lineWidth));
+        m_restGrid.images.push_back(
+            {SpectrogramOverlayImage::RestScaleLabel, tick.label, 0, tick.labelRect, QString()});
     }
     nameOverlayImagesLocked(m_restGrid);
 }
@@ -7239,7 +7798,8 @@ void SpectrogramItem::updateRestGridOverlayLocked(int width, int height) {
 void SpectrogramItem::updateTimeGridOverlayLocked(
     int width, int height, int padding,
     qint64 displayLeft,
-    bool rollingMode, double columnsPerSecond, double drawX) {
+    bool rollingMode, double columnsPerSecond, double drawX,
+    const TimeGridPreviewMapping *preview) {
     // width, height, padding and drawX are in device pixels.
     m_timeGrid = SpectrogramOverlayLayout{};
     m_timeGrid.size = QSize(width + padding, height);
@@ -7248,8 +7808,12 @@ void SpectrogramItem::updateTimeGridOverlayLocked(
     m_timeGridRenderDrawX = drawX;
     m_timeGridCachedRollingMode = rollingMode;
     m_timeGridPadding = padding;
+    m_timeGridCachedPreview = preview != nullptr;
+    m_timeGridPreviewMapping = preview != nullptr ? *preview : TimeGridPreviewMapping{};
     if (!m_gridEnabled || !m_showTimeLabels || width <= 0 || height <= 0
-        || columnsPerSecond <= 0.0) {
+        || columnsPerSecond <= 0.0
+        || (preview != nullptr
+            && (!std::isfinite(preview->leftSeconds) || !(preview->devicePixelsPerSecond > 0.0)))) {
         m_timeGridPadding = 0;
         return;
     }
@@ -7262,6 +7826,8 @@ void SpectrogramItem::updateTimeGridOverlayLocked(
     const double scale = m_canvasScale;
     const int lineWidth = deviceLineWidth(scale);
     const int tickHeight = devicePixels(5.0, scale);
+    // Cased as the frequency scale's ticks.
+    m_timeGrid.casing = devicePixels(kScaleLabelOutline, scale);
     // Laid out wider than the widget so that each frame can shift it
     // instead of laying it out again; the frame clips what it shifts out.
     const int renderWidth = width + padding;
@@ -7274,7 +7840,9 @@ void SpectrogramItem::updateTimeGridOverlayLocked(
         0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600
     };
     // Spacing in logical pixels; positions in device pixels.
-    const double secondsPerPixel = 1.0 / (columnsPerSecond * effectiveZoomLocked());
+    const double secondsPerPixel = preview != nullptr
+        ? scale / preview->devicePixelsPerSecond
+        : 1.0 / (columnsPerSecond * effectiveZoomLocked());
     const double timeInterval = selectGridInterval(
         kTimeCandidates,
         static_cast<int>(std::size(kTimeCandidates)),
@@ -7283,12 +7851,22 @@ void SpectrogramItem::updateTimeGridOverlayLocked(
 
     // Compute time range for the full padded width.
     // These are in continuous (cross-track) time.
+    // On a preview, by its mapping, which clicks and the crosshair read.
     const double cz = canvasZoomLocked();
-    const double timeLeft = pixelToTimeSeconds(
-        0.0, displayLeft, rollingMode, m_rollingEpoch, columnsPerSecond, drawX, cz);
-    const double timeRight = pixelToTimeSeconds(
-        static_cast<double>(renderWidth - 1), displayLeft, rollingMode,
-        m_rollingEpoch, columnsPerSecond, drawX, cz);
+    const auto timeAtPixel = [&](double pixelX) {
+        return preview != nullptr
+            ? preview->leftSeconds + pixelX / preview->devicePixelsPerSecond
+            : pixelToTimeSeconds(
+                pixelX, displayLeft, rollingMode, m_rollingEpoch, columnsPerSecond, drawX, cz);
+    };
+    const auto pixelAtTime = [&](double seconds) {
+        return preview != nullptr
+            ? (seconds - preview->leftSeconds) * preview->devicePixelsPerSecond
+            : timeToPixelX(
+                seconds, displayLeft, rollingMode, m_rollingEpoch, columnsPerSecond, drawX, cz);
+    };
+    const double timeLeft = timeAtPixel(0.0);
+    const double timeRight = timeAtPixel(static_cast<double>(renderWidth - 1));
 
     // Convert to per-track time for grid line snapping and labels.
     // m_gaplessPositionOffset is the continuous-time value where the
@@ -7304,16 +7882,14 @@ void SpectrogramItem::updateTimeGridOverlayLocked(
         const double trackT = static_cast<double>(step) * timeInterval;
         // Convert per-track time back to continuous time for pixel positioning.
         const double continuousT = trackT + m_gaplessPositionOffset;
-        const double pxF = timeToPixelX(
-            continuousT, displayLeft, rollingMode, m_rollingEpoch, columnsPerSecond, drawX,
-            cz);
+        const double pxF = pixelAtTime(continuousT);
         const int pixelX = static_cast<int>(std::round(pxF));
         if (pixelX < 0 || pixelX >= renderWidth) {
             continue;
         }
         m_timeGrid.lines.push_back(QRect(pixelX, 0, lineWidth, tickHeight));
         const QString label = formatTimeLabel(trackT, timeInterval);
-        const QSize size = scaleLabelSize(label);
+        const QSize size = scaleLabelSize(label, m_textScale);
         m_timeGrid.images.push_back({SpectrogramOverlayImage::ScaleLabel, label, 0,
             QRectF(std::round(pixelX / scale) - size.width() / 2, 5.0,
                    size.width(), size.height()), QString()});
@@ -7945,8 +8521,16 @@ std::shared_ptr<SpectrogramRasterResult> SpectrogramItem::rasterize(
         if (px % kCanvasTileWidth == 0 && !wanted()) {
             return {};
         }
-        rasterPixel(canvas, px, static_cast<double>(px), target.displayLeft,
-            target.displayRight, target.effectiveZoom, maxima);
+        if (job.sampleColumns > 0 && target.effectiveZoom < 1.0) {
+            const qint64 first = std::min(target.displayRight, target.displayLeft
+                + static_cast<qint64>(static_cast<double>(px) / target.effectiveZoom));
+            const qint64 last = std::min(target.displayRight,
+                first + static_cast<qint64>(job.sampleColumns - 1) * job.sampleStride);
+            rasterPeakHold(canvas, px, first, last, maxima, job.sampleStride);
+        } else {
+            rasterPixel(canvas, px, static_cast<double>(px), target.displayLeft,
+                target.displayRight, target.effectiveZoom, maxima);
+        }
     }
     if (!job.underlay.isNull()
         && job.underlayPixelsPerSecond > 0.0
@@ -7968,6 +8552,21 @@ std::shared_ptr<SpectrogramRasterResult> SpectrogramItem::rasterize(
                 static_cast<double>(job.underlay.height())));
     }
     auto result = std::make_shared<SpectrogramRasterResult>();
+    if (job.sampleColumns > 0) {
+        // A pixel has data in all of its rows or in none.
+        const auto *row = reinterpret_cast<const QRgb *>(canvas.constScanLine(0));
+        for (int first = 0; first < target.width; ++first) {
+            int end = first;
+            while (end < target.width && qAlpha(row[end]) > 0) {
+                ++end;
+            }
+            if (end - first > result->coveredEnd - result->coveredFirst) {
+                result->coveredFirst = first;
+                result->coveredEnd = end;
+            }
+            first = end;
+        }
+    }
     result->serial = job.serial;
     result->target = target;
     result->drawPixels = drawPixels;
@@ -8131,6 +8730,7 @@ void SpectrogramItem::dropReserveLocked() {
 void SpectrogramItem::invalidateBackdropLocked() {
     dropBackdropLocked();
     dropReserveLocked();
+    m_shownColumns = {};
     ++m_backdropValidity;
     ++m_reserveSerial;
     m_reservePending = false;
@@ -8138,6 +8738,7 @@ void SpectrogramItem::invalidateBackdropLocked() {
     m_reserveZoomPixelsPerSecond = 0.0;
     m_reserveRequestedLeft = 0.0;
     m_reserveRequestedRight = -1.0;
+    m_reserveShortUntilSeconds = std::numeric_limits<double>::infinity();
 }
 
 void SpectrogramItem::requestReserveLocked(double seconds, double endSeconds,
@@ -8148,6 +8749,8 @@ void SpectrogramItem::requestReserveLocked(double seconds, double endSeconds,
     if (columnsPerSecond <= 0.0 || pixelsPerSecond <= 0.0 || width <= 0 || endSeconds <= seconds) {
         return;
     }
+    // Before what it keeps of the last reserve's.
+    const double requestedEndSeconds = endSeconds;
     const qint64 epoch = rollingMode ? m_rollingEpoch : 0;
     // The ring's columns over the seconds, but only those it can hold: no
     // more than its capacity, which a centered ring's columns span twice
@@ -8216,6 +8819,32 @@ void SpectrogramItem::requestReserveLocked(double seconds, double endSeconds,
         return;
     }
     job->makeTiles = false;
+    // A column of zoom 1 peak-holds the windows in its time, an eighth of
+    // a window apart (column_hops in src/analysis/column_hop.rs). Holding
+    // every column of its pixel, the reserve was lighter than both the
+    // view before a zoom out and the one after, beside the one and before
+    // the other.
+    const double hop = m_precomputedHopSize;
+    const double referenceHop = referenceHopLocked();
+    const int fftSize = m_precomputedFftSize > 0
+        ? m_precomputedFftSize
+        : (m_precomputedBinsPerColumn - 1) * 2;
+    const double windowStep = std::max(64.0, fftSize / 8.0);
+    job->sampleColumns = 1;
+    if (hop < referenceHop && windowStep < referenceHop) {
+        job->sampleStride = std::max(1, static_cast<int>(std::lround(windowStep / hop)));
+        job->sampleColumns = std::clamp(
+            static_cast<int>(std::lround(referenceHop / hop / job->sampleStride)), 1, 64);
+    }
+    m_reserveShortUntilSeconds = std::numeric_limits<double>::infinity();
+    if (!rollingMode) {
+        const qint64 end = centeredColumnsLocked().end;
+        const auto asked = static_cast<qint64>(std::ceil((requestedEndSeconds - origin) * columnsPerSecond));
+        const qint64 wanted = end > 0 ? std::min(end - 1, asked) : asked;
+        if (wanted > ringRight) {
+            m_reserveShortUntilSeconds = static_cast<double>(wanted) / columnsPerSecond + origin;
+        }
+    }
     if (keepsReserve) {
         job->underlay = m_reserve.image;
         job->underlayPixels = m_reserve.pixels;
@@ -8285,6 +8914,58 @@ void SpectrogramItem::reserveRingBeforeResetLocked() {
         m_canvas.height(), m_precomputedCanvasRolling);
 }
 
+void SpectrogramItem::keepShownColumnsLocked() {
+    if (m_precomputedCanvasRingGeneration != m_ringGeneration) {
+        // A canvas of an earlier ring, which a zoom before this one
+        // replaced: it keeps the columns it was drawn from.
+        if (m_shownColumns.ringGeneration != m_precomputedCanvasRingGeneration) {
+            m_shownColumns = {};
+        }
+        return;
+    }
+    m_shownColumns = {};
+    const double zoom = m_precomputedCanvasZoomLevel;
+    const double columnsPerSecond = m_precomputedCanvasColumnsPerSecond;
+    if (m_canvas.isNull() || zoom <= 0.0 || columnsPerSecond <= 0.0
+        || m_precomputedCanvasDisplayRight < m_precomputedCanvasDisplayLeft) {
+        return;
+    }
+    // The canvas's columns, and a view's more on either side, which a zoom
+    // out shows beside it (reserveRingBeforeResetLocked). Copying the ring
+    // shares its blocks; only the slot lookup costs anything here.
+    const auto view = static_cast<qint64>(std::ceil(static_cast<double>(canvasWidthLocked()) / zoom));
+    const qint64 left = m_precomputedCanvasDisplayLeft - view;
+    const qint64 right = std::max(m_precomputedCanvasDisplayRight, m_precomputedCanvasViewRight) + view;
+    const bool rolling = m_precomputedCanvasRolling;
+    m_shownColumns.ring = m_ring;
+    m_shownColumns.columnSlots.resize(static_cast<size_t>(right - left + 1));
+    for (qint64 column = left; column <= right; ++column) {
+        m_shownColumns.columnSlots[static_cast<size_t>(column - left)] =
+            ringSlotForDisplayIndexLocked(column, rolling);
+    }
+    m_shownColumns.left = left;
+    m_shownColumns.columnsPerSecond = columnsPerSecond;
+    m_shownColumns.epoch = m_precomputedCanvasEpoch;
+    m_shownColumns.streamOrigin = m_precomputedCanvasStreamOrigin;
+    m_shownColumns.ringGeneration = m_ringGeneration;
+}
+
+const quint8 *SpectrogramItem::shownColumnLocked(double seconds) const {
+    const ShownColumns &shown = m_shownColumns;
+    // Its bins are the rows' only while they are as many as the view's.
+    if (shown.columnSlots.empty() || shown.columnsPerSecond <= 0.0 || !std::isfinite(seconds)
+        || shown.ring.bins() != m_precomputedBinsPerColumn) {
+        return nullptr;
+    }
+    const double column = std::floor((seconds - shown.streamOrigin) * shown.columnsPerSecond)
+        + static_cast<double>(shown.epoch - shown.left);
+    if (column < 0.0 || column >= static_cast<double>(shown.columnSlots.size())) {
+        return nullptr;
+    }
+    const int slot = shown.columnSlots[static_cast<size_t>(column)];
+    return slot >= 0 ? shown.ring.column(slot) : nullptr;
+}
+
 void SpectrogramItem::installReserve(const std::shared_ptr<SpectrogramRasterResult> &result) {
     {
         QMutexLocker lock(&m_stateMutex);
@@ -8305,6 +8986,8 @@ void SpectrogramItem::installReserve(const std::shared_ptr<SpectrogramRasterResu
         m_reserve.start = 0;
         // With what it kept of the reserve before it, past its columns.
         m_reserve.pixels = result->canvas.width();
+        m_reserve.coveredFirst = result->coveredFirst;
+        m_reserve.coveredEnd = result->coveredEnd;
         m_reserve.leftSeconds = static_cast<double>(target.displayLeft - target.epoch)
             / target.columnsPerSecond + target.streamOrigin;
         m_reserve.pixelsPerSecond = target.effectiveZoom * target.columnsPerSecond;

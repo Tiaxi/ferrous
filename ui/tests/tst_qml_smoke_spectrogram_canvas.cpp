@@ -22,6 +22,9 @@ private slots:
     void spectrogramRingHoldsTheSessionsWidthUntilTheNextSession();
     void spectrogramRingHoldsEveryColumnOfAWiderSession();
     void spectrogramZoomPreviewRequestsEveryFrame();
+    void spectrogramCrosshairStaysThroughZoomPreviews();
+    void spectrogramCrosshairLevelReadsTheColumnsAPreviewShows();
+    void spectrogramTimeScaleStaysThroughZoomPreviews();
     void spectrogramVisibleRangeIsTheViewAFrameShows();
     void spectrogramDynamicRangePreservesSilence();
     void spectrogramProjectionSharesImmutableSettingsAndReleasesUnusedPlans();
@@ -44,6 +47,8 @@ private slots:
     void spectrogramDrawsAtDevicePixels_data();
     void spectrogramDrawsAtDevicePixels();
     void spectrogramWideCanvasDrawsEveryTile();
+    void spectrogramTilesAddedToADrawnLaneDrawInIt();
+    void spectrogramCrosshairFadesInPlace();
     void spectrogramCanvasTexturesSurviveSceneGraphChanges();
     void spectrogramSceneGraphDrawsTheCanvas_data();
     void spectrogramSceneGraphDrawsTheCanvas();
@@ -106,6 +111,8 @@ private slots:
     void spectrogramStaleZoomDataDoesNotDrawIntoTheFrozenPreview();
     void spectrogramZoomShowsOlderDataUntilTheNewArrives_data();
     void spectrogramZoomShowsOlderDataUntilTheNewArrives();
+    void spectrogramZoomOutShowsOnePictureUntilTheNewViewIsWhole_data();
+    void spectrogramZoomOutShowsOnePictureUntilTheNewViewIsWhole();
     void spectrogramTrackChangeDuringAZoomShowsNothingOfTheTrackBefore_data();
     void spectrogramTrackChangeDuringAZoomShowsNothingOfTheTrackBefore();
     void spectrogramLateZoomDataKeepsTheRollingHistory();
@@ -619,6 +626,355 @@ void SpectrogramCanvasSmokeTest::spectrogramZoomPreviewRequestsEveryFrame() {
         }
         delete node;
     }
+}
+
+// Regression (H21): the crosshair and its readout were left out of every
+// frame of a zoom's preview, a fifth of a second at each wheel notch and on
+// Reset Zoom. They stay, and read the canvas as the preview shows it: the
+// time where the view the frame shows puts it, and a level.
+void SpectrogramCanvasSmokeTest::spectrogramCrosshairStaysThroughZoomPreviews() {
+    for (const int mode : {0, 1}) {
+        const QByteArray label = mode == 0 ? "rolling" : "centered";
+        // A window, which makes the readout's textures.
+        QQuickWindow window;
+        window.resize(400, 100);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+        TestTime time;
+        SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+        prepareScrollingPlayback(item, time, mode);
+        item.setCrosshairEnabled(true);
+        item.setZoomEnabled(true);
+        // As the surface takes the zoom the wheel asks for.
+        connect(&item, &SpectrogramItem::zoomRequested, &item, &SpectrogramItem::setZoomLevel);
+        const QPointF pointer(150.0, 40.0);
+        // Through the window, which hovers its items where its pointer is.
+        // The frames hover it where the cursor is, so the cursor is there.
+        QCursor::setPos(window.mapToGlobal(pointer.toPoint()));
+        QTest::mouseMove(&window, pointer.toPoint());
+        const auto hovered = [&item](QPointF at) {
+            QMutexLocker lock(&item.m_stateMutex);
+            return item.pointerOnLocked() && item.m_hoverPosition == at;
+        };
+        QTRY_VERIFY(hovered(pointer));
+        QSGNode *node = paintSettled(item, nullptr);
+
+        // The frame's crosshair: its two lines and both plates, the level
+        // in its own, and the time the frame's view has at the pointer,
+        // as the seek bar's band reads it.
+        const auto checkCrosshair = [&](const char *step) {
+            const QString where = QStringLiteral("%1, %2").arg(QString::fromLatin1(label),
+                QString::fromLatin1(step));
+            item.handleWindowAfterAnimating();
+            const qsizetype placed = overlayOnScreen(node, 7).images.size();
+            QVERIFY2(placed == 4, qPrintable(QStringLiteral("%1: %2 placed").arg(where).arg(placed)));
+            QString readout;
+            {
+                QMutexLocker lock(&item.m_stateMutex);
+                QVERIFY2(item.m_crosshair.valid, qPrintable(where));
+                readout = item.m_crosshairLaidOutReadout;
+            }
+            const QStringList lines = readout.split(QLatin1Char('\n'));
+            QCOMPARE(lines.size(), 2);
+            QVERIFY2(lines[0].contains(QStringLiteral("Hz, \u2212")) && lines[0].endsWith(QStringLiteral(" dB")),
+                     qPrintable(where + QStringLiteral(": ") + lines[0]));
+            const QStringList parts = lines[1].split(QLatin1Char(':'));
+            QCOMPARE(parts.size(), 2);
+            const double shown = parts[0].toDouble() * 60.0 + parts[1].toDouble();
+            const double start = item.visibleStartSeconds();
+            const double end = item.visibleEndSeconds();
+            // To the pixel's time, within the readout's last digit.
+            const double expected = start + std::floor(pointer.x()) * (end - start) / item.width();
+            const int decimals = parts[1].contains(QLatin1Char('.'))
+                ? static_cast<int>(parts[1].size() - parts[1].indexOf(QLatin1Char('.')) - 1) : 0;
+            QVERIFY2(std::abs(shown - expected) <= 0.5 * std::pow(10.0, -decimals) + 1e-9,
+                     qPrintable(QStringLiteral("%1: %2 shown, %3 s expected")
+                         .arg(where, lines[1]).arg(expected)));
+        };
+        checkCrosshair("at rest");
+
+        // A wheel notch: the canvas scaled, until the zoom's data comes.
+        QWheelEvent notch(pointer, pointer, QPoint(), QPoint(0, 120), Qt::NoButton,
+                          Qt::NoModifier, Qt::NoScrollPhase, false);
+        item.wheelEvent(&notch);
+        QVERIFY(notch.isAccepted());
+        for (int frame = 0; frame < 3; ++frame) {
+            node = item.updatePaintNode(node, nullptr);
+            {
+                QMutexLocker lock(&item.m_stateMutex);
+                QVERIFY2(item.m_zoomPreviewShown, label.constData());
+            }
+            checkCrosshair("wheel notch");
+            time.advance(0.016);
+        }
+        // Reset Zoom before the zoom's columns came: the canvas as it is.
+        item.setZoomLevel(1.0);
+        node = item.updatePaintNode(node, nullptr);
+        checkCrosshair("Reset Zoom at once");
+
+        if (mode == 1) {
+            // The zoom's columns, as the session for its hop sends them,
+            // which replace the preview.
+            quint64 generation = 1;
+            const auto feedZoomData = [&] {
+                QVERIFY(sendPendingBackendZoom(item));
+                int hop = 0;
+                {
+                    QMutexLocker lock(&item.m_stateMutex);
+                    hop = item.columnHopForZoomLocked(item.backendZoomForRequestLocked());
+                }
+                QVERIFY(hop > 0);
+                const int columns = kStripeColumns * 1024 / hop;
+                QByteArray data(kStripeBins * columns, Qt::Uninitialized);
+                for (int column = 0; column < columns; ++column) {
+                    std::fill_n(data.data() + static_cast<qsizetype>(column) * kStripeBins,
+                        kStripeBins, static_cast<char>(40 + (column * 53) % 180));
+                }
+                item.feedPrecomputedChunk(data, kStripeBins, 0, columns, 0, columns,
+                    48'000, hop, true, true, 1, true, ++generation);
+                node = paintSettled(item, node);
+                QMutexLocker lock(&item.m_stateMutex);
+                QVERIFY(!item.m_zoomPreviewShown);
+                QVERIFY(!item.m_crosshairCachedPreview);
+            };
+            item.wheelEvent(&notch);
+            node = item.updatePaintNode(node, nullptr);
+            checkCrosshair("wheel notch again");
+            feedZoomData();
+            checkCrosshair("zoom data");
+
+            // Reset Zoom: the zoomed canvas, smaller, until zoom 1's
+            // columns come.
+            item.setZoomLevel(1.0);
+            node = item.updatePaintNode(node, nullptr);
+            {
+                QMutexLocker lock(&item.m_stateMutex);
+                QVERIFY(item.m_zoomPreviewShown);
+            }
+            checkCrosshair("Reset Zoom");
+            feedZoomData();
+            checkCrosshair("reset data");
+        }
+        delete node;
+    }
+}
+
+// Regression (H21): with the scale on, the time scale's ticks and labels
+// were left out of every frame of a zoom's preview, and blinked out at each
+// wheel notch and on Reset Zoom. They stay, on the times the preview shows:
+// each tick at a whole step of the scale for the frame's seconds a pixel.
+void SpectrogramCanvasSmokeTest::spectrogramTimeScaleStaysThroughZoomPreviews() {
+    constexpr int kWidth = 1200;
+    for (const int mode : {0, 1}) {
+        const QByteArray label = mode == 0 ? "rolling" : "centered";
+        // A window, which makes the labels' textures.
+        QQuickWindow window;
+        window.resize(kWidth, 100);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+        TestTime time;
+        SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+        prepareScrollingPlayback(item, time, mode);
+        item.setWidth(kWidth);
+        item.setGridEnabled(true);
+        item.setShowTimeLabels(true);
+        item.setZoomEnabled(true);
+        // As the surface takes the zoom the wheel asks for.
+        connect(&item, &SpectrogramItem::zoomRequested, &item, &SpectrogramItem::setZoomLevel);
+        QSGNode *node = paintSettled(item, nullptr);
+
+        // The frame's time scale: its ticks and labels, each tick at the
+        // time the frame's view has there, as the seek bar's band reads it,
+        // a whole step of the scale (see updateTimeGridOverlayLocked).
+        const auto checkTimeScale = [&](const char *step) {
+            const QString where = QStringLiteral("%1, %2").arg(QString::fromLatin1(label),
+                QString::fromLatin1(step));
+            item.handleWindowAfterAnimating();
+            const OverlayOnScreen shown = overlayOnScreen(node, 6);
+            QVERIFY2(!shown.lines.isEmpty() && shown.images.size() == shown.lines.size(),
+                     qPrintable(QStringLiteral("%1: %2 ticks, %3 labels")
+                         .arg(where).arg(shown.lines.size()).arg(shown.images.size())));
+            const double start = item.visibleStartSeconds();
+            const double end = item.visibleEndSeconds();
+            const double secondsPerPixel = (end - start) / item.width();
+            QVERIFY2(secondsPerPixel > 0.0, qPrintable(where));
+            static constexpr double kSteps[] = {0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600};
+            double interval = kSteps[std::size(kSteps) - 1];
+            for (const double candidate : kSteps) {
+                if (candidate / secondsPerPixel >= 240.0) {
+                    interval = candidate;
+                    break;
+                }
+            }
+            // Within two pixels: the tick's and the scroll's whole pixels,
+            // and a scale shifted by whole pixels between its layouts.
+            for (const QRectF &tick : shown.lines) {
+                const double seconds = start + tick.left() * secondsPerPixel;
+                const double steps = seconds / interval;
+                QVERIFY2(std::abs(steps - std::round(steps)) * interval <= 2.0 * secondsPerPixel,
+                         qPrintable(QStringLiteral("%1: a tick at %2 s, %3 s apart")
+                             .arg(where).arg(seconds).arg(interval)));
+            }
+        };
+        checkTimeScale("at rest");
+
+        // A wheel notch: the canvas scaled, until the zoom's data comes.
+        const QPointF pointer(600.0, 40.0);
+        QWheelEvent notch(pointer, pointer, QPoint(), QPoint(0, 120), Qt::NoButton,
+                          Qt::NoModifier, Qt::NoScrollPhase, false);
+        for (int notches = 0; notches < 2; ++notches) {
+            item.wheelEvent(&notch);
+            QVERIFY(notch.isAccepted());
+            for (int frame = 0; frame < 3; ++frame) {
+                node = item.updatePaintNode(node, nullptr);
+                {
+                    QMutexLocker lock(&item.m_stateMutex);
+                    QVERIFY2(item.m_zoomPreviewShown, label.constData());
+                }
+                checkTimeScale("wheel notch");
+                time.advance(0.016);
+            }
+        }
+        // Reset Zoom before the zoom's columns came: the canvas as it is.
+        item.setZoomLevel(1.0);
+        node = item.updatePaintNode(node, nullptr);
+        checkTimeScale("Reset Zoom at once");
+
+        if (mode == 1) {
+            // The zoom's columns, as the session for its hop sends them,
+            // which replace the preview.
+            quint64 generation = 1;
+            const auto feedZoomData = [&] {
+                QVERIFY(sendPendingBackendZoom(item));
+                int hop = 0;
+                {
+                    QMutexLocker lock(&item.m_stateMutex);
+                    hop = item.columnHopForZoomLocked(item.backendZoomForRequestLocked());
+                }
+                QVERIFY(hop > 0);
+                const int columns = kStripeColumns * 1024 / hop;
+                QByteArray data(kStripeBins * columns, Qt::Uninitialized);
+                for (int column = 0; column < columns; ++column) {
+                    std::fill_n(data.data() + static_cast<qsizetype>(column) * kStripeBins,
+                        kStripeBins, static_cast<char>(40 + (column * 53) % 180));
+                }
+                item.feedPrecomputedChunk(data, kStripeBins, 0, columns, 0, columns,
+                    48'000, hop, true, true, 1, true, ++generation);
+                node = paintSettled(item, node);
+                QMutexLocker lock(&item.m_stateMutex);
+                QVERIFY(!item.m_zoomPreviewShown);
+                QVERIFY(!item.m_timeGridCachedPreview);
+            };
+            item.wheelEvent(&notch);
+            node = item.updatePaintNode(node, nullptr);
+            checkTimeScale("wheel notch again");
+            feedZoomData();
+            checkTimeScale("zoom data");
+
+            // Reset Zoom: the zoomed canvas, smaller, until zoom 1's
+            // columns come.
+            item.setZoomLevel(1.0);
+            node = item.updatePaintNode(node, nullptr);
+            {
+                QMutexLocker lock(&item.m_stateMutex);
+                QVERIFY(item.m_zoomPreviewShown);
+            }
+            checkTimeScale("Reset Zoom");
+            feedZoomData();
+            checkTimeScale("reset data");
+        }
+        delete node;
+    }
+}
+
+// Regression (H23): through a zoom's preview, the level was read from the
+// zoom's own columns, which the session sends from the playhead on: in the
+// frame its first came, the readout said "— dB" at a time the preview
+// showed, and its plate narrowed 9 px for that frame, at each wheel notch
+// and on Reset Zoom. It reads the columns the preview shows.
+void SpectrogramCanvasSmokeTest::spectrogramCrosshairLevelReadsTheColumnsAPreviewShows() {
+    // A window, which makes the readout's textures.
+    QQuickWindow window;
+    window.resize(400, 100);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    TestTime time;
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    prepareScrollingPlayback(item, time, 1);
+    item.setCrosshairEnabled(true);
+    item.setZoomEnabled(true);
+    connect(&item, &SpectrogramItem::zoomRequested, &item, &SpectrogramItem::setZoomLevel);
+    // Left of the playhead, which is in the middle: before the zoom's
+    // first columns.
+    const QPointF pointer(150.0, 40.0);
+    QCursor::setPos(window.mapToGlobal(pointer.toPoint()));
+    QTest::mouseMove(&window, pointer.toPoint());
+    const auto hovered = [&item, pointer] {
+        QMutexLocker lock(&item.m_stateMutex);
+        return item.pointerOnLocked() && item.m_hoverPosition == pointer;
+    };
+    QTRY_VERIFY(hovered());
+    QSGNode *node = paintSettled(item, nullptr);
+    const auto levelShown = [&](const char *step) {
+        item.handleWindowAfterAnimating();
+        QMutexLocker lock(&item.m_stateMutex);
+        if (!item.m_crosshair.valid) {
+            return QStringLiteral("%1: no crosshair").arg(QString::fromLatin1(step));
+        }
+        return item.m_crosshairLaidOutReadout.split(QLatin1Char('\n')).constFirst();
+    };
+
+    quint64 generation = 1;
+    const auto notch = [&](int delta) {
+        QWheelEvent wheel(pointer, pointer, QPoint(), QPoint(0, delta), Qt::NoButton,
+                          Qt::NoModifier, Qt::NoScrollPhase, false);
+        item.wheelEvent(&wheel);
+        return wheel.isAccepted();
+    };
+    for (const int step : {120, -120}) {
+        const char *what = step > 0 ? "wheel notch" : "notch back";
+        QVERIFY(notch(step));
+        node = item.updatePaintNode(node, nullptr);
+        const QString before = levelShown(what);
+        QVERIFY2(before.contains(QStringLiteral("Hz, −")) && before.endsWith(QStringLiteral(" dB")),
+                 qPrintable(QStringLiteral("%1: %2").arg(QString::fromLatin1(what), before)));
+
+        // The zoom's session, its first columns from the playhead on.
+        QVERIFY(sendPendingBackendZoom(item));
+        int hop = 0;
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            hop = item.columnHopForZoomLocked(item.backendZoomForRequestLocked());
+        }
+        QVERIFY(hop > 0);
+        const int first = static_cast<int>(std::floor(item.positionSeconds() * 48'000.0 / hop));
+        const int columns = 32;
+        QByteArray data(kStripeBins * columns, static_cast<char>(200));
+        item.feedPrecomputedChunk(data, kStripeBins, 0, columns, first, kStripeColumns * 1024 / hop,
+            48'000, hop, false, true, 1, true, ++generation, 0, 0, 0, 0, true);
+        node = item.updatePaintNode(node, nullptr);
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            QVERIFY2(item.m_zoomPreviewShown, what);
+        }
+        // The preview shows the same columns at the same time, and so the
+        // same level.
+        const QString after = levelShown(what);
+        QVERIFY2(after == before, qPrintable(QStringLiteral("%1: %2, then %3")
+                                                .arg(QString::fromLatin1(what), before, after)));
+        // The rest of the session, which replaces the preview.
+        const int total = kStripeColumns * 1024 / hop;
+        QByteArray rest(kStripeBins * total, static_cast<char>(200));
+        item.feedPrecomputedChunk(rest, kStripeBins, 0, total, 0, total,
+            48'000, hop, true, false, 1, false, generation, 0, 0, 0, 0, true);
+        node = paintSettled(item, node);
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            QVERIFY2(!item.m_zoomPreviewShown, what);
+            QVERIFY2(item.m_shownColumns.columnSlots.empty(), what);
+        }
+    }
+    delete node;
 }
 
 // The view's range, which the seek bar marks while it is zoomed: what the
@@ -4557,20 +4913,27 @@ void SpectrogramCanvasSmokeTest::spectrogramDrawsAtDevicePixels() {
     };
 
     // The frequency scale's ticks are on device rows, on whole hundreds of
-    // hertz, 6 px at the right edge; its labels are drawn at device
-    // resolution.
+    // hertz, 4 px at the right edge, each cased in 1 px on device pixels;
+    // its labels are drawn at device resolution.
     QVERIFY(item.m_freqGrid.valid);
     QCOMPARE(item.m_freqGrid.size, QSize(deviceWidth, deviceHeight));
     QVERIFY(!item.m_freqGrid.lines.isEmpty());
     const OverlayOnScreen freqGrid = overlayOnScreen(node, 5);
     QCOMPARE(freqGrid.lines.size(), item.m_freqGrid.lines.size());
-    const int tickWidth = static_cast<int>(std::floor(6 * scale + 1e-6));
+    const int tickWidth = static_cast<int>(std::floor(4 * scale + 1e-6));
+    QCOMPARE(freqGrid.casings.size(), freqGrid.lines.size());
     for (int i = 0; i < item.m_freqGrid.lines.size(); ++i) {
         const QRect line = item.m_freqGrid.lines[i];
         QCOMPARE(line, QRect(deviceWidth - tickWidth, line.y(), tickWidth, lineWidth));
-        // devicePixels() floors: whole device pixels within the 6 px.
+        // devicePixels() floors: whole device pixels within the 4 px.
         QVERIFY(nearlyEqual(freqGrid.lines[i],
             QRectF(line.x() / scale, line.y() / scale, tickWidth / scale, lineWidth / scale)));
+        // Its casing, within the plot: at its edge, only on the plot's side.
+        const int casing = static_cast<int>(std::floor(scale + 1e-6));
+        QVERIFY(nearlyEqual(freqGrid.casings[i],
+            QRectF((line.x() - casing) / scale, (line.y() - casing) / scale,
+                   (tickWidth + casing) / scale, (lineWidth + 2 * casing) / scale)));
+        QVERIFY(onDevicePixels(freqGrid.casings[i]));
         const double hz = item.pixelToFrequencyHzLocked(line.y(), deviceHeight);
         const double hzPerRow = 24000.0 / deviceHeight;
         QVERIFY2(std::abs(hz - std::round(hz / 100.0) * 100.0) <= hzPerRow,
@@ -4794,6 +5157,124 @@ QImage expectedCanvasImage(const SpectrogramItem &item, QSGNode *node, const QSi
 }
 
 } // namespace
+
+// Tiles a lane already on screen gains, as it widens, draw in the lane:
+// with the software renderer, which draws the UI tests, a node that joined
+// a plain node of the scene drew at the window's origin, unclipped, so a
+// lane's new tiles lay over the transport until something moved it.
+void SpectrogramCanvasSmokeTest::spectrogramTilesAddedToADrawnLaneDrawInIt() {
+    const QColor chrome(Qt::white);
+    QQuickWindow window;
+    window.setColor(chrome);
+    window.resize(400, 200);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    auto &item = *new SpectrogramItem(window.contentItem());
+    item.setPosition(QPointF(120.0, 100.0));
+    item.setSize(QSizeF(60.0, 40.0));
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    constexpr int bins = 8;
+    constexpr int columns = 2000;
+    item.feedPrecomputedChunk(QByteArray(bins * columns, '\x60'), bins, 0, columns,
+        0, columns, 48000, 1024, true, true, 1, false, 1);
+    QSignalSpy frames(&window, &QQuickWindow::frameSwapped);
+    QTRY_VERIFY(!frames.isEmpty());
+    // Its first frame drew the lane in the tiles the scene node starts with.
+    const QImage narrow = window.grabWindow().convertToFormat(QImage::Format_RGB32);
+    const QRgb canvas = narrow.pixel(150, 120);
+    QVERIFY2(canvas != chrome.rgb() && canvas != kSpectrogramFloor,
+             qPrintable(QColor(canvas).name()));
+
+    // 270 pixels are five tiles.
+    item.setWidth(270.0);
+    frames.clear();
+    QTRY_VERIFY(!frames.isEmpty());
+    const QImage wide = window.grabWindow().convertToFormat(QImage::Format_RGB32);
+    saveForInspection(wide, QStringLiteral("tiles-added-to-a-drawn-lane"));
+    const QRect lane(120, 100, 270, 40);
+    int outside = 0;
+    for (int y = 0; y < wide.height(); ++y) {
+        for (int x = 0; x < wide.width(); ++x) {
+            outside += !lane.contains(x, y) && wide.pixel(x, y) != chrome.rgb() ? 1 : 0;
+        }
+    }
+    QVERIFY2(outside == 0, qPrintable(QStringLiteral("%1 pixels drawn outside the lane").arg(outside)));
+    // The new tiles are where the canvas is.
+    for (const int x : {150, 220, 290, 360, 385}) {
+        QVERIFY2(wide.pixel(x, 120) == canvas,
+                 qPrintable(QStringLiteral("%1: %2").arg(x).arg(QColor(wide.pixel(x, 120)).name())));
+    }
+}
+
+// The crosshair draws at the pointer as it fades (#755): with the software
+// renderer a change of its opacity places it again by what the renderer
+// keeps of its parent, which was nothing for the plain node the lane's
+// scene was, so it drew at the window's origin, outside the lane, and the
+// lane showed none.
+void SpectrogramCanvasSmokeTest::spectrogramCrosshairFadesInPlace() {
+    const QColor chrome(Qt::white);
+    QQuickWindow window;
+    window.setColor(chrome);
+    window.resize(400, 240);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    auto &item = *new SpectrogramItem(window.contentItem());
+    const QRect lane(120, 121, 200, 80);
+    item.setPosition(lane.topLeft());
+    item.setSize(lane.size());
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    item.setCrosshairEnabled(true);
+    constexpr int bins = 8;
+    constexpr int columns = 2000;
+    item.feedPrecomputedChunk(QByteArray(bins * columns, '\x60'), bins, 0, columns,
+        0, columns, 48000, 1024, true, true, 1, false, 1);
+    QSignalSpy frames(&window, &QQuickWindow::frameSwapped);
+    QTRY_VERIFY(!frames.isEmpty());
+    const QRgb canvas = window.grabWindow().convertToFormat(QImage::Format_RGB32).pixel(lane.left() + 150, lane.top() + 10);
+    QVERIFY2(canvas != chrome.rgb() && canvas != kSpectrogramFloor, qPrintable(QColor(canvas).name()));
+    const QPoint pointer = lane.topLeft() + QPoint(60, 50);
+    // How many pixels of the column through the pointer the crosshair
+    // draws over the canvas, and how many the window has outside the lane.
+    struct Drawn {
+        int column = 0;
+        int outside = 0;
+    };
+    const auto drawn = [&](const QString &name) {
+        const QImage image = window.grabWindow().convertToFormat(QImage::Format_RGB32);
+        saveForInspection(image, name);
+        Drawn result;
+        for (int y = 0; y < image.height(); ++y) {
+            for (int x = 0; x < image.width(); ++x) {
+                result.outside += !lane.contains(x, y) && image.pixel(x, y) != chrome.rgb() ? 1 : 0;
+            }
+        }
+        // Clear of the readout's plates, which sit beside the pointer.
+        for (int y = lane.top(); y < pointer.y() - 20; ++y) {
+            result.column += image.pixel(pointer.x(), y) != canvas ? 1 : 0;
+        }
+        return result;
+    };
+    // The lane's scales, before the pointer comes.
+    const Drawn before = drawn(QStringLiteral("before-the-crosshair"));
+    QCOMPARE(before.outside, 0);
+    // Through the window, which hovers its items where its pointer is.
+    QCursor::setPos(window.mapToGlobal(pointer));
+    QTest::mouseMove(&window, pointer);
+    QTRY_VERIFY(drawn(QStringLiteral("crosshair")).column > before.column);
+    QCOMPARE(drawn(QStringLiteral("crosshair")).outside, 0);
+
+    for (const double opacity : {0.6, 1.0}) {
+        frames.clear();
+        item.setCrosshairOpacity(opacity);
+        QTRY_VERIFY(!frames.isEmpty());
+        const Drawn faded = drawn(QStringLiteral("crosshair-%1").arg(opacity));
+        QVERIFY2(faded.outside == 0,
+                 qPrintable(QStringLiteral("%1: %2 pixels drawn outside the lane").arg(opacity).arg(faded.outside)));
+        QVERIFY2(faded.column > before.column, qPrintable(QStringLiteral("%1: no crosshair at the pointer").arg(opacity)));
+    }
+}
 
 void SpectrogramCanvasSmokeTest::spectrogramCanvasTexturesSurviveSceneGraphChanges() {
     // A new scene graph, as when the window's is released, and another
@@ -5568,6 +6049,169 @@ void SpectrogramCanvasSmokeTest::spectrogramZoomShowsOlderDataUntilTheNewArrives
     QVERIFY(std::count(shown.begin(), shown.end(), true) > width / 2);
 
     delete node;
+}
+
+void SpectrogramCanvasSmokeTest::spectrogramZoomOutShowsOnePictureUntilTheNewViewIsWhole_data() {
+    QTest::addColumn<double>("zoom");
+    QTest::addColumn<double>("target");
+    QTest::addColumn<bool>("moved");
+    QTest::addColumn<bool>("playing");
+    QTest::newRow("reset") << 2.0 << 1.0 << false << false;
+    QTest::newRow("reset while playing") << 2.0 << 1.0 << false << true;
+    QTest::newRow("reset from a step in") << 1.25 << 1.0 << false << true;
+    QTest::newRow("step out") << 2.0 << 1.6 << false << true;
+    QTest::newRow("step out of a moved view") << 2.0 << 1.6 << true << true;
+}
+
+void SpectrogramCanvasSmokeTest::spectrogramZoomOutShowsOnePictureUntilTheNewViewIsWhole() {
+    // A centered zoom out drew the view before it, smaller, beside the
+    // coarser and lighter reserve, then the new columns beside both: slabs
+    // with an edge through every lane. Each frame is one picture: the
+    // reserve alone, as bright as zoom 1's columns, until the ring holds
+    // the whole view, and then the new canvas, in one frame.
+    QFETCH(double, zoom);
+    QFETCH(double, target);
+    QFETCH(bool, moved);
+    QFETCH(bool, playing);
+    QQuickWindow window;
+    window.resize(240, 160);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    TestTime time;
+    SpectrogramViewFollow follow;
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    time.drive(item);
+    constexpr int width = 200;
+    item.setWidth(width);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setViewFollow(&follow);
+    item.setZoomLevel(zoom);
+    QVERIFY(sendPendingBackendZoom(item));
+    item.setPlaying(playing);
+    constexpr int bins = 8;
+    constexpr int rate = 48'000;
+    constexpr double seconds = 60.0;
+    constexpr double trackSeconds = 128.0;
+    // One loud column in 16: the more columns a pixel held, the more
+    // pixels were loud, and the noise lighter.
+    constexpr int loudEvery = 16;
+    quint64 generation = 1;
+    const auto feed = [&](int hop, qint64 first, qint64 end, bool reset) {
+        QByteArray data(static_cast<qsizetype>(bins * (end - first)), '\x30');
+        for (qint64 column = first; column < end; ++column) {
+            if (column % loudEvery == 0) {
+                std::memset(data.data() + bins * (column - first), 0x90, bins);
+            }
+        }
+        item.feedPrecomputedChunk(data, bins, 0, static_cast<int>(end - first),
+            static_cast<int>(first), static_cast<int>(trackSeconds * rate / hop), rate, hop,
+            false, reset, 1, false, generation, 0, 8'192);
+    };
+    const int hop = static_cast<int>(std::lround(1024.0 / zoom));
+    const double shownAt = moved ? seconds + 2.0 : seconds;
+    const qint64 focus = static_cast<qint64>(shownAt * rate / hop);
+    // Up to just past the view at first, as a session decodes, and the
+    // rest of its lookahead later.
+    feed(hop, focus - 1'500, focus + width / 2 + 10, true);
+    setTestPosition(item, seconds, 1);
+    if (moved) {
+        follow.detach(shownAt, 0.5);
+    }
+    QSGNode *node = nullptr;
+    const auto guard = qScopeGuard([&node]() { delete node; });
+    const auto settle = [&]() {
+        for (int round = 0; round < 12; ++round) {
+            node = item.updatePaintNode(node, nullptr);
+            if (!spectrogramRasterPending(item) && !spectrogramReservePending(item)) {
+                node = item.updatePaintNode(node, nullptr);
+                return !spectrogramRasterPending(item);
+            }
+            if (!QTest::qWaitFor([&item]() {
+                    return !spectrogramRasterPending(item) && !spectrogramReservePending(item);
+                }, 5000)) {
+                return false;
+            }
+        }
+        return false;
+    };
+    QVERIFY(settle());
+    feed(hop, focus + width / 2 + 10, focus + 1'500, false);
+    QVERIFY(settle());
+    QVERIFY(settle());
+
+    // Most of the view before the zoom is the quiet columns' colour.
+    const QVector<QRgb> before = plotColumnColors(item, node, width);
+    const QRgb quiet = *std::max_element(before.begin(), before.end(),
+        [&before](QRgb a, QRgb b) { return before.count(a) < before.count(b); });
+
+    // The frame has no layer but the reserve, over the whole view.
+    const auto showsTheReserveAlone = [&](const char *step) {
+        QSGNode *tiles = node->childAtIndex(1);
+        for (int i = 0; i < tiles->childCount(); ++i) {
+            if (!static_cast<const QSGSimpleTextureNode *>(tiles->childAtIndex(i))->rect().isEmpty()) {
+                qWarning("%s: the canvas is in the zoom out's picture", step);
+                return false;
+            }
+        }
+        for (const int child : {1, 2}) {
+            if (!static_cast<const QSGSimpleTextureNode *>(
+                    node->childAtIndex(0)->childAtIndex(child))->rect().isEmpty()) {
+                qWarning("%s: the backdrop is in the zoom out's picture", step);
+                return false;
+            }
+        }
+        const QVector<QRgb> colors = plotColumnColors(item, node, width);
+        if (colors.contains(0)) {
+            qWarning("%s: x %lld shows the floor", step, static_cast<long long>(colors.indexOf(0)));
+            return false;
+        }
+        // As bright as zoom 1's: a column of those, not all of a pixel's.
+        const auto loud = width - colors.count(quiet);
+        if (loud > width / 8) {
+            qWarning("%s: %lld of %d pixels are loud, one column in %d is", step,
+                static_cast<long long>(loud), width, loudEvery);
+            return false;
+        }
+        return true;
+    };
+    const auto frame = [&]() {
+        if (playing) {
+            time.advance(0.016);
+        }
+        node = item.updatePaintNode(node, nullptr);
+    };
+
+    item.setZoomLevel(target);
+    frame();
+    QVERIFY(showsTheReserveAlone("first frame"));
+    QVERIFY(settle());
+    QVERIFY(showsTheReserveAlone("waiting for the data"));
+
+    QVERIFY(sendPendingBackendZoom(item));
+    const int newHop = item.columnHopForZoomLocked(item.backendZoomForRequestLocked());
+    const qint64 newFocus = static_cast<qint64>(shownAt * rate / newHop);
+    const qint64 reach = static_cast<qint64>(width / 2 + 40);
+    ++generation;
+    // The middle first, then the right, then the left of it.
+    feed(newHop, newFocus, newFocus + 8, true);
+    frame();
+    QVERIFY(showsTheReserveAlone("the first new columns"));
+    QVERIFY(settle());
+    QVERIFY(showsTheReserveAlone("the first new columns, drawn"));
+    feed(newHop, newFocus + 8, newFocus + 600, false);
+    frame();
+    QVERIFY(showsTheReserveAlone("the right of the new view"));
+    QVERIFY(settle());
+    QVERIFY(showsTheReserveAlone("the right of the new view, drawn"));
+    feed(newHop, newFocus - reach, newFocus, false);
+    QVERIFY2(spectrogramRasterPending(item), "the whole view waits for another frame to be drawn");
+    frame();
+    QVERIFY(settle());
+    // All of it, with no older layer in it.
+    QVERIFY(item.m_canvasComplete);
+    QVERIFY(item.m_backdrop.isNull());
+    QCOMPARE(drawnCanvasScale(node), 1.0);
 }
 
 void SpectrogramCanvasSmokeTest::spectrogramTrackChangeDuringAZoomShowsNothingOfTheTrackBefore_data() {

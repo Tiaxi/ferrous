@@ -36,6 +36,9 @@ SpectrogramViewFollow::Snapshot SpectrogramViewFollow::snapshot() const {
     snapshot.state = m_state;
     snapshot.anchorSeconds = m_anchorSeconds;
     snapshot.anchorFraction = m_anchorFraction;
+    if (m_state.mode == ViewFollow::Mode::Detached && m_panning) {
+        snapshot.panPointerSeconds = m_panPointerSeconds;
+    }
     if (m_state.mode == ViewFollow::Mode::Detached && m_reattachArmed && !heldLocked()) {
         snapshot.reattachSeconds = reattachPointLocked();
     }
@@ -46,7 +49,7 @@ ViewFollow::State SpectrogramViewFollow::stateAt(const Snapshot &snapshot, doubl
     return ViewFollow::advance(snapshot.state, position, snapshot.reattachSeconds);
 }
 
-void SpectrogramViewFollow::detach(double anchorSeconds, double fraction) {
+void SpectrogramViewFollow::detach(double anchorSeconds, double fraction, double panPointerSeconds) {
     {
         QMutexLocker lock(&m_mutex);
         if (m_state.mode != ViewFollow::Mode::Detached) {
@@ -56,6 +59,7 @@ void SpectrogramViewFollow::detach(double anchorSeconds, double fraction) {
         m_state = {ViewFollow::Mode::Detached, 0.0};
         m_anchorSeconds = std::max(0.0, anchorSeconds);
         m_anchorFraction = std::clamp(fraction, 0.0, 1.0);
+        m_panPointerSeconds = panPointerSeconds;
     }
     emit changed();
     publish();
@@ -67,16 +71,21 @@ void SpectrogramViewFollow::setPanning(bool panning) {
     if (panning) {
         // Nothing glides back until the user lets go.
         m_reattachArmed = false;
+    } else {
+        m_panPointerSeconds = std::numeric_limits<double>::quiet_NaN();
     }
 }
 
 void SpectrogramViewFollow::setAutoscrolling(bool autoscrolling) {
-    QMutexLocker lock(&m_mutex);
-    m_autoscrolling = autoscrolling;
-    if (autoscrolling) {
-        // Nothing glides back until autoscroll stops.
-        m_reattachArmed = false;
+    {
+        QMutexLocker lock(&m_mutex);
+        m_autoscrolling = autoscrolling;
+        if (autoscrolling) {
+            // Nothing glides back until autoscroll stops.
+            m_reattachArmed = false;
+        }
     }
+    publishAutoscrolling();
 }
 
 bool SpectrogramViewFollow::autoscrolling() const {
@@ -162,6 +171,7 @@ void SpectrogramViewFollow::noteOwnSeek(double seconds) {
 
 void SpectrogramViewFollow::clockChanged(const PlaybackClockState &next, qint64 nowNs) {
     bool placementChanged = false;
+    bool sameTrack = false;
     {
         QMutexLocker lock(&m_mutex);
         if (m_clockKnown && sameClockState(next, m_clockState)) {
@@ -195,6 +205,7 @@ void SpectrogramViewFollow::clockChanged(const PlaybackClockState &next, qint64 
                 armLocked(position);
             } else {
                 reattachLocked();
+                sameTrack = !trackChanged;
             }
             placementChanged = true;
         } else if (!ownSeek) {
@@ -205,7 +216,7 @@ void SpectrogramViewFollow::clockChanged(const PlaybackClockState &next, qint64 
     if (placementChanged) {
         emit changed();
     }
-    publish();
+    publish(sameTrack);
 }
 
 void SpectrogramViewFollow::reattach() {
@@ -217,13 +228,14 @@ void SpectrogramViewFollow::reattach() {
         reattachLocked();
     }
     emit changed();
-    publish();
+    publish(true);
 }
 
 void SpectrogramViewFollow::reattachLocked() {
     m_state = {ViewFollow::Mode::Playhead, 0.0};
     m_reattachArmed = false;
     m_panning = false;
+    m_panPointerSeconds = std::numeric_limits<double>::quiet_NaN();
     m_autoscrolling = false;
     m_ownSeekSeconds = std::numeric_limits<double>::quiet_NaN();
 }
@@ -243,7 +255,7 @@ double SpectrogramViewFollow::reattachPointLocked() const {
     return detachedLeftLocked() + ViewFollow::kReattachViewFraction * m_spanSeconds;
 }
 
-void SpectrogramViewFollow::publish() {
+void SpectrogramViewFollow::publish(bool sameTrack) {
     bool detached = false;
     {
         QMutexLocker lock(&m_mutex);
@@ -251,9 +263,23 @@ void SpectrogramViewFollow::publish() {
     }
     if (detached != m_detached) {
         m_detached = detached;
+        if (!detached) {
+            emit followingAgain(sameTrack);
+        }
         emit detachedChanged();
     }
+    // After detached: following again ends autoscroll, and the view is
+    // never told to be moved without it meanwhile.
+    publishAutoscrolling();
     sendBackendAnchor();
+}
+
+void SpectrogramViewFollow::publishAutoscrolling() {
+    const bool running = autoscrolling();
+    if (running != m_autoscrollingShown) {
+        m_autoscrollingShown = running;
+        emit autoscrollingChanged();
+    }
 }
 
 void SpectrogramViewFollow::sendBackendAnchor() {

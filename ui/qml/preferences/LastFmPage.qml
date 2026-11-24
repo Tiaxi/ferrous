@@ -25,21 +25,62 @@ Preferences.PreferencesPage {
     // its height for Configure's.
     // Only a connected account has scrobbles to show.
     readonly property bool showsScrobbleProgress: root.authState === 2
-    // The account line already says when the build has no Last.fm.
+    // The first line already says when the build has no Last.fm.
     readonly property bool showsStatus: (root.uiBridge.lastFmStatusText || "").length > 0 && root.buildConfigured
     readonly property bool showsPending: (root.uiBridge.lastFmPendingScrobbleCount || 0) > 0
     readonly property bool showsDropped: (root.uiBridge.lastFmDroppedScrobbleCount || 0) > 0
 
     title: I18n.i18nc("@title preferences page", "Last.fm")
 
+    // Without Last.fm in the build, the page is this one statement: it was
+    // the Account line, under the setting it disables and a help about a
+    // rule the build hasn't, and then a lone disabled check box under it.
+    // Centred in the room under the title, under the page's own glyph (one
+    // line at the top left stood over the empty page). Over the page, not
+    // in its form, which keeps its height for Configure's. Built from its
+    // parts, as the iTunes dialog's empty state is: PlaceholderMessage's
+    // selectable text would take Ctrl+C and Ctrl+A from the Edit menu.
+    property Item unavailablePlaceholder: ColumnLayout {
+        objectName: "lastFmUnavailable"
+        parent: root
+        visible: !root.buildConfigured
+        anchors.horizontalCenter: parent.horizontalCenter
+        y: Math.round(Math.max(root.bodyTop, root.bodyTop + (root.height - root.bodyTop - height) / 2))
+        width: Math.min(root.width - 2 * root.pageSideInset, root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 24))
+        spacing: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
+
+        // 48 px with the default font, and larger with a larger one, as
+        // the line under it.
+        Kirigami.Icon {
+            objectName: "lastFmUnavailableIcon"
+            Layout.alignment: Qt.AlignHCenter
+            Layout.preferredWidth: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.large)
+            Layout.preferredHeight: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.large)
+            source: Qt.resolvedUrl("../assets/lastfm.svg")
+            isMask: true
+            color: root.uiPalette.textSecondary
+            Accessible.ignored: true
+        }
+
+        Label {
+            objectName: "lastFmUnavailableLabel"
+            Layout.fillWidth: true
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.Wrap
+            textFormat: Text.PlainText
+            text: I18n.i18nc("@info", "Last.fm isn’t available in this build.")
+        }
+    }
+
     CheckBox {
         id: scrobblingCheckBox
         objectName: "lastFmScrobblingCheckBox"
-        Kirigami.FormData.label: I18n.i18nc("@label", "Scrobbling:")
+        // A build without Last.fm can't send a scrobble, as the line above
+        // says: there is no setting to show. Its label is emptied with it,
+        // as Account's is.
+        visible: root.buildConfigured
+        Kirigami.FormData.label: root.buildConfigured ? I18n.i18nc("@label", "Scrobbling:") : ""
         text: I18n.i18nc("@option:check", "Scrobble played tracks to Last.fm")
-        // A build without Last.fm can't send a scrobble, as the account's
-        // line says.
-        enabled: root.buildConfigured
         checked: root.settings.value("lastFmScrobblingEnabled")
         onToggled: root.settings.setValue("lastFmScrobblingEnabled", checked)
     }
@@ -47,7 +88,9 @@ Preferences.PreferencesPage {
     Components.FormHelpText {
         objectName: "lastFmScrobblingHelp"
         uiPalette: root.uiPalette
-        indent: scrobblingCheckBox.contentItem.x
+        checkBox: scrobblingCheckBox
+        // When the app would scrobble is nothing to a build that can't.
+        visible: root.buildConfigured
         // Without the status check box, it ends the scrobbling group.
         endsGroup: !root.showsScrobbleProgress
         text: I18n.i18nc("@info", "Tracks longer than 30 seconds are scrobbled when playback stops or the track "
@@ -68,23 +111,84 @@ Preferences.PreferencesPage {
     Components.FormGroupGap {
         objectName: "lastFmAccountGap"
         uiPalette: root.uiPalette
-        visible: root.showsScrobbleProgress
+        visible: root.showsScrobbleProgress && root.buildConfigured
     }
 
+    // The line's measure grows with the font (it wrapped at 432 px at
+    // 24 pt, beside twice that free). What the form needs for it does not:
+    // it still wraps where the page is narrow.
     Label {
         objectName: "lastFmAccountLabel"
-        Kirigami.FormData.label: I18n.i18nc("@label", "Account:")
+        visible: root.buildConfigured
+        // Emptied with the row: a label keeps its place while the page is
+        // out of view, which would count a row that never shows.
+        Kirigami.FormData.label: root.buildConfigured ? I18n.i18nc("@label", "Account:") : ""
         Layout.fillWidth: true
-        Layout.maximumWidth: Kirigami.Units.gridUnit * 24
+        Layout.preferredWidth: Math.min(implicitWidth, Kirigami.Units.gridUnit * 24)
+        Layout.maximumWidth: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 24)
         wrapMode: Text.Wrap
         textFormat: Text.PlainText
-        text: !root.buildConfigured
-            ? I18n.i18nc("@info", "Last.fm isn’t available in this build.")
-            : (root.connected
-                ? I18n.i18nc("@info", "Connected as %1", root.uiBridge.lastFmUsername)
-                : (root.authState === 1
-                    ? I18n.i18nc("@info", "Allow Ferrous in the browser, then complete the connection.")
-                    : I18n.i18nc("@info", "Not connected")))
+        text: root.connected
+            ? I18n.i18nc("@info", "Connected as %1", root.uiBridge.lastFmUsername)
+            : (root.authState === 1
+                ? I18n.i18nc("@info", "Allow Ferrous in the browser, then complete the connection.")
+                : I18n.i18nc("@info", "Not connected"))
+    }
+
+    // Only the buttons that apply now, their glyphs at the size of the
+    // Library page's. Straight under the account, before its status, whose
+    // lines come, go and wrap as tracks play and scrobbles are sent (under
+    // them, Disconnect moved with each).
+    RowLayout {
+        id: accountButtons
+        objectName: "lastFmAccountButtons"
+        Layout.topMargin: Kirigami.Units.smallSpacing
+        Layout.bottomMargin: Kirigami.Units.smallSpacing
+        readonly property real glyphSize: root.uiPalette.labelIconSize
+        spacing: Kirigami.Units.largeSpacing
+        visible: root.buildConfigured
+
+        Button {
+            objectName: "lastFmConnectButton"
+            visible: root.authState === 0 && !root.connected
+            icon.width: accountButtons.glyphSize
+            icon.height: accountButtons.glyphSize
+            icon.name: "internet-services"
+            text: I18n.i18nc("@action:button", "Connect…")
+            onClicked: root.uiBridge.beginLastFmAuth()
+        }
+
+        Button {
+            objectName: "lastFmCompleteButton"
+            visible: root.authState === 1
+            icon.width: accountButtons.glyphSize
+            icon.height: accountButtons.glyphSize
+            icon.name: "dialog-ok-apply"
+            text: I18n.i18nc("@action:button", "Complete Connection")
+            onClicked: root.uiBridge.completeLastFmAuth()
+        }
+
+        Button {
+            objectName: "lastFmReconnectButton"
+            visible: root.connected && root.authState !== 1
+            icon.width: accountButtons.glyphSize
+            icon.height: accountButtons.glyphSize
+            icon.name: "view-refresh"
+            text: I18n.i18nc("@action:button", "Reconnect…")
+            onClicked: root.uiBridge.beginLastFmAuth()
+        }
+
+        Button {
+            objectName: "lastFmDisconnectButton"
+            visible: root.connected || root.authState !== 0
+            icon.width: accountButtons.glyphSize
+            icon.height: accountButtons.glyphSize
+            icon.name: root.connected ? "network-disconnect" : "dialog-cancel"
+            text: root.connected
+                ? I18n.i18nc("@action:button", "Disconnect")
+                : I18n.i18nc("@action:button", "Cancel Connection")
+            onClicked: root.uiBridge.disconnectLastFm()
+        }
     }
 
     Components.FormHelpText {
@@ -114,50 +218,15 @@ Preferences.PreferencesPage {
 
     // Scrobbles older than Last.fm accepts, or the oldest past the queue's
     // limit, are dropped unsent; this run's count. The diagnostics log says
-    // which.
+    // which. Worded as the line above it, without "queue", which everywhere
+    // else in Ferrous is the play queue ("discarded from the queue" read as
+    // tracks lost from it).
     Components.FormHelpText {
         id: droppedLabel
         objectName: "lastFmDroppedLabel"
         uiPalette: root.uiPalette
         visible: root.showsDropped
-        text: I18n.i18ncp("@info", "%1 old scrobble was discarded from the queue",
-            "%1 old scrobbles were discarded from the queue", root.uiBridge.lastFmDroppedScrobbleCount || 0)
-    }
-
-    // Only the buttons that apply now.
-    RowLayout {
-        spacing: Kirigami.Units.largeSpacing
-        visible: root.buildConfigured
-
-        Button {
-            objectName: "lastFmConnectButton"
-            visible: root.authState === 0 && !root.connected
-            icon.name: "internet-services"
-            text: I18n.i18nc("@action:button", "Connect…")
-            onClicked: root.uiBridge.beginLastFmAuth()
-        }
-
-        Button {
-            objectName: "lastFmCompleteButton"
-            visible: root.authState === 1
-            text: I18n.i18nc("@action:button", "Complete Connection")
-            onClicked: root.uiBridge.completeLastFmAuth()
-        }
-
-        Button {
-            objectName: "lastFmReconnectButton"
-            visible: root.connected && root.authState !== 1
-            text: I18n.i18nc("@action:button", "Reconnect…")
-            onClicked: root.uiBridge.beginLastFmAuth()
-        }
-
-        Button {
-            objectName: "lastFmDisconnectButton"
-            visible: root.connected || root.authState !== 0
-            text: root.connected
-                ? I18n.i18nc("@action:button", "Disconnect")
-                : I18n.i18nc("@action:button", "Cancel Connection")
-            onClicked: root.uiBridge.disconnectLastFm()
-        }
+        text: I18n.i18ncp("@info", "%1 old scrobble was discarded unsent",
+            "%1 old scrobbles were discarded unsent", root.uiBridge.lastFmDroppedScrobbleCount || 0)
     }
 }

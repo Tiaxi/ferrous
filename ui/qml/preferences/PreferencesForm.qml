@@ -105,8 +105,9 @@ GridLayout {
             Layout.column: 0
             // With its field. While the page is out of view, every field
             // reads as hidden: the label keeps its place, as a field
-            // hidden only with its page keeps its own.
-            visible: label.text.length > 0 && label.item !== null
+            // hidden only with its page keeps its own. Above the fields, a
+            // blank label takes no line of its own.
+            visible: (root.wideMode ? label.text : label.text.trim()).length > 0 && label.item !== null
                 && (label.item.visible || !root.visible)
             enabled: label.buddy ? label.buddy.enabled : false
 
@@ -154,6 +155,9 @@ GridLayout {
                 }
                 return label.index > 0 ? Kirigami.Units.largeSpacing * 2 : 0
             }
+            // The room a field keeps under itself, its label keeps too, so
+            // the two stay on one middle however tall either is.
+            Layout.bottomMargin: root.wideMode && label.item ? label.item.Layout.bottomMargin : 0
 
             Component.onCompleted: {
                 if (label.item.Accessible.hasOwnProperty("labelledBy")) {

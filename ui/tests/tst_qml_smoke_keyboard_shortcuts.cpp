@@ -2,8 +2,12 @@
 
 #include "QmlSmokeTest.h"
 
+#include <QApplication>
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
+#include <QIcon>
+#include <QStyle>
+#include <QStyleFactory>
 
 #include "../src/StandardKeys.h"
 
@@ -28,6 +32,19 @@ private slots:
     void shortcutsTheBridgeRefusesStayToChange();
     void captureWorksWithoutKdesGlobalShortcuts();
     void visualizationPageNamesResetZoomsKey();
+    void editorHasOneBaselineAndOneKeyButtonWidth_data();
+    void editorHasOneBaselineAndOneKeyButtonWidth();
+    void editorGlyphsFollowTheFont_data();
+    void editorGlyphsFollowTheFont();
+    void editorHoldsStillAsANoteComesAndGoes_data();
+    void editorHoldsStillAsANoteComesAndGoes();
+    void keyColumnsHoldStillAsTheScrollBarComesAndGoes_data();
+    void keyColumnsHoldStillAsTheScrollBarComesAndGoes();
+    void namesAndKeysAreQuotedAsInTheOtherDialogs();
+    void reassignHasAGlyphAsCancelHas();
+    void addLibraryFolderKeepsItsGlyphAtEverySize_data();
+    void addLibraryFolderKeepsItsGlyphAtEverySize();
+    void columnHeadingsTakeTheTablesHeaderStyle();
 };
 
 namespace {
@@ -133,6 +150,17 @@ struct ShortcutsFixture {
         return StandardKeys::portableText(item(editorName)->property("keySequence"));
     }
 
+    // Gives the dialog the size it opens at on a large screen with the
+    // font at `pointSize`, 10 or 24, and lays it out; whether it took it.
+    bool showAtSizeFor(int pointSize) const {
+        const QSize size = pointSize > 10 ? QSize(1728, 1364) : QSize(720, 828);
+        dialog->resize(size);
+        // The window has the size at once, and what is in it once the
+        // platform has answered.
+        return QTest::qWaitFor([&] { return dialog->contentItem()->size() == QSizeF(size); })
+            && !dialog->grabWindow().isNull();
+    }
+
     bool click(const char *buttonName) const {
         return clickVisibleButton(dialog, QString::fromLatin1(buttonName));
     }
@@ -153,6 +181,79 @@ QQuickItem *visibleItemIn(QQuickItem *root, const QString &objectName) {
         }
     }
     return nullptr;
+}
+
+// The widget style named, until the end of the scope; none keeps the test's.
+class ScopedWidgetStyle {
+public:
+    explicit ScopedWidgetStyle(const QString &name)
+        : m_previous(QApplication::style()->name()) {
+        if (!name.isEmpty()) {
+            QApplication::setStyle(name);
+        }
+    }
+    ~ScopedWidgetStyle() { QApplication::setStyle(m_previous); }
+    ScopedWidgetStyle(const ScopedWidgetStyle &) = delete;
+    ScopedWidgetStyle &operator=(const ScopedWidgetStyle &) = delete;
+
+private:
+    QString m_previous;
+};
+
+// The test data of the editor's layout: both font sizes, in the tests'
+// style and in Breeze.
+void addFontAndStyleRows() {
+    QTest::addColumn<int>("pointSize");
+    QTest::addColumn<QString>("widgetStyle");
+    for (const int pointSize : {10, 24}) {
+        QTest::addRow("%d pt", pointSize) << pointSize << QString();
+        QTest::addRow("%d pt, Breeze", pointSize) << pointSize << QStringLiteral("Breeze");
+    }
+}
+
+// The item at or under `root` that says `text`, if one shows.
+QQuickItem *visibleTextIn(QQuickItem *root, const QString &text) {
+    for (QQuickItem *child : root->childItems()) {
+        if (!child->isVisible()) {
+            continue;
+        }
+        if (child->inherits("QQuickText") && child->property("text").toString() == text) {
+            return child;
+        }
+        if (QQuickItem *found = visibleTextIn(child, text)) {
+            return found;
+        }
+    }
+    return nullptr;
+}
+
+// A KeySequenceItem's shown button: the checkable one, which takes the key,
+// or the other, which clears it.
+QQuickItem *keyButtonIn(QQuickItem *editor, bool takesKey) {
+    for (QQuickItem *child : editor->childItems()) {
+        const QVariant checkable = child->property("checkable");
+        if (child->isVisible() && checkable.isValid() && checkable.toBool() == takesKey) {
+            return child;
+        }
+    }
+    return nullptr;
+}
+
+// The lowest row of `rect` with the ink of text, in `image`'s pixels: the
+// baseline of text without descenders. Breeze draws a button's caption
+// itself, so no item has its baseline. -1 for none.
+int inkBottom(const QImage &image, const QRectF &rect) {
+    const qreal dpr = image.devicePixelRatio();
+    const QRect area = QRectF(rect.topLeft() * dpr, rect.size() * dpr).toAlignedRect().intersected(image.rect());
+    const int ground = qGray(image.pixel(area.topLeft()));
+    for (int y = area.bottom(); y >= area.top(); --y) {
+        for (int x = area.left(); x <= area.right(); ++x) {
+            if (qAbs(qGray(image.pixel(x, y)) - ground) > 100) {
+                return y;
+            }
+        }
+    }
+    return -1;
 }
 
 QStringList bindingsOf(QObject *action) {
@@ -363,10 +464,10 @@ void KeyboardShortcutsSmokeTest::keysAnotherActionHasMoveOnlyWhenTheUserAgrees()
     QVERIFY(fixture.capture("keyboardShortcutsShortcutEditor", Qt::Key_Space));
     QTRY_VERIFY(reassign->isVisible());
     QCOMPARE(reassign->title(), QStringLiteral("Shortcut Conflict"));
-    QCOMPARE(reassign->property("message").toString(), QStringLiteral("Reassign ‘Space’ to ‘Stop’?"));
-    QCOMPARE(reassign->property("details").toString(),
-             QStringLiteral("The ‘Space’ key combination is already assigned to the ‘Play/Pause’ action, "
-                            "which will no longer have it."));
+    QCOMPARE(reassign->property("message").toString(), QStringLiteral("Reassign “Space” to “Stop”?"));
+    // The detail says what the other action loses, naming it first (it was
+    // a relative clause after the key).
+    QCOMPARE(reassign->property("details").toString(), QStringLiteral("Play/Pause will lose its Space shortcut."));
     // Until the user agrees, the editor shows the keys as they were.
     QCOMPARE(fixture.editorText("keyboardShortcutsShortcutEditor"), QStringLiteral("Ctrl+Shift+Space"));
     QVERIFY(clickVisibleButton(reassign, QStringLiteral("confirmDialogCancelButton")));
@@ -378,6 +479,8 @@ void KeyboardShortcutsSmokeTest::keysAnotherActionHasMoveOnlyWhenTheUserAgrees()
     // Reassigned, it moves; as the alternate, the shortcut stays.
     QVERIFY(fixture.capture("keyboardShortcutsAlternateEditor", Qt::Key_Space));
     QTRY_VERIFY(reassign->isVisible());
+    QCOMPARE(reassign->property("message").toString(), QStringLiteral("Reassign “Space” to “Stop”?"));
+    QCOMPARE(reassign->property("details").toString(), QStringLiteral("Play/Pause will lose its Space shortcut."));
     QVERIFY(clickVisibleButton(reassign, QStringLiteral("confirmDialogConfirmButton")));
     QTRY_VERIFY(!reassign->isVisible());
     QCOMPARE(fixture.shownBindings(QStringLiteral("stop")),
@@ -394,10 +497,8 @@ void KeyboardShortcutsSmokeTest::keysAnotherActionHasMoveOnlyWhenTheUserAgrees()
     QVERIFY(fixture.select(QStringLiteral("play_pause")));
     QVERIFY(clickVisibleButton(fixture.dialog, QStringLiteral("keyboardShortcutsDefaultRadio")));
     QTRY_VERIFY(reassign->isVisible());
-    QCOMPARE(reassign->property("message").toString(), QStringLiteral("Reassign ‘Space’ to ‘Play/Pause’?"));
-    QCOMPARE(reassign->property("details").toString(),
-             QStringLiteral("The ‘Space’ key combination is already assigned to the ‘Stop’ action, "
-                            "which will no longer have it."));
+    QCOMPARE(reassign->property("message").toString(), QStringLiteral("Reassign “Space” to “Play/Pause”?"));
+    QCOMPARE(reassign->property("details").toString(), QStringLiteral("Stop will lose its Space shortcut."));
     QVERIFY(clickVisibleButton(reassign, QStringLiteral("confirmDialogCancelButton")));
     QTRY_VERIFY(!reassign->isVisible());
     QVERIFY(fixture.shownBindings(QStringLiteral("play_pause")).isEmpty());
@@ -408,6 +509,28 @@ void KeyboardShortcutsSmokeTest::keysAnotherActionHasMoveOnlyWhenTheUserAgrees()
     QTRY_VERIFY(!reassign->isVisible());
     QCOMPARE(fixture.shownBindings(QStringLiteral("play_pause")), QStringList{QStringLiteral("Space")});
     QVERIFY(fixture.shownBindings(QStringLiteral("stop")).isEmpty());
+    // Both of an action's keys, or keys of two actions: a sentence for
+    // each action that loses them.
+    QObject *playPause = fixture.action("playPauseAction");
+    QObject *stopAction = fixture.action("stopAction");
+    QVERIFY(playPause != nullptr && stopAction != nullptr);
+    const auto lossOf = [&](const QVariantList &moves) {
+        QVariant text;
+        const QVariantMap change{{QStringLiteral("moves"), moves}};
+        if (!QMetaObject::invokeMethod(fixture.dialog, "lossText", Q_RETURN_ARG(QVariant, text),
+                                       Q_ARG(QVariant, QVariant(change)))) {
+            return QStringLiteral("(lossText failed)");
+        }
+        return text.toString();
+    };
+    const auto move = [](const QString &key, QObject *owner) {
+        return QVariant(QVariantMap{{QStringLiteral("key"), key},
+                                    {QStringLiteral("owner"), QVariant::fromValue(owner)}});
+    };
+    QCOMPARE(lossOf({move(QStringLiteral("Space"), playPause), move(QStringLiteral("Ctrl+P"), playPause)}),
+             QStringLiteral("Play/Pause will lose its Space and Ctrl+P shortcuts."));
+    QCOMPARE(lossOf({move(QStringLiteral("Space"), playPause), move(QStringLiteral("Ctrl+P"), stopAction)}),
+             QStringLiteral("Play/Pause will lose its Space shortcut. Stop will lose its Ctrl+P shortcut."));
     // Back to Stop's Space for what follows.
     QVERIFY(fixture.select(QStringLiteral("stop")));
     QVERIFY(fixture.capture("keyboardShortcutsShortcutEditor", Qt::Key_Space));
@@ -466,7 +589,7 @@ void KeyboardShortcutsSmokeTest::keysTheWindowKeepsAreRefused() {
     QCOMPARE(fixture.shownBindings(QStringLiteral("stop")), QStringList{QStringLiteral("G")});
     QVERIFY(note->isVisible());
     QCOMPARE(note->property("text").toString(),
-             QStringLiteral("While the library or a text field has the keyboard focus, ‘G’ types there instead."));
+             QStringLiteral("While the library or a text field has the keyboard focus, “G” types there instead."));
 
     // The album art viewer's I, for an action the viewers repeat; a key
     // any other action may take.
@@ -704,6 +827,369 @@ void KeyboardShortcutsSmokeTest::visualizationPageNamesResetZoomsKey() {
     QVERIFY(helpText().endsWith(QStringLiteral("centered spectrogram.")));
     QVERIFY(QMetaObject::invokeMethod(preferences, "close"));
     QTRY_VERIFY(!preferences->property("visible").toBool());
+}
+
+void KeyboardShortcutsSmokeTest::editorHasOneBaselineAndOneKeyButtonWidth_data() {
+    addFontAndStyleRows();
+}
+
+// Custom:, Shortcut: and the key on its button share a baseline (Custom:
+// was 5 px above the two beside it). The two key buttons are one width,
+// whatever keys they show, so the buttons that clear them share an x.
+void KeyboardShortcutsSmokeTest::editorHasOneBaselineAndOneKeyButtonWidth() {
+    QFETCH(int, pointSize);
+    QFETCH(QString, widgetStyle);
+    // Breeze's buttons are taller than its radio buttons, which set the
+    // radio's caption off the button's; Fusion's are as tall.
+    if (!widgetStyle.isEmpty() && !QStyleFactory::keys().contains(widgetStyle, Qt::CaseInsensitive)) {
+        QSKIP("The Breeze widget style is not installed.");
+    }
+    const ScopedWidgetStyle style(widgetStyle);
+    const ScopedApplicationFont font(pointSize);
+    ShortcutsFixture fixture;
+    QVERIFY(fixture.open());
+    QVERIFY(fixture.select(QStringLiteral("open_files")));
+    QVERIFY(fixture.showAtSizeFor(pointSize));
+    QQuickItem *editor = fixture.item("keyboardShortcutsEditor");
+    QQuickItem *shortcut = fixture.item("keyboardShortcutsShortcutEditor");
+    QQuickItem *alternate = fixture.item("keyboardShortcutsAlternateEditor");
+    auto *customText = qvariant_cast<QQuickItem *>(
+        fixture.item("keyboardShortcutsCustomRadio")->property("contentItem"));
+    QQuickItem *label = visibleTextIn(editor, QStringLiteral("Shortcut:"));
+    QQuickItem *key = keyButtonIn(shortcut, true);
+    QVERIFY(customText != nullptr && label != nullptr && key != nullptr);
+
+    const QImage shown = fixture.dialog->grabWindow();
+    // Right of the radio's indicator, and of the key button's glyph.
+    const int custom = inkBottom(shown, sceneRect(customText).adjusted(customText->property("leftPadding").toReal(), 0, 0, 0));
+    const int named = inkBottom(shown, sceneRect(label));
+    const int drawn = inkBottom(shown, sceneRect(key).adjusted(key->width() * 0.4, 5, -6, -5));
+    QVERIFY(custom >= 0 && named >= 0 && drawn >= 0);
+    const QString baselines = QStringLiteral("Custom: %1, Shortcut: %2, key %3").arg(custom).arg(named).arg(drawn);
+    // Breeze rounds the caption it draws to pixels of its own.
+    QVERIFY2(custom == named && qAbs(drawn - named) <= 1, qPrintable(baselines));
+
+    const qreal editorX = sceneRect(shortcut).left();
+    for (const char *action : {"open_files", "stop"}) {
+        QVERIFY(fixture.select(QString::fromLatin1(action)));
+        QVERIFY(!fixture.dialog->grabWindow().isNull());
+        QQuickItem *first = keyButtonIn(shortcut, true);
+        QQuickItem *second = keyButtonIn(alternate, true);
+        QQuickItem *clearFirst = keyButtonIn(shortcut, false);
+        QQuickItem *clearSecond = keyButtonIn(alternate, false);
+        QVERIFY(first != nullptr && second != nullptr && clearFirst != nullptr && clearSecond != nullptr);
+        QCOMPARE(first->width(), second->width());
+        QVERIFY(first->width() >= std::max(first->implicitWidth(), second->implicitWidth()) - 0.5);
+        QCOMPARE(sceneRect(clearFirst).left(), sceneRect(clearSecond).left());
+        // The grid's columns follow its own cells, not the longer default.
+        QCOMPARE(sceneRect(shortcut).left(), editorX);
+    }
+
+    // A key column wide at least, so the buttons and the ones that clear
+    // them keep one x from action to action (they were as wide as the
+    // action's key, about 82, 102 and 110 px at 10 pt), while one takes a
+    // key as well.
+    const qreal column = fixture.dialog->property("keyColumnWidth").toReal();
+    QVERIFY(column > 0);
+    qreal width = -1;
+    qreal clearX = -1;
+    QStringList moved;
+    for (const QString &action : fixture.rows()) {
+        QVERIFY(fixture.select(action));
+        QVERIFY(!fixture.dialog->grabWindow().isNull());
+        QQuickItem *first = keyButtonIn(shortcut, true);
+        QQuickItem *clear = keyButtonIn(shortcut, false);
+        QVERIFY(first != nullptr && clear != nullptr);
+        if (width < 0) {
+            width = first->width();
+            clearX = sceneRect(clear).left();
+            QVERIFY2(width >= column, qPrintable(QStringLiteral("%1 px, the column %2").arg(width).arg(column)));
+        } else if (first->width() != width || sceneRect(clear).left() != clearX) {
+            moved << QStringLiteral("%1: %2 px, clear at %3").arg(action).arg(first->width()).arg(sceneRect(clear).left());
+        }
+    }
+    QVERIFY2(moved.isEmpty(), qPrintable(QStringLiteral("%1 px, clear at %2, but ").arg(width).arg(clearX)
+                                         + moved.join(QStringLiteral("; "))));
+    // The wider buttons still fit the dialog at its narrowest.
+    QQuickItem *clearLast = keyButtonIn(shortcut, false);
+    QVERIFY(clearLast != nullptr);
+    QVERIFY(sceneRect(clearLast).right() <= fixture.dialog->minimumWidth());
+    QVERIFY(QMetaObject::invokeMethod(shortcut, "startCapturing"));
+    QVERIFY(!fixture.dialog->grabWindow().isNull());
+    QCOMPARE(keyButtonIn(shortcut, true)->width(), width);
+}
+
+void KeyboardShortcutsSmokeTest::editorHoldsStillAsANoteComesAndGoes_data() {
+    addFontAndStyleRows();
+}
+
+// A note of one line, a refusal or the typed key's, takes the line kept for
+// it: the list and the editor stay where they were (they moved up 27 px
+// as the user went through the actions or typed a key the window keeps).
+// The dialog still holds it all at its minimum height.
+void KeyboardShortcutsSmokeTest::editorHoldsStillAsANoteComesAndGoes() {
+    QFETCH(int, pointSize);
+    QFETCH(QString, widgetStyle);
+    if (!widgetStyle.isEmpty() && !QStyleFactory::keys().contains(widgetStyle, Qt::CaseInsensitive)) {
+        QSKIP("The Breeze widget style is not installed.");
+    }
+    const ScopedWidgetStyle style(widgetStyle);
+    const ScopedApplicationFont font(pointSize);
+    ShortcutsFixture fixture;
+    QVERIFY(fixture.open());
+    QVERIFY(fixture.select(QStringLiteral("open_files")));
+    QVERIFY(fixture.showAtSizeFor(pointSize));
+    QQuickItem *list = fixture.item("keyboardShortcutsList");
+    QQuickItem *title = fixture.item("keyboardShortcutsEditorTitle");
+    QQuickItem *key = fixture.item("keyboardShortcutsShortcutEditor");
+    QQuickItem *refusal = fixture.item("keyboardShortcutsRefusal");
+    QQuickItem *note = fixture.item("keyboardShortcutsTypedKeyNote");
+    QVERIFY(!refusal->isVisible() && !note->isVisible());
+    const auto where = [&] {
+        // A grab lays the window out.
+        fixture.dialog->grabWindow();
+        return QStringLiteral("list %1, title %2, key %3")
+            .arg(list->height()).arg(sceneRect(title).top()).arg(sceneRect(key).top());
+    };
+    const QString atRest = where();
+
+    QVERIFY(fixture.select(QStringLiteral("follow_playhead")));
+    QVERIFY(note->isVisible());
+    QCOMPARE(where(), atRest);
+    QCOMPARE(note->property("lineCount").toInt(), 1);
+
+    QVERIFY(fixture.capture("keyboardShortcutsShortcutEditor", Qt::Key_Escape));
+    QVERIFY(refusal->isVisible() && !note->isVisible());
+    QCOMPARE(where(), atRest);
+    QCOMPARE(refusal->property("lineCount").toInt(), 1);
+
+    QVERIFY(fixture.select(QStringLiteral("open_files")));
+    QVERIFY(!refusal->isVisible() && !note->isVisible());
+    QCOMPARE(where(), atRest);
+
+    // At its least height, the note's line is still over the buttons.
+    QVERIFY(fixture.select(QStringLiteral("follow_playhead")));
+    const QSize least(fixture.dialog->width(), fixture.dialog->minimumHeight());
+    fixture.dialog->resize(least);
+    QTRY_COMPARE(fixture.dialog->contentItem()->size(), QSizeF(least));
+    fixture.dialog->grabWindow();
+    const QRectF buttons = sceneRect(fixture.item("keyboardShortcutsButtons"));
+    QVERIFY2(sceneRect(note).bottom() <= buttons.top() + 0.5,
+             qPrintable(describeRect(sceneRect(note)) + QStringLiteral(" over ") + describeRect(buttons)));
+}
+
+void KeyboardShortcutsSmokeTest::keyColumnsHoldStillAsTheScrollBarComesAndGoes_data() {
+    QTest::addColumn<int>("pointSize");
+    QTest::newRow("10 pt") << 10;
+    QTest::newRow("24 pt") << 24;
+}
+
+// The key columns and their headings keep their x as a search takes the
+// scroll bar away and brings it back (they moved 21 px right as it went).
+// Without the bar, the current row's tint runs to the list's edge.
+void KeyboardShortcutsSmokeTest::keyColumnsHoldStillAsTheScrollBarComesAndGoes() {
+    QFETCH(int, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    ShortcutsFixture fixture;
+    QVERIFY(fixture.open());
+    QVERIFY(fixture.showAtSizeFor(pointSize));
+    QQuickItem *list = fixture.item("keyboardShortcutsList");
+    QQuickItem *headings = fixture.item("keyboardShortcutsColumnHeadings");
+    const auto scrolls = [&] { return evaluateOn(list, QStringLiteral("listScrollBar.visible")).toBool(); };
+    const auto columns = [&]() -> QList<qreal> {
+        fixture.dialog->grabWindow();
+        QList<qreal> lefts;
+        for (const char *heading : {"Shortcut", "Alternate"}) {
+            if (QQuickItem *label = visibleTextIn(headings, QString::fromLatin1(heading))) {
+                lefts << sceneRect(label).left();
+            }
+        }
+        for (const char *cell : {"keyboardShortcutsRowShortcut", "keyboardShortcutsRowAlternate"}) {
+            if (QQuickItem *label = visibleItemIn(list, QString::fromLatin1(cell))) {
+                lefts << sceneRect(label).left();
+            }
+        }
+        return lefts;
+    };
+    QTRY_VERIFY(scrolls());
+    const QList<qreal> atRest = columns();
+    QCOMPARE(atRest.size(), 4);
+    QVERIFY(qAbs(atRest[0] - atRest[2]) <= 1 && qAbs(atRest[1] - atRest[3]) <= 1);
+
+    QQuickItem *search = fixture.item("keyboardShortcutsSearchField");
+    QVERIFY(search->setProperty("text", QStringLiteral("play")));
+    QTRY_VERIFY(!scrolls());
+    QCOMPARE(columns(), atRest);
+    QQuickItem *tint = visibleItemIn(list, QStringLiteral("rowBackgroundTint"));
+    QVERIFY(tint != nullptr);
+    // Its ring only while the keyboard is in use, as the other lists' (it
+    // showed after a click).
+    const auto ring = [&] {
+        QQuickItem *current = visibleItemIn(list, QStringLiteral("rowBackgroundTint"));
+        return current != nullptr ? QQmlProperty(current, QStringLiteral("border.width")).read().toReal() : -1.0;
+    };
+    QTest::mouseClick(fixture.dialog, Qt::LeftButton, Qt::NoModifier, sceneRect(tint).center().toPoint());
+    QTRY_VERIFY(list->hasActiveFocus());
+    QCOMPARE(ring(), 0.0);
+    QTest::keyClick(fixture.dialog, Qt::Key_Up);
+    QTRY_COMPARE(ring(), 1.0);
+    QCOMPARE(sceneRect(tint).right(), sceneRect(list).right());
+
+    QVERIFY(search->setProperty("text", QString()));
+    QTRY_VERIFY(scrolls());
+    QCOMPARE(columns(), atRest);
+}
+
+// Every name and key the dialog quotes has “ ”, as in the other dialogs
+// (it alone had ‘ ’): the editor's title and each reason for a refusal.
+// The note and the conflict's question are checked with what they say.
+void KeyboardShortcutsSmokeTest::namesAndKeysAreQuotedAsInTheOtherDialogs() {
+    ShortcutsFixture fixture;
+    QVERIFY(fixture.open());
+    QVERIFY(fixture.select(QStringLiteral("play_pause")));
+    QCOMPARE(fixture.item("keyboardShortcutsEditorTitle")->property("text").toString(),
+             QStringLiteral("Shortcuts for “Play/Pause”"));
+    // One key of each role that is kept, and the album art viewer's.
+    for (const char *key : {"Return", "Del", "Tab", "Esc", "Home", "Shift+F10", "Ctrl+M", "I"}) {
+        QVariant refusal;
+        QVERIFY(QMetaObject::invokeMethod(fixture.dialog, "refusalFor", Q_RETURN_ARG(QVariant, refusal),
+                                          Q_ARG(QVariant, QVariant::fromValue(fixture.action("playPauseAction"))),
+                                          Q_ARG(QVariant, QString::fromLatin1(key))));
+        // Less the apostrophe of "can’t", which is no quote.
+        const QString said = refusal.toString().replace(QStringLiteral("can’t"), QStringLiteral("cannot"));
+        QVERIFY2(said.startsWith(QChar(0x201C)) && said.contains(QChar(0x201D)), key);
+        QVERIFY2(!said.contains(QChar(0x2018)) && !said.contains(QChar(0x2019)), qPrintable(said));
+    }
+}
+
+// Shortcut Conflict's Reassign has a glyph, as the Cancel beside it has,
+// and as large.
+void KeyboardShortcutsSmokeTest::reassignHasAGlyphAsCancelHas() {
+    ShortcutsFixture fixture;
+    QVERIFY(fixture.open());
+    auto *reassign = fixture.dialog->findChild<QQuickWindow *>(QStringLiteral("keyboardShortcutsReassignDialog"));
+    QVERIFY(reassign != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(reassign, "open"));
+    QVERIFY(QTest::qWaitForWindowExposed(reassign));
+    QQuickItem *confirm = visibleItemNamed(reassign, QStringLiteral("confirmDialogConfirmButton"));
+    QQuickItem *cancel = visibleItemNamed(reassign, QStringLiteral("confirmDialogCancelButton"));
+    QVERIFY(confirm != nullptr && cancel != nullptr);
+    const QString glyph = QQmlProperty::read(confirm, QStringLiteral("icon.name")).toString();
+    QCOMPARE(glyph, QStringLiteral("dialog-ok"));
+    QVERIFY(QIcon::hasThemeIcon(glyph));
+    for (const char *size : {"icon.width", "icon.height"}) {
+        QTRY_COMPARE(QQmlProperty::read(confirm, QString::fromLatin1(size)),
+                     QQmlProperty::read(cancel, QString::fromLatin1(size)));
+    }
+    QVERIFY(QMetaObject::invokeMethod(reassign, "reject"));
+}
+
+// The column headings are the app's tables', as Edit Tags': small, in the
+// secondary colour (they were the rows' size and ink). The row keeps the
+// height of KDE's shortcuts dialog (#458).
+void KeyboardShortcutsSmokeTest::columnHeadingsTakeTheTablesHeaderStyle() {
+    ShortcutsFixture fixture;
+    QVERIFY(fixture.open());
+    QObject *palette = qvariant_cast<QObject *>(fixture.window->property("uiPalette"));
+    QQuickItem *headings = fixture.item("keyboardShortcutsColumnHeadings");
+    QVERIFY(palette != nullptr && headings != nullptr);
+    for (const char *heading : {"Action", "Shortcut", "Alternate"}) {
+        QQuickItem *label = visibleTextIn(headings, QString::fromLatin1(heading));
+        QVERIFY2(label != nullptr, heading);
+        const QFont font = label->property("font").value<QFont>();
+        QCOMPARE(font.pointSizeF(), palette->property("smallPointSize").toReal());
+        QCOMPARE(font.weight(), QFont::Normal);
+        QCOMPARE(label->property("color").value<QColor>().rgba(),
+                 palette->property("textSecondary").value<QColor>().rgba());
+    }
+    QCOMPARE(headings->height(),
+             std::ceil(palette->property("rowHeight").toReal()
+                       + 2 * evaluateOn(headings, QStringLiteral("Kirigami.Units.smallSpacing")).toReal()));
+}
+
+void KeyboardShortcutsSmokeTest::editorGlyphsFollowTheFont_data() {
+    addFontAndStyleRows();
+}
+
+// The glyphs of the editors' buttons, the capture and the clear, are as
+// large as Defaults' (they stayed 16 px beside 24 pt captions), and the
+// buttons stay as tall as they were.
+void KeyboardShortcutsSmokeTest::editorGlyphsFollowTheFont() {
+    QFETCH(int, pointSize);
+    QFETCH(QString, widgetStyle);
+    if (!widgetStyle.isEmpty() && !QStyleFactory::keys().contains(widgetStyle, Qt::CaseInsensitive)) {
+        QSKIP("The Breeze widget style is not installed.");
+    }
+    const ScopedWidgetStyle style(widgetStyle);
+    const ScopedApplicationFont font(pointSize);
+    ShortcutsFixture fixture;
+    QVERIFY(fixture.open());
+    QVERIFY(fixture.showAtSizeFor(pointSize));
+    QQuickItem *defaults = visibleItemNamed(fixture.dialog, QStringLiteral("keyboardShortcutsDefaultsButton"));
+    QVERIFY(defaults != nullptr);
+    for (const char *editor : {"keyboardShortcutsShortcutEditor", "keyboardShortcutsAlternateEditor"}) {
+        for (const bool takesKey : {true, false}) {
+            QQuickItem *button = keyButtonIn(fixture.item(editor), takesKey);
+            QVERIFY2(button != nullptr, editor);
+            for (const char *side : {"icon.width", "icon.height"}) {
+                QTRY_COMPARE(QQmlProperty::read(button, QString::fromLatin1(side)).toReal(),
+                             QQmlProperty::read(defaults, QString::fromLatin1(side)).toReal());
+            }
+            QVERIFY2(button->implicitHeight() <= defaults->implicitHeight() + 0.5, editor);
+        }
+    }
+}
+
+void KeyboardShortcutsSmokeTest::addLibraryFolderKeepsItsGlyphAtEverySize_data() {
+    addFontAndStyleRows();
+}
+
+// Add Library Folder's glyph is the same music note at every font size
+// (from 32 px folder-music is the places' coloured folder, which the list's
+// mask made a solid block at 24 pt), and the one the File menu has for it.
+void KeyboardShortcutsSmokeTest::addLibraryFolderKeepsItsGlyphAtEverySize() {
+    QFETCH(int, pointSize);
+    QFETCH(QString, widgetStyle);
+    if (!widgetStyle.isEmpty() && !QStyleFactory::keys().contains(widgetStyle, Qt::CaseInsensitive)) {
+        QSKIP("The Breeze widget style is not installed.");
+    }
+    const ScopedWidgetStyle style(widgetStyle);
+    const ScopedApplicationFont font(pointSize);
+    ShortcutsFixture fixture;
+    QVERIFY(fixture.open());
+    QVERIFY(fixture.showAtSizeFor(pointSize));
+    QQuickItem *row = visibleItemIn(fixture.item("keyboardShortcutsList"),
+                                    QStringLiteral("keyboardShortcutsRow_add_library_folder"));
+    QVERIFY(row != nullptr);
+    QQuickItem *icon = visibleItemIn(row, QStringLiteral("keyboardShortcutsRowIcon"));
+    QVERIFY(icon != nullptr);
+    QCOMPARE(icon->property("source").toString(),
+             QQmlProperty::read(fixture.action("addLibraryFolderAction"), QStringLiteral("icon.name")).toString());
+
+    // The share of the glyph's square that has ink: a note's is under half,
+    // a folder's, filled, over it.
+    const auto inked = [&] {
+        const QImage shown = fixture.dialog->grabWindow();
+        const qreal dpr = shown.devicePixelRatio();
+        const QRectF square = sceneRect(icon);
+        const QRect area = QRectF(square.topLeft() * dpr, square.size() * dpr).toRect().intersected(shown.rect());
+        if (area.isEmpty() || area.left() < 2) {
+            return 0.0;
+        }
+        const QColor ground(shown.pixel(area.left() - 2, area.center().y()));
+        int inked = 0;
+        for (int y = area.top(); y <= area.bottom(); ++y) {
+            for (int x = area.left(); x <= area.right(); ++x) {
+                const QColor pixel(shown.pixel(x, y));
+                inked += qAbs(pixel.red() - ground.red()) + qAbs(pixel.green() - ground.green())
+                        + qAbs(pixel.blue() - ground.blue()) > 150;
+            }
+        }
+        return double(inked) / (area.width() * area.height());
+    };
+    QTRY_VERIFY(inked() > 0.05);
+    const double share = inked();
+    QVERIFY2(share < 0.5, qPrintable(QString::number(share)));
 }
 
 std::unique_ptr<QmlSmokeTest> makeKeyboardShortcutsSmokeTest(const QString &userDirectoriesParent) {

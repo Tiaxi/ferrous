@@ -109,8 +109,11 @@ struct TimeAxis {
     // The column at `x` logical pixels; a fraction of a pixel short of a
     // column's edge, as a time mapped there and back can be, is on it.
     int columnAt(double x) const {
-        return std::clamp(
-            static_cast<int>(std::floor(x * scale + kColumnEpsilon)), 0, columns() - 1);
+        return std::clamp(static_cast<int>(unboundedColumnAt(x, scale)), 0, columns() - 1);
+    }
+    // The same, also off the plot, where a drag can go.
+    static double unboundedColumnAt(double x, double scale) {
+        return std::floor(x * scale + kColumnEpsilon);
     }
     int columnOf(double time) const {
         return columnAt((time - start) / (end - start) * width);
@@ -373,6 +376,8 @@ void WaveformEditorItem::clockStateChanged() {
     bool request = false;
     bool cacheNeedsUpdate = false;
     bool courseCorrection = false;
+    // A seek that brought a moved view back to the playhead in its track.
+    bool sameTrack = false;
     qint64 frameDelayNs = 0;
     const qint64 nowNs = m_nowNs();
     {
@@ -410,6 +415,7 @@ void WaveformEditorItem::clockStateChanged() {
                     armReattachLocked(nowNs);
                 } else {
                     reattachLocked();
+                    sameTrack = !trackChanged;
                 }
             } else if (!ownSeek) {
                 // Playback has moved on from it: a later seek there is
@@ -439,7 +445,7 @@ void WaveformEditorItem::clockStateChanged() {
         if (courseCorrection) frameDelayNs = playbackFrameDelayNsLocked(nowNs);
     }
     emit positionSecondsChanged();
-    publishDetached();
+    publishDetached(sameTrack);
     if (request) scheduleDetailRequest();
     if (courseCorrection) {
         schedulePlaybackFrame(frameDelayNs, nowNs);
@@ -664,6 +670,23 @@ void WaveformEditorItem::setReadoutPlateEdgeColor(const QColor &value) { setRead
 QColor WaveformEditorItem::readoutTextColor() const { QMutexLocker lock(&m_stateMutex); return m_readoutColors.text; }
 void WaveformEditorItem::setReadoutTextColor(const QColor &value) { setReadoutColor(&CrosshairReadout::Colors::text, value); }
 
+double WaveformEditorItem::textScale() const { QMutexLocker lock(&m_stateMutex); return m_textScale; }
+
+void WaveformEditorItem::setTextScale(double value) {
+    if (!std::isfinite(value) || value <= 0.0) value = 1.0;
+    bool shown = false;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_textScale == value) return;
+        m_textScale = value;
+        // Only the crosshair's readout is in it, which a frame lays out and
+        // draws; the cached rasters and tiles are kept.
+        shown = m_crosshairEnabled && pointerOnLocked();
+    }
+    emit textScaleChanged();
+    if (shown) update();
+}
+
 void WaveformEditorItem::setReadoutColor(QColor CrosshairReadout::Colors::*member, const QColor &value) {
     bool shown = false;
     {
@@ -671,7 +694,7 @@ void WaveformEditorItem::setReadoutColor(QColor CrosshairReadout::Colors::*membe
         if (m_readoutColors.*member == value) return;
         m_readoutColors.*member = value;
         // Only the crosshair's overlay is in them, which a frame draws.
-        shown = m_crosshairEnabled && m_hoverActive;
+        shown = m_crosshairEnabled && pointerOnLocked();
     }
     emit readoutColorsChanged();
     if (shown) update();
@@ -755,7 +778,7 @@ void WaveformEditorItem::followPlayhead() {
         if (m_follow == Follow::Playhead) return;
         reattachLocked();
     }
-    viewMoved();
+    viewMoved(true);
 }
 double WaveformEditorItem::maximumZoomLevel() const { QMutexLocker lock(&m_stateMutex); return maximumZoomLevelLocked(); }
 
@@ -765,6 +788,28 @@ void WaveformEditorItem::setHoverPosition(double x, double y, bool active) {
         m_hoverActive = active;
         m_hoverPosition = QPointF(x, y);
     }
+    publishPointerOn();
+    if (crosshairEnabled()) update();
+}
+
+void WaveformEditorItem::publishPointerOn() {
+    bool on = false;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        on = pointerOnLocked();
+    }
+    if (on == m_pointerOnShown) return;
+    m_pointerOnShown = on;
+    emit pointerOnChanged();
+}
+
+void WaveformEditorItem::setPointerHeld(bool held) {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_pointerHeld == held) return;
+        m_pointerHeld = held;
+    }
+    publishPointerOn();
     if (crosshairEnabled()) update();
 }
 
@@ -1353,6 +1398,7 @@ void WaveformEditorItem::armReattachLocked(qint64 nowNs) {
 
 void WaveformEditorItem::reattachLocked() {
     m_follow = Follow::Playhead;
+    m_pressHolds = false;
     // A view brought back to the playhead ends autoscroll; see
     // publishDetached.
     m_autoscrolling = false;
@@ -1361,7 +1407,7 @@ void WaveformEditorItem::reattachLocked() {
     m_ownSeekSeconds = std::numeric_limits<double>::quiet_NaN();
 }
 
-void WaveformEditorItem::publishDetached() {
+void WaveformEditorItem::publishDetached(bool sameTrack) {
     bool detached = false;
     bool autoscrolling = false;
     {
@@ -1372,11 +1418,27 @@ void WaveformEditorItem::publishDetached() {
     }
     m_detachedShown.store(detached, std::memory_order_release);
     // What moved the view, such as a zoom or a pan, moves the range in the
-    // same frame.
+    // same frame; a moved view that follows again says where it was after
+    // where it is.
+    const double fromStart = m_visibleStartSeconds;
+    const double fromEnd = m_visibleEndSeconds;
     publishVisibleRange();
+    if (sameTrack && m_detached && !detached) {
+        emit followedAgain(fromStart, fromEnd);
+    }
+    // Either side of detached, so that a view autoscroll moves is never
+    // told to be moved without it.
+    if (autoscrolling && !m_autoscrollingShown) {
+        m_autoscrollingShown = true;
+        emit autoscrollingChanged();
+    }
     if (m_detached != detached) {
         m_detached = detached;
         emit detachedChanged();
+    }
+    if (!autoscrolling && m_autoscrollingShown) {
+        m_autoscrollingShown = false;
+        emit autoscrollingChanged();
     }
     // A view brought back to the playhead, as by Follow Playhead, Reset
     // Zoom, a seek or a track change, ends autoscroll.
@@ -1404,12 +1466,14 @@ bool WaveformEditorItem::detachedLocked(qint64 nowNs) const {
     // as one to the whole track does until it has its detail.
     const double span = std::min(visibleSpanForZoomLocked(m_zoomLevel),
                                  visibleSpanForZoomLocked(m_presentedZoomLevel));
-    return span < m_durationSeconds
+    // A view a middle press holds is moved only once a pan or autoscroll
+    // moves it.
+    return !m_pressHolds && span < m_durationSeconds
         && followStateLocked(m_presentedZoomLevel, displayedPositionSecondsLocked(nowNs)).mode
             == Follow::Detached;
 }
 
-void WaveformEditorItem::viewMoved() {
+void WaveformEditorItem::viewMoved(bool sameTrack) {
     bool request = false;
     {
         QMutexLocker lock(&m_stateMutex);
@@ -1423,7 +1487,7 @@ void WaveformEditorItem::viewMoved() {
             invalidateCacheLocked();
         }
     }
-    publishDetached();
+    publishDetached(sameTrack);
     if (request) scheduleDetailRequest();
     cancelPlaybackFrame();
     requestPlaybackFrame();
@@ -2750,7 +2814,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
             }
         }
         hover = m_hoverPosition;
-        hoverActive = m_hoverActive;
+        hoverActive = pointerOnLocked();
         crosshair = m_crosshairEnabled;
         crosshairOpacity = m_crosshairOpacity;
         scale = renderScaleLocked();
@@ -2877,12 +2941,27 @@ void WaveformEditorItem::paint(QPainter *painter) {
             *painter, canvasWidth, canvasHeight, visibleStart, visibleEnd, channels);
         drawChannelSeparators(*painter, canvasWidth, canvasHeight, channels, colors.laneSeam);
     }
-    publishMarkerX(markerSeconds >= 0.0 && visibleEnd > visibleStart
+    const double markerX = markerSeconds >= 0.0 && visibleEnd > visibleStart
         ? std::round((markerSeconds - visibleStart) / (visibleEnd - visibleStart) * canvasWidth)
-        : std::numeric_limits<double>::quiet_NaN());
+        : std::numeric_limits<double>::quiet_NaN();
+    // Where the file is cut off, the track has no audio after it: the plot
+    // ends there in a lane seam's line, and past it is the bare floor, with
+    // none of the lanes' lines, rather than a silence the file never had.
+    if (!std::isnan(markerX) && markerX < canvasWidth) {
+        const int cut = std::max(0, static_cast<int>(markerX));
+        painter->fillRect(
+            QRect(cut, 0, canvasWidth - cut, canvasHeight), colors.background);
+        if (cut > 0) {
+            painter->setPen(QPen(colors.laneSeam, 1.0));
+            painter->drawLine(cut, 0, cut, canvasHeight - 1);
+        }
+    }
+    publishMarkerX(markerX);
+    double playheadX = std::numeric_limits<double>::quiet_NaN();
     if (playheadVisible && visibleEnd > visibleStart && position >= visibleStart && position <= visibleEnd) {
         const TimeAxis axis{visibleStart, visibleEnd, canvasWidth, scale};
         const double x = axis.x(axis.columnOf(position));
+        playheadX = x;
         // A device pixel's core cased in one on each side: the column's
         // left edge is on one, and cosmetic pens draw a device pixel wide.
         const double pixel = 1.0 / scale;
@@ -2902,7 +2981,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
         m_hoverPosition = hover;
         painter->save();
         painter->setOpacity(crosshairOpacity);
-        drawCrosshair(*painter, canvasWidth, canvasHeight, visibleStart, visibleEnd);
+        drawCrosshair(*painter, canvasWidth, canvasHeight, visibleStart, visibleEnd, playheadX);
         painter->restore();
     }
     if (showFps && fpsValue > 0) drawFpsOverlay(*painter, canvasWidth, fpsValue, reservedCorner);
@@ -3615,39 +3694,20 @@ QPainterPath WaveformEditorItem::buildSamplePath(const QPolygonF &samples) {
     return path;
 }
 
-QString WaveformEditorItem::formatCrosshairTime(double seconds, int decimals) {
-    decimals = std::clamp(decimals, 1, 3);
-    const qint64 unit = decimals == 1 ? 10 : (decimals == 2 ? 100 : 1000);
-    const qint64 ticks = std::llround(std::max(0.0, seconds) * static_cast<double>(unit));
-    const qint64 whole = ticks / unit;
-    const qint64 hours = whole / 3600;
-    const QString rest = QStringLiteral("%1.%2")
-        .arg(whole % 60, 2, 10, QLatin1Char('0'))
-        .arg(ticks % unit, decimals, 10, QLatin1Char('0'));
-    if (hours > 0) {
-        return QStringLiteral("%1:%2:%3").arg(hours).arg((whole / 60) % 60, 2, 10, QLatin1Char('0')).arg(rest);
-    }
-    return QStringLiteral("%1:%2").arg(whole / 60).arg(rest);
-}
-
-int WaveformEditorItem::crosshairTimeDecimals(double secondsPerColumn, double zoomLevel) {
-    if (zoomLevel <= 1.0001 || !(secondsPerColumn > 0.0)) return 1;
-    return std::clamp(static_cast<int>(std::ceil(-std::log10(secondsPerColumn) - 1e-9)), 1, 3);
-}
-
 std::pair<QRect, QRect> WaveformEditorItem::crosshairLabelRects(
     int width, int height, int x, int y,
     int valueTextWidth, int timeTextWidth, int textHeight,
     const QSizeF &reservedCorner, const QRect &laneHead,
-    int widestValueTextWidth, int widestTimeTextWidth, const CrosshairReadout::Colors &colors) {
+    int widestValueTextWidth, int widestTimeTextWidth, const CrosshairReadout::Colors &colors,
+    double textScale) {
     // The spectrogram's plates, with its edge when the colours have one.
-    const int around = 2 * CrosshairReadout::kPadding + (colors.hasEdge() ? 2 : 0);
+    const auto plate = [&](int textWidth) {
+        return CrosshairReadout::plateSize(textWidth, textHeight, colors, textScale);
+    };
     return CrosshairReadout::plateRects(
-        width, height, x, y,
-        QSize(valueTextWidth + around, textHeight + around),
-        QSize(timeTextWidth + around, textHeight + around),
+        width, height, x, y, plate(valueTextWidth), plate(timeTextWidth),
         reservedCorner, CrosshairReadout::RightScale(), laneHead,
-        widestValueTextWidth + around, widestTimeTextWidth + around);
+        plate(widestValueTextWidth).width(), plate(widestTimeTextWidth).width());
 }
 
 void WaveformEditorItem::drawGridLocked(QPainter &painter, int width, int height,
@@ -4112,7 +4172,7 @@ QString crosshairLevel(double amplitude) {
 
 int WaveformEditorItem::crosshairWidestLevelWidthLocked() {
     return m_crosshairWidestLevel.get(
-        CrosshairReadout::font(), 0.0, [](const QFontMetrics &metrics) {
+        CrosshairReadout::font(m_textScale), 0.0, [](const QFontMetrics &metrics) {
             // Silence, and the lowest level above it, -100 dB: a louder level
             // has no more digits.
             return std::max(
@@ -4123,7 +4183,7 @@ int WaveformEditorItem::crosshairWidestLevelWidthLocked() {
 }
 
 void WaveformEditorItem::drawCrosshair(QPainter &painter, int width, int height,
-                                        double visibleStart, double visibleEnd) {
+                                        double visibleStart, double visibleEnd, double playheadX) {
     // On the column under the pointer, showing the time a click there
     // seeks to.
     const TimeAxis axis{visibleStart, visibleEnd, width, renderScaleLocked()};
@@ -4136,30 +4196,47 @@ void WaveformEditorItem::drawCrosshair(QPainter &painter, int width, int height,
     // 45 %, so that they read on the light plot as on the dark one.
     QColor lineColor = colors.text;
     lineColor.setAlphaF(colors.text.alphaF() * 0.45);
-    QPen pen(lineColor);
-    pen.setWidthF(1.0);
-    pen.setCapStyle(Qt::FlatCap);
-    pen.setDashPattern({4.0, 3.0});
-    painter.setPen(pen);
-    painter.drawLine(QLineF(lineX, 0.0, lineX, height - 1.0));
-    painter.drawLine(0, y, width - 1, y);
+    QPen dashes(lineColor);
+    dashes.setWidthF(1.0);
+    dashes.setCapStyle(Qt::FlatCap);
+    // Between them, the floor at 85 %: one dark dotted line through the
+    // fill (6.5:1; at 60 % a faint second line there, 3.6:1), nothing on the
+    // floor, where the light dashes carry it.
+    QPen gaps = dashes;
+    gaps.setColor(CrosshairReadout::dashGapColor(m_colors.background, 0.85));
+    CrosshairReadout::setDashes(dashes, false);
+    CrosshairReadout::setDashes(gaps, true);
+    // The playhead is above the crosshair: where a seek on the plot lands
+    // it under the pointer, the dashes over it read as the hover line, and
+    // the landing didn't show. The time stays on the axis.
+    const bool lineYields = std::abs(lineX - playheadX) <= CrosshairReadout::kYieldsWithin;
+    for (const QPen &pen : {gaps, dashes}) {
+        painter.setPen(pen);
+        if (!lineYields) {
+            painter.drawLine(QLineF(lineX, 0.0, lineX, height - 1.0));
+        }
+        painter.drawLine(0, y, width - 1, y);
+    }
     const double time = axis.timeAt(column);
     const int channels = displayedChannelCountLocked();
     const double channelHeight = static_cast<double>(height) / channels;
     const double localY = std::fmod(static_cast<double>(y), channelHeight);
     const double amplitude = std::clamp(std::abs((channelHeight * 0.5 - localY) / (channelHeight * 0.5)), 0.0, 1.0);
     const QString dbText = crosshairLevel(amplitude);
-    const QString timeText = formatCrosshairTime(
-        time, crosshairTimeDecimals((visibleEnd - visibleStart) / axis.columns(), m_presentedZoomLevel));
-    const QFont font = CrosshairReadout::font();
+    const QString timeText = CrosshairReadout::formatCrosshairTime(
+        time, CrosshairReadout::crosshairTimeDecimals((visibleEnd - visibleStart) / axis.columns()));
+    const QFont font = CrosshairReadout::font(m_textScale);
     const QFontMetrics metrics(font);
     // Whether a plate shows goes by the widest text it can have, so it
     // doesn't come and go as the level and time under the pointer change.
+    // The time's plate is as wide as its widest digits, so it doesn't
+    // twitch as they change.
+    const int timeWidth = CrosshairReadout::widestDigitsWidth(timeText, metrics);
     const auto [dbRect, timeRect] = crosshairLabelRects(
         width, height, x, y, metrics.horizontalAdvance(dbText),
-        metrics.horizontalAdvance(timeText), metrics.height(), m_reservedCorner,
+        timeWidth, metrics.height(), m_reservedCorner,
         lowestLaneHeadLocked(height, channels), crosshairWidestLevelWidthLocked(),
-        CrosshairReadout::widestDigitsWidth(timeText, metrics), colors);
+        timeWidth, colors, m_textScale);
     CrosshairReadout::drawPlate(painter, dbRect, dbText, font, colors);
     CrosshairReadout::drawPlate(painter, timeRect, timeText, font, colors);
 }
@@ -4176,9 +4253,9 @@ void WaveformEditorItem::drawFpsOverlay(
     painter.drawText(QPointF(counter.x(), counter.y() + metrics.ascent()), text);
 }
 
-void WaveformEditorItem::hoverMoveEvent(QHoverEvent *event) { { QMutexLocker lock(&m_stateMutex); m_hoverActive = true; m_hoverPosition = event->position(); } if (m_crosshairEnabled) update(); }
+void WaveformEditorItem::hoverMoveEvent(QHoverEvent *event) { { QMutexLocker lock(&m_stateMutex); m_hoverActive = true; m_hoverPosition = event->position(); } publishPointerOn(); if (m_crosshairEnabled) update(); }
 void WaveformEditorItem::hoverEnterEvent(QHoverEvent *event) { hoverMoveEvent(event); }
-void WaveformEditorItem::hoverLeaveEvent(QHoverEvent *) { { QMutexLocker lock(&m_stateMutex); m_hoverActive = false; } update(); }
+void WaveformEditorItem::hoverLeaveEvent(QHoverEvent *) { { QMutexLocker lock(&m_stateMutex); m_hoverActive = false; } publishPointerOn(); update(); }
 
 void WaveformEditorItem::mousePressEvent(QMouseEvent *event) {
     if (event->button() == Qt::MiddleButton) {
@@ -4187,10 +4264,27 @@ void WaveformEditorItem::mousePressEvent(QMouseEvent *event) {
         // as it is released. While autoscroll runs, the middle press that
         // stops it is its own (see ViewAutoscroll).
         event->accept();
-        m_panPressed = true;
-        m_panning = false;
+        m_panScenePosition = mapToScene(event->position());
+        setPanPressed(true);
+        setPointerHeld(true);
+        if (m_panning) {
+            m_panning = false;
+            emit panningChanged();
+        }
         m_panPressPosition = event->position();
         m_panStopsAutoscroll = m_autoscroll.takeStopPress(event->timestamp());
+        {
+            // A view that follows holds still from the press, which leads to
+            // a pan or to autoscroll, either of which leaves it where it is.
+            QMutexLocker lock(&m_stateMutex);
+            const double span = visibleSpanForZoomLocked(m_presentedZoomLevel);
+            const qint64 nowNs = m_nowNs();
+            settleFollowLocked(nowNs);
+            if (span > 0.0 && span < m_durationSeconds && m_follow != Follow::Detached) {
+                detachAtLocked(nowNs, 0.5);
+                m_pressHolds = true;
+            }
+        }
         return;
     }
     if (event->button() != Qt::RightButton || !crosshairEnabled()) { event->ignore(); return; }
@@ -4211,7 +4305,13 @@ void WaveformEditorItem::mousePressEvent(QMouseEvent *event) {
             m_ownSeekLanded = false;
         }
     }
-    event->accept(); emit seekRequested(seconds);
+    event->accept(); setPointerHeld(true); emit seekRequested(seconds);
+}
+
+void WaveformEditorItem::setPanPressed(bool pressed) {
+    if (m_panPressed == pressed) return;
+    m_panPressed = pressed;
+    emit panPressedChanged();
 }
 
 void WaveformEditorItem::mouseMoveEvent(QMouseEvent *event) {
@@ -4219,11 +4319,12 @@ void WaveformEditorItem::mouseMoveEvent(QMouseEvent *event) {
     event->accept();
     const QPointF pointer = event->position();
     const double canvasWidth = std::max(1.0, std::floor(width()));
+    bool startsPan = false;
     {
         QMutexLocker lock(&m_stateMutex);
         // The crosshair keeps to the pointer, which holds the time it
         // grabbed.
-        if (m_hoverActive) m_hoverPosition = pointer;
+        m_hoverPosition = pointer;
         const double span = visibleSpanForZoomLocked(m_presentedZoomLevel);
         // The whole track has nowhere to pan to.
         if (span <= 0.0 || span >= m_durationSeconds) return;
@@ -4235,18 +4336,24 @@ void WaveformEditorItem::mouseMoveEvent(QMouseEvent *event) {
             }
             settleFollowLocked(nowNs);
             detachAtLocked(nowNs, 0.5);
+            m_pressHolds = false;
             // Nothing glides back until the user lets go.
             m_reattachArmed = false;
             m_shownReattachArmed = false;
             m_panning = true;
+            startsPan = true;
             m_panOriginStart = visibleRangeLocked(nowNs).first;
             m_panOriginX = m_panPressPosition.x();
         }
-        // The time grabbed stays under the pointer. Held at an end of the
-        // track, the pan starts again from there, so that a move back
-        // moves the view at once.
-        const double desired = m_panOriginStart
-            - (pointer.x() - m_panOriginX) * span / canvasWidth;
+        // The time grabbed stays under the pointer: the view moves by the
+        // columns the crosshair moves by, not by the pointer's fractions of
+        // one, which the view would round otherwise than the crosshair.
+        // Held at an end of the track, the pan starts again from there, so
+        // that a move back moves the view at once.
+        const double scale = renderScaleLocked();
+        const double columnsMoved = TimeAxis::unboundedColumnAt(pointer.x(), scale)
+            - TimeAxis::unboundedColumnAt(m_panOriginX, scale);
+        const double desired = m_panOriginStart - columnsMoved / scale * span / canvasWidth;
         const double start = std::clamp(desired, 0.0, m_durationSeconds - span);
         if (start != desired) {
             m_panOriginStart = start;
@@ -4255,10 +4362,14 @@ void WaveformEditorItem::mouseMoveEvent(QMouseEvent *event) {
         m_anchorSeconds = start + 0.5 * span;
         m_anchorFraction = 0.5;
     }
+    if (startsPan) emit panningChanged();
     viewMoved();
 }
 
 void WaveformEditorItem::mouseReleaseEvent(QMouseEvent *event) {
+    // The button pressed on the plot is let go: from here the pointer is on
+    // it while it hovers it.
+    if (event->buttons() == Qt::NoButton) setPointerHeld(false);
     if (event->button() != Qt::MiddleButton || !m_panPressed) { event->ignore(); return; }
     event->accept();
     // A middle click that did not drag starts autoscroll, unless it stopped
@@ -4266,14 +4377,20 @@ void WaveformEditorItem::mouseReleaseEvent(QMouseEvent *event) {
     const bool click = !m_panning && ViewAutoscroll::isClick(m_panPressPosition, event->position())
         && !m_panStopsAutoscroll;
     const QPointF pressed = m_panPressPosition;
-    mouseUngrabEvent();
+    m_panScenePosition = mapToScene(event->position());
+    // Autoscroll starts from the view the press holds.
     if (click) startAutoscroll(pressed);
+    mouseUngrabEvent();
 }
 
 void WaveformEditorItem::mouseUngrabEvent() {
+    setPointerHeld(false);
     if (!m_panPressed) return;
-    m_panPressed = false;
-    if (!m_panning) return;
+    setPanPressed(false);
+    if (!m_panning) {
+        releasePressHold();
+        return;
+    }
     m_panning = false;
     {
         QMutexLocker lock(&m_stateMutex);
@@ -4281,7 +4398,17 @@ void WaveformEditorItem::mouseUngrabEvent() {
         // leaves the view where it was put.
         armReattachLocked(m_nowNs());
     }
+    emit panningChanged();
     publishDetached();
+}
+
+void WaveformEditorItem::releasePressHold() {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (!m_pressHolds) return;
+        reattachLocked();
+    }
+    viewMoved();
 }
 
 void WaveformEditorItem::startAutoscroll(QPointF position) {
@@ -4296,6 +4423,7 @@ void WaveformEditorItem::startAutoscroll(QPointF position) {
         // The view stays where it is, as one the user moved does; one
         // detached already keeps its anchor.
         if (m_follow != Follow::Detached) detachAtLocked(nowNs, 0.5);
+        m_pressHolds = false;
         // Nothing glides back until autoscroll stops.
         m_autoscrolling = true;
         m_reattachArmed = false;
@@ -4338,9 +4466,17 @@ void WaveformEditorItem::autoscrollStopped() {
 
 void WaveformEditorItem::wheelEvent(QWheelEvent *event) {
     if (!zoomEnabled()) { event->ignore(); return; }
-    const double steps = event->angleDelta().y() / 120.0;
+    // Touchpads and high-resolution wheels zoom by part of a notch, and
+    // pixel-only events, as some touchpads send, by 120 pixels a notch, as
+    // the spectrogram counts them.
+    constexpr double kWheelAngleUnitsPerNotch = 120.0;
+    constexpr double kWheelPixelsPerNotch = 120.0;
+    const double steps = event->angleDelta().y() != 0
+        ? event->angleDelta().y() / kWheelAngleUnitsPerNotch
+        : event->pixelDelta().y() / kWheelPixelsPerNotch;
     if (std::abs(steps) < 0.01) { event->ignore(); return; }
     event->accept();
+    emit wheelZoomed(mapToScene(event->position()));
     {
         QMutexLocker lock(&m_stateMutex);
         const qint64 nowNs = m_nowNs();

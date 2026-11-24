@@ -211,7 +211,7 @@ void DisplaySleepInhibitorTest::failedInhibitIsReportedWhileRequested() {
     QVERIFY(deliverReplies(backend));
     QCOMPARE(failures.size(), 1);
     const QString message = failures.at(0).at(0).toString();
-    QVERIFY2(message.contains(QStringLiteral("Couldn't keep the screen awake")), qPrintable(message));
+    QVERIFY2(message.contains(QStringLiteral("Couldn\u2019t keep the screen awake")), qPrintable(message));
     QVERIFY2(message.contains(QStringLiteral("no idle service")), qPrintable(message));
 
     // A request released before its reply failed is not reported.

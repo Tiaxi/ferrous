@@ -21,6 +21,10 @@ Menu {
 
     popupType: Popup.Window
 
+    // The items the menu makes itself, such as a submenu's, are the app's
+    // too: their words line up with the other items' at any font.
+    delegate: AppMenuItem {}
+
     // A menu that is a window goes at once when it closes, without the
     // style's fade out; Plasma's compositor fades popup windows itself.
     //
@@ -97,6 +101,29 @@ Menu {
             const item = root.itemAt(i)
             if (item && item.contentItem)
                 item.contentItem.ensurePolished()
+        }
+    }
+
+    // Whether an item of the menu has both a check mark and a glyph, found
+    // out as Breeze's menu finds out whether it has either, as its items
+    // show; such a menu gives marks and glyphs a column each
+    // (AppMenuItem). Kept once found, as Breeze keeps its, so a closed
+    // menu is as wide as it shows.
+    property bool hasMarkedGlyphs: false
+
+    Connections {
+        target: root.contentItem ? root.contentItem.contentItem : null
+
+        function onVisibleChildrenChanged() {
+            if (root.hasMarkedGlyphs)
+                return
+            for (const child of root.contentItem.contentItem.visibleChildren) {
+                if (child.checkable && child.icon
+                        && (child.icon.name !== "" || child.icon.source.toString() !== "")) {
+                    root.hasMarkedGlyphs = true
+                    return
+                }
+            }
         }
     }
 

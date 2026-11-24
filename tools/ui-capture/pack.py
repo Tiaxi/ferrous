@@ -128,8 +128,9 @@ def layout(tiles, max_tiles, label_h, min_tile=MIN_TILE, max_w=MAX_SIDE, max_h=M
         _, cols, tw, k = best
         if k < len(rest):  # balance the pages: as many per page as an even split needs
             n = -(-len(rest) // k)
-            k = -(-len(rest) // n)
-            _, cols, tw, k = best_page(rest, k, label_h, min_tile, max_w, max_h)
+            balanced = best_page(rest, -(-len(rest) // n), label_h, min_tile, max_w, max_h)
+            if balanced is not None:  # (fewer tiles can leave none that meets the bar: keep the full page then)
+                _, cols, tw, k = balanced
         pages.append((cols, tw, rest[:k]))
         rest = rest[k:]
     return pages
@@ -467,7 +468,9 @@ def custom_sheet(rd, sd, entries, name, title, theme, rows):
     image or a column of images; an image (area, state, crop, label) with crop "subject" (the area's item, as
     recorded at the grab), (fx, fy, fw, fh) fractions of the shot, or None (the whole shot)."""
     def strip_tile(c):
-        """A recording's frames at given times (ms after the action), cut around an item it recorded, zoomed."""
+        """A recording's frames at given times (ms after the action), cut around an item it recorded, or around
+        what changed in it (item "changed", with the item c["include"] names in a dialog shot's layout), zoomed, or
+        shrunk to c["fit"] (W, H; the label then says the scale)."""
         import motion_strip
         import numpy as np
         ds = sorted(glob.glob(os.path.join(rd, "strips-raw", f"{c['strip']}_{c.get('theme', theme)}_*")))
@@ -491,8 +494,14 @@ def custom_sheet(rd, sd, entries, name, title, theme, rows):
             follow = tracks[keys[0]]
             ox, oy = (meta.get("crop") or [0, 0])[:2]
         else:
-            box = motion_strip.resolve_rect(c["item"], meta, fw, fh)
-            box = (max(0, box[0] - p_), max(0, box[1] - p_), box[2] + 2 * p_, box[3] + 2 * p_)
+            if c["item"] == "changed":
+                box = change_box(c, ds[0], frames, t0)
+            else:
+                box = motion_strip.resolve_rect(c["item"], meta, fw, fh)
+            x0, y0 = max(0, box[0] - p_), max(0, box[1] - p_)
+            box = (x0, y0, box[2] + 2 * p_, box[3] + 2 * p_)
+            if c["item"] == "changed":  # (inside the frames: no black margin where the change reaches an edge)
+                box = (x0, y0, min(fw - x0, box[2]), min(fh - y0, box[3]))
         cut = []
         rel = 0.0
         if c.get("anchor") == "last-change":
@@ -544,6 +553,14 @@ def custom_sheet(rd, sd, entries, name, title, theme, rows):
                 im = fim.convert("RGB").crop((box[0], box[1], box[0] + box[2], box[1] + box[3]))
             cut.append((f"{frames[k]['t'] - t0 - rel:+.0f} ms" + (" from the change" if rel else ""),
                         im.resize((im.width * z, im.height * z), Image.NEAREST)))
+        label = c["label"]
+        if c.get("fit"):
+            w_, h_ = c["fit"]
+            f_ = min([1.0] + [min(w_ / i.width, h_ / i.height) for _, i in cut])
+            if f_ < 1.0:
+                cut = [(lb, i.resize((int(i.width * f_), int(i.height * f_)), Image.LANCZOS)) for lb, i in cut]
+                label += f" (shown at {f_:.2f}x)"
+                fitted.append(f_)
         g = 10
         S_ = Image.new("RGB", (sum(i.width for _, i in cut) + g * (len(cut) - 1), max(i.height for _, i in cut) + 20),
                        (78, 82, 88))
@@ -553,9 +570,40 @@ def custom_sheet(rd, sd, entries, name, title, theme, rows):
             d_.text((x, 0), lb, fill=(230, 230, 230), font=font(False, 13))
             S_.paste(i, (x, 20))
             x += i.width + g
-        return c["label"], S_, dict(_lh=c.get("lh"), _gap=c.get("gap"),  # (a frame row may set its label's height)
+        return label, S_, dict(_lh=c.get("lh"), _gap=c.get("gap"),  # (a frame row may set its label's height)
                                     file=os.path.basename(ds[0]), area="motion", state=c["strip"], theme=c.get("theme", theme),
                                     desc=c["label"], size=f"{meta['size'][0]}x{meta['size'][1]}", scale=meta.get("scale", 1))
+
+    def change_box(c, d, frames, t0):
+        """(x, y, w, h) around every pixel that changes after the action in a recording, with the rect of the item
+        c["include"] (area, state, name: from that dialog shot's layout, whose coordinates its window's frames
+        have)."""
+        got, prev = None, None
+        for f in frames:
+            with Image.open(os.path.join(d, f["file"])) as fim:
+                im = fim.convert("RGB")
+            if prev is not None and f["t"] >= t0:
+                b = ImageChops.difference(prev, im).convert("L").point(lambda v: 255 if v > 2 else 0).getbbox()
+                if b:
+                    got = b if got is None else (min(got[0], b[0]), min(got[1], b[1]), max(got[2], b[2]), max(got[3], b[3]))
+            prev = im
+        if got is None:
+            raise LookupError(f"custom sheet {name}: nothing changes in {c['strip']}")
+        if c.get("include"):
+            area, state, item = c["include"]
+            es = [e for e in entries if tile_matches(e, area, state, c.get("theme", theme))]
+            g_ = (es[0].get("grabbed") or {}) if es else {}
+            if not es or not es[0].get("layout"):
+                raise LookupError(f"custom sheet {name}: no layout of {area}/{state} to take {item} from")
+            with open(os.path.join(rd, es[0]["layout"])) as lf:
+                wins = json.load(lf)["windows"]
+            w_ = next((w for w in wins if w.get("cls") == g_.get("cls")), wins[-1])
+            rs = [t["rect"] for t in (w_.get("texts") or []) + (w_.get("actions") or []) if t.get("name") == item]
+            if not rs:
+                raise LookupError(f"custom sheet {name}: no {item} in {area}/{state}'s layout")
+            x, y, w, h = rs[0]
+            got = (min(got[0], x), min(got[1], y), max(got[2], x + w), max(got[3], y + h))
+        return (int(got[0]), int(got[1]), math.ceil(got[2] - got[0]), math.ceil(got[3] - got[1]))
 
     def tile(area, state, crop, label, opts=None):
         sc_ = (opts or {}).get("scale", 1)
@@ -1922,11 +1970,18 @@ def write_motion_metrics(rd, strips, geo_samples=None):
          "auto-hide 5 s later), and the time between them is a hold or a wait, part of no transition. With content "
          "that keeps moving (playback), only frames that change clearly more than that motion count. **Recording**: "
          "the whole recording. **Blink**, per scope: the longest dip (at most 250 ms) of the scope's ink (mean colour "
-         "distance from its background) below 50 % of its level before and after the transition; scope *text* = "
+         "distance from its background) to 50 % or less of its level before and after the transition; scope *text* = "
          "the rects of the text items shown (item tree), *other* = the rest of the change box (cover art, icons, "
          "plots); — = the scope does not change. **Blink per element** (states.ELEMENT_INK; the now-playing title, artist "
          "line and details line): the same measure in each element's own rect, at full resolution, so a local dim is "
-         "not averaged away. **Overlap**: during a transition, two text items in the same place "
+         "not averaged away. **Blink per changed item**: an item (a popup, a list) whose traced opacity dips to 50 % or "
+         "less, or by over 25 % for over 30 ms, and returns in its place, where the frames show the dip in its own "
+         "rect; of items dipping together the largest. **Whole window under the darker end**: the lowest of the "
+         "window's mean luminance (of the sRGB values as the compositor blends them, 45 ms blend) as a share of the "
+         "darker of a transition's two ends; under 97 % is a DIP. **Under the one-layer mix** (cross-fades, "
+         "states.MOTION_FOCUS cross_fade): each frame fitted as a mix of the two ends at one opacity, and the most "
+         "its luminance falls under that mix's; over 3 % FAILS (layers that fade apart). "
+         "**Overlap**: during a transition, two text items in the same place "
          "both above 30 % opacity, one mid-fade (item tree). **After end**: movement after the stated end (the QML "
          "animations that started in the transition: start + duration). Each transition's merged image "
          "(`strips/<strip>.png`) has the key frames, the graph with the animations that ran, and the "
@@ -1936,8 +1991,8 @@ def write_motion_metrics(rd, strips, geo_samples=None):
          "and other popups (items on a popup layer), so a tooltip fading in after a transition is not read as the "
          "transition running long. **Neither** (plot recordings only): frames that are neither the start nor the end "
          "nor a blend of them.\n",
-         "| transition | theme | latency | transitions (start: duration) | recording | blink: text / other | blink per element (own rect) | text overlap | after stated end: the app's items | after stated end: tooltip/popup | neither | animations that ran | image |",
-         "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+         "| transition | theme | latency | transitions (start: duration) | recording | blink: text / other | blink per changed item | blink per element (own rect) | whole window under the darker end | under the one-layer mix | text overlap | after stated end: the app's items | after stated end: tooltip/popup | neither | animations that ran | image |",
+         "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for (name, theme), s in seen.items():
         m = s["metrics"]
         anims = "; ".join(f"{a['target']}.{a['prop']} {a['frm']}→{a['to']} {a['duration']} ms {a['easing']} "
@@ -1947,15 +2002,23 @@ def write_motion_metrics(rd, strips, geo_samples=None):
         segs = ", ".join(f"+{g['start_ms']}: {g['duration_ms']} ms" for g in m["segments"]) or "none"
         bl = " / ".join("—" if v is None else f"{v} ms" for v in (m["blink_text_ms"], m["blink_other_ms"]))
         el = "; ".join(f"{e['label']} {e['blink_ms']} ms" for e in m.get("elements", [])) or "—"
+        items = m.get("blink_items")
+        ib = "—" if items is None else "; ".join(
+            f"{b['label'].replace('|', '/')} {b['ms']} ms (to {100 * b['low']:.0f} %) at +{b['start_ms']}"
+            for b in items) or "0 ms"
+        dip, mix = m.get("window_dip"), m.get("mix_shortfall")
+        wd = "—" if not dip else f"{100 * dip['low']:.0f} %" + (f" DIP at +{dip['at_ms']}" if dip["flag"] else "")
+        ms_ = "—" if not mix else f"{100 * mix['short']:.0f} %" + (f" FAIL at +{mix['at_ms']}" if mix["flag"] else "")
         L.append(f"| {name} | {theme} | {m['latency_ms']} ms | {segs}{' (content keeps moving)' if m['continuous'] else ''} | "
-                 f"{m['recording_ms']} ms | {bl} | {el} | {m['overlap_ms']} ms | {after_cell(m, 'app')} | "
+                 f"{m['recording_ms']} ms | {bl} | {ib} | {el} | {wd} | {ms_} | {m['overlap_ms']} ms | {after_cell(m, 'app')} | "
                  f"{after_cell(m, 'overlay')} | {'—' if m.get('neither_ms') is None else str(m['neither_ms']) + ' ms'} | "
                  f"{anims or '—'} | `strips/{s['file']}` |")
     for (name, theme), (times, rows, note, *_pf) in sorted((geo_samples or {}).items()):
         L += ["", f"## {name} ({theme}): geometry every {times[1] - times[0]} ms\n",
               f"Each item's rect (window px: its top y and height) and opacity from the trace, sampled at evenly spaced "
               f"times ({note}); *library first row* is the topmost shown row title.\n"] + geometry_table(times, rows)
-    open(os.path.join(rd, "MOTION-METRICS.md"), "w").write("\n".join(L) + "\n")
+    with open(os.path.join(rd, "MOTION-METRICS.md"), "w") as f_mm:
+        f_mm.write("\n".join(L) + "\n")
 
 
 def toc(entries, sheets, strips, core):
@@ -2240,7 +2303,14 @@ def strip_facts(m):
               + (f", opacities settle at +{g['settle_ms']} ms" if g.get("settle_ms") is not None else "")
               for g in m["handover_by_transition"]]
         hv = ["per transition " + "; ".join(hv) + (f" (the longest animation {h_['anim_longest']})" if h_.get("anim_longest") else "")]
-    parts = [f"latency {m['latency_ms']} ms"] + ([f"visual handover: {', '.join(hv)}"] if hv else []) + [
+    first = []
+    if m.get("crosshair"):  # (first: the fact a pan is read for)
+        import motion_strip
+        first = [motion_strip.crosshair_text(m["crosshair"])]
+    if m.get("crosshair_presence"):  # (first too: the fact a zoom is read for)
+        import motion_strip
+        first.append(motion_strip.presence_text(m["crosshair_presence"]))
+    parts = first + [f"latency {m['latency_ms']} ms"] + ([f"visual handover: {', '.join(hv)}"] if hv else []) + [
         f"pixel transition {m['duration_ms']} ms ({m['frames_60']} frames at 60 fps; every changed pixel, playback content "
         "and tooltips included)"]
     if len(segs) > 1:
@@ -2264,7 +2334,15 @@ def strip_facts(m):
           f"other {m['blink_other_ms']} ms" if m.get("blink_other_ms") is not None else "other —"]
     if m.get("blink_plot_ms") is not None:
         bl.append(f"plot content {m['blink_plot_ms']} ms")
+    if m.get("blink_items") is not None:
+        bl.append(f"changed items {max([b['ms'] for b in m['blink_items']], default=0)} ms")
     parts.append("blink " + " / ".join(bl))
+    if m.get("blink_items"):
+        import motion_strip
+        parts.append("ITEM BLINK: " + "; ".join(motion_strip.item_blink_text(b) for b in m["blink_items"]))
+    if m.get("window_dip") or m.get("mix_shortfall"):
+        import motion_strip
+        parts.extend(motion_strip.fade_texts(m))
     el = [f"{e['label']} {e['blink_ms']} ms" for e in m.get("elements", []) if e.get("blink_ms")]
     if el:
         parts.append("element blinks: " + "; ".join(el))
@@ -2306,7 +2384,7 @@ FLOOR_ORDER = ["unfilled", "pre-start", "silence", "post-end", "ends-early-cente
 
 
 def write_core_facts(rd, core, strips, geo_samples, entries=(), out="CORE-FACTS.md", ids=None, looks=None,
-                     fact_keys=None, title=None, intro=None, floor_labels=None, a11y=None, extra=None, contrast_map=None,
+                     fact_keys=None, fact_skip=(), title=None, intro=None, floor_labels=None, a11y=None, extra=None, contrast_map=None,
                      lead=None):
     """CORE-FACTS.md, the core images' measured facts as text (a reviewer keeps notes from text when the images
     leave its context): per sheet its tiles' states, sizes, key colours, layout findings and contrast rows; per
@@ -2321,7 +2399,8 @@ def write_core_facts(rd, core, strips, geo_samples, entries=(), out="CORE-FACTS.
     pairs = {f"pair:{nm}": (a_, b_) for nm, a_, b_, *_ in getattr(st, "STRIP_PAIRS", [])}
     # (the focus pack's FOCUS-FACTS.md: its own IDs, what to look at, only its facts and floor regions)
     if fact_keys is not None:
-        facts = [f_ for f_ in facts if any(f_["key"].startswith(k) for k in fact_keys)]
+        facts = [f_ for f_ in facts if any(f_["key"].startswith(k) for k in fact_keys)
+                 and not any(f_["key"].startswith(k) for k in fact_skip)]
     if floor_labels is not None:
         floors = [f_ for f_ in floors if f_["label"] in floor_labels]
     L = [title or "# Core facts: what was measured in each core image\n",
@@ -2361,6 +2440,9 @@ def write_core_facts(rd, core, strips, geo_samples, entries=(), out="CORE-FACTS.
                     + (f"; … {len(rows) - 14} more rows" if len(rows) > 14 else ""))
             if x.get("group") == "closeups" and floors:
                 L.append("- The plot's empty regions, sampled: see *Plot empty regions* below.")
+            if x.get("recording"):  # (a focus sheet of one recording's frames: that recording's metrics)
+                nm_ = x["recording"]
+                L.append(f"- The recording ({nm_}): " + strip_facts((by_name.get((nm_, x["theme"])) or {}).get("metrics")))
             L.append("")
         else:
             i_m += 1
@@ -2509,7 +2591,9 @@ def focus_strip_needs(names):
     view_of = {f"{nm}-{sfx}": nm for nm, views in getattr(st, "EXTRA_VIEWS", {}).items() for sfx, _ in views}
     need = set()
     for sc_f in (focus.SCOPES[n_] for n_ in names):
-        for kind, nm, *_ in sc_f.get("images", []):
+        for kind, nm, _th, _show, _look, *opt_ in sc_f.get("images", []):
+            if opt_ and opt_[0].get("recording"):  # (a sheet of a recording's frames, which carries its facts)
+                need.add(opt_[0]["recording"])
             if kind == "strip":
                 # (another view of a recording, states.EXTRA_VIEWS, is made from that recording)
                 need |= {view_of.get(h.partition("@")[0], h.partition("@")[0]) for h in pair_map.get(nm, (nm,))}
@@ -2622,6 +2706,11 @@ def write_focus(rd, src, scope_name, entries, sheets, strips, geo_samples):
                 continue
             fails.append(f"focus image {kind} {nm} ({theme}) is missing from the round")
             continue
+        rec_ = opt_[0].get("recording") if opt_ else None
+        if rec_:  # (a sheet of a recording's frames, with that recording's facts under it)
+            if (rec_, theme) not in by_strip:
+                fails.append(f"focus sheet {nm}: the recording {rec_} ({theme}) was not measured")
+            x = dict(x, recording=rec_)
         items.append((kind, x)); shows.append(show); looks.append(look)
         if kind == "strip":  # any neither frames: their contact sheet next
             for half in (pairs.get(nm) or (nm,)):
@@ -2748,7 +2837,7 @@ def write_focus(rd, src, scope_name, entries, sheets, strips, geo_samples):
     if sc_.get("system_facts"):
         lead = system_lead(rd, items, ids) + [""] + (lead or [])
     write_core_facts(rd, items, strips, geo_samples, entries, out=f"focus-build/{scope_name}/FOCUS-FACTS.md", ids=ids, looks=looks, lead=lead,
-                     fact_keys=sc_.get("facts", []), floor_labels=sc_.get("floors"),
+                     fact_keys=sc_.get("facts", []), fact_skip=sc_.get("facts_skip", ()), floor_labels=sc_.get("floors"),
                      title=f"# Focus facts: {sc_['title']}\n",
                      intro="What was measured in each focus image (IDs as in FOCUS.md), as text: tiles' states, key "
                            "colours, layout findings and contrast rows; recordings' motion metrics; then the sampled "
@@ -3018,7 +3107,8 @@ def _write_index_rest(rd, rnd, src, rev, dirty, entries, sheets, strips, core, c
         docs.append("`CONTRAST.md` — WCAG contrast ratios sampled from the rendered pixels, both themes.")
     if os.path.exists(os.path.join(rd, "MOTION-METRICS.md")):
         docs.append("`MOTION-METRICS.md` — per transition: latency, each transition's duration, the recording, blink "
-                    "per scope (text, other), text overlap, movement after the stated end, the QML animations that ran.")
+                    "per scope (text, other), text overlap, the whole window under its darker end, cross-fades under the "
+                    "one-layer mix of their ends, movement after the stated end, the QML animations that ran.")
     n_a11y, n_unnamed = write_focus_a11y(rd)
     if n_a11y:
         docs.append(f"`FOCUS-A11Y.md` — the focus walk's accessibility transcript: role, name, value and states at each of "

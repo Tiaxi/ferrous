@@ -19,7 +19,9 @@ import "../components" as Components
 // An error has one treatment here (it had three: red semibold words for a
 // stopped engine, plain words for one not running, and a glyph with words
 // for the issues and a failed scrobble): its words in the text colour
-// beside a 16 px glyph in the negative colour.
+// beside a 16 px glyph in the negative colour. Severity has one shape and
+// one colour wherever an issue shows: an error's ring with a cross in the
+// negative colour, a warning's triangle in the secondary one.
 ToolBar {
     id: root
 
@@ -40,8 +42,11 @@ ToolBar {
     readonly property bool narrow: root.width < 1200
 
     // The bar under its 1 px seam: 24 px, or the small text's line and 4 px
-    // above and below it when that is more.
-    readonly property real barHeight: Math.max(24, Math.round(smallMetrics.height) + 8)
+    // above and below it when that is more, or the Last.fm glyph clear of
+    // the slot's focus ring, with 1 px above and below, at a font where
+    // that is more.
+    readonly property real barHeight: Math.max(24, Math.round(smallMetrics.height) + 8,
+        scrobbleIndicator.minimumBlockHeight + 2)
 
     implicitHeight: root.topPadding + root.barHeight
     leftPadding: 12
@@ -68,6 +73,12 @@ ToolBar {
         ? Math.max(0, Number(root.errorController.unseenCount) || 0)
         : 0
     readonly property bool hasUnseenError: root.unseenErrorCount > 0
+    // Whether an error, rather than warnings alone, is among the new
+    // issues.
+    readonly property bool unseenIncludesError: root.errorController
+        ? (Number(root.errorController.unseenErrorCount) || 0) > 0
+        : false
+    readonly property url errorGlyph: Qt.resolvedUrl("../assets/status-error.svg")
     readonly property string backendFailure: root.uiBridge.backendFailure || ""
     readonly property bool backendStopped: root.backendFailure.length > 0
     readonly property bool isDisconnected: !root.uiBridge.connected && !root.backendStopped
@@ -99,10 +110,30 @@ ToolBar {
             parts.push(root.channelText)
         }
         if (root.bitrateKbps > 0) {
-            parts.push(I18n.i18nc("@info:status bitrate", "%1 kbps", root.bitrateKbps))
+            parts.push(root.bitrateText(root.bitrateKbps))
         }
         return parts
     }
+
+    function bitrateText(kbps) {
+        return I18n.i18nc("@info:status bitrate", "%1 kbps", kbps)
+    }
+    // The room a bitrate keeps, in tabular figures: that of the most digits
+    // the track's bitrate has had, and at least three. The bitrate changes
+    // as the track plays, and its digits held for the track keep the modes
+    // after it still while a lossless one goes over 1,000 kbps and back;
+    // a new track starts again from the digits of its bitrate as it is.
+    // (The room of four digits for every track left some 15 px after
+    // "514 kbps", so the groups stood 20, 33 and 20 px apart.)
+    readonly property real bitrateRoom: Math.ceil(bitrateMetrics.advanceWidth)
+    property int bitrateDigits: 3
+    readonly property string bitrateTrack: root.uiBridge.currentTrackPath || ""
+    function bitrateDigitsOf(kbps) {
+        return Math.max(3, String(kbps).length)
+    }
+    onBitrateTrackChanged: root.bitrateDigits = root.bitrateDigitsOf(root.bitrateKbps)
+    onBitrateKbpsChanged: root.bitrateDigits = Math.max(root.bitrateDigits, root.bitrateDigitsOf(root.bitrateKbps))
+    Component.onCompleted: root.bitrateDigits = root.bitrateDigitsOf(root.bitrateKbps)
 
     readonly property bool scanning: root.uiBridge.libraryScanInProgress === true
     readonly property int scanProcessed: Math.max(0, Number(root.uiBridge.libraryScanProcessed) || 0)
@@ -135,9 +166,23 @@ ToolBar {
     readonly property string scanCountText: root.scanTotalKnown
         ? root.percentText(root.scanPercent)
         : root.scanProcessed > 0
-            ? I18n.i18ncp("@info:status %2 is the files scanned so far", "%2 file", "%2 files",
-                root.scanProcessed, root.formatCount(root.scanProcessed))
+            ? root.scannedFilesText(root.scanProcessed)
             : ""
+
+    // The widest count of files scanned with as many digits as the count,
+    // and at least three: 999, 9,999, 99,999 and so on. The count only
+    // grows through a scan, so the room it keeps after the words grows at
+    // 1,000 and 10,000 files and never shrinks while the scan goes on
+    // (the room of "99,999 files" from the first file left a hole of some
+    // 30 px after "57 files").
+    readonly property int scanCountReserve: Math.pow(10, Math.max(3, String(root.scanProcessed).length)) - 1
+
+    // The files scanned so far, as the scan without a total counts them:
+    // "412 files".
+    function scannedFilesText(count) {
+        return I18n.i18ncp("@info:status %2 is the files scanned so far", "%2 file", "%2 files",
+            count, root.formatCount(count))
+    }
 
     // A percent as the status bar shows it: "42%".
     function percentText(percent) {
@@ -167,6 +212,16 @@ ToolBar {
         font.pointSize: root.uiPalette.smallPointSize
     }
 
+    TextMetrics {
+        id: bitrateMetrics
+        font.family: root.uiPalette.baseFont.family
+        font.pointSize: root.uiPalette.smallPointSize
+        font.features: root.uiPalette.tabularFigures
+        // As a number of the held digits, which is written as a bitrate
+        // is.
+        text: root.bitrateText(Math.pow(10, root.bitrateDigits) - 1)
+    }
+
     // A 12 px label of the status bar.
     component StatusLabel: Label {
         textFormat: Text.PlainText
@@ -176,11 +231,29 @@ ToolBar {
         elide: Text.ElideRight
     }
 
+    // An error's glyph, and Repeat's and Shuffle's: 16 px, as the Last.fm
+    // slot's, the size Breeze draws the modes for (at 14 px their lines
+    // were soft).
+    readonly property int smallGlyphSize: Kirigami.Units.iconSizes.small
+    readonly property int errorGlyphSize: root.smallGlyphSize
+
     // A glyph of the status bar: a theme icon drawn in `color`, `size` at
     // the default font and larger with a larger one, at that size rather
     // than rounded down to a theme icon size.
-    // An error's glyph: 16 px, as the Last.fm slot's.
-    readonly property int errorGlyphSize: Kirigami.Units.iconSizes.small
+
+    // How far above the status bar's seam every tooltip of its items ends:
+    // one line for all of them, as Recent Issues stands off it (the engine's
+    // tooltip floated over it, the others sat on it).
+    readonly property int toolTipClearance: Kirigami.Units.smallSpacing + 2
+
+    // A tooltip of one of the bar's items, `owner`, a child of its row: its
+    // text as it is, never as markup (a folder's name or Last.fm's words
+    // are in some), centred over the item and clear of the bar.
+    component StatusToolTip: Components.PlainToolTip {
+        required property Item owner
+        y: -(root.contentItem.y + owner.y) - height - root.toolTipClearance
+        delay: Kirigami.Units.toolTipDelay
+    }
 
     component StatusGlyph: Kirigami.Icon {
         property int size: 14
@@ -196,53 +269,89 @@ ToolBar {
 
         // The playback engine, the app's backend, has stopped with a
         // failure, or has not started or has stopped without one to report:
-        // an error, in the user's words, with what to do in the tooltip.
-        Row {
+        // an error, in the user's words, with why and what to do in the
+        // tooltip. The glyph and the words are one: the pointer over either
+        // shows the tooltip (over the glyph it showed none), and keyboard
+        // focus shows it too, in the status bar's focus ring, 6 px outside
+        // them as the issues button's is.
+        Control {
+            id: engineError
             objectName: "statusBarEngineError"
             visible: root.backendStopped || root.isDisconnected
-            spacing: 6
             Layout.alignment: Qt.AlignVCenter
-
-            StatusGlyph {
-                objectName: "statusBarEngineErrorGlyph"
-                anchors.verticalCenter: parent.verticalCenter
-                size: root.errorGlyphSize
-                source: Qt.resolvedUrl("../assets/status-warning.svg")
-                color: root.uiPalette.negative
-            }
-
-            StatusLabel {
-                objectName: "statusBarBackendStoppedLabel"
-                anchors.verticalCenter: parent.verticalCenter
-                visible: root.backendStopped
-                text: I18n.i18nc("@info:status", "Playback engine stopped")
-                color: root.uiPalette.text
-
-                HoverHandler {
-                    id: stoppedHover
-                }
-                // Why it stopped or could not start, and what to do.
-                ToolTip.visible: stoppedHover.hovered
-                ToolTip.delay: Kirigami.Units.toolTipDelay
-                ToolTip.text: root.backendFailure
-                Accessible.description: ToolTip.text
-            }
-
-            StatusLabel {
-                objectName: "statusBarDisconnectedLabel"
-                anchors.verticalCenter: parent.verticalCenter
-                visible: root.isDisconnected
-                text: I18n.i18nc("@info:status", "Playback engine not running")
-                color: root.uiPalette.text
-
-                HoverHandler {
-                    id: disconnectedHover
-                }
-                ToolTip.visible: disconnectedHover.hovered
-                ToolTip.delay: Kirigami.Units.toolTipDelay
-                ToolTip.text: I18n.i18nc("@info:tooltip",
+            implicitHeight: root.barHeight - 2
+            // None of the style's padding: the glyph where the playback
+            // state's is, and the ring outside them.
+            leftPadding: 0
+            rightPadding: 0
+            topPadding: 0
+            bottomPadding: 0
+            leftInset: -6
+            rightInset: -6
+            hoverEnabled: true
+            focusPolicy: Qt.TabFocus
+            readonly property string text: root.backendStopped
+                ? I18n.i18nc("@info:status", "Playback engine stopped")
+                : I18n.i18nc("@info:status", "Playback engine not running")
+            // Why it stopped, in the backend's words, or what to do.
+            readonly property string toolTipText: root.backendStopped
+                ? root.backendFailure
+                : I18n.i18nc("@info:tooltip",
                     "Ferrous can't play music until its playback engine runs. Restart Ferrous to try again.")
-                Accessible.description: ToolTip.text
+            Accessible.role: Accessible.StaticText
+            Accessible.name: engineError.text
+            Accessible.description: engineError.toolTipText
+
+            StatusToolTip {
+                objectName: "statusBarEngineErrorToolTip"
+                owner: engineError
+                message: engineError.toolTipText
+                visible: (engineError.hovered || engineError.visualFocus) && engineError.toolTipText.length > 0
+            }
+
+            background: Rectangle {
+                objectName: "statusBarEngineErrorBackground"
+                radius: 3
+                color: "transparent"
+                border.width: engineError.visualFocus ? 2 : 0
+                border.color: root.uiPalette.focusRing
+            }
+
+            contentItem: Item {
+                implicitWidth: engineErrorRow.implicitWidth
+                implicitHeight: engineErrorRow.implicitHeight
+
+                Row {
+                    id: engineErrorRow
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 6
+
+                    StatusGlyph {
+                        objectName: "statusBarEngineErrorGlyph"
+                        anchors.verticalCenter: parent.verticalCenter
+                        size: root.errorGlyphSize
+                        source: root.errorGlyph
+                        color: root.uiPalette.negative
+                    }
+
+                    StatusLabel {
+                        objectName: "statusBarBackendStoppedLabel"
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: root.backendStopped
+                        text: I18n.i18nc("@info:status", "Playback engine stopped")
+                        color: root.uiPalette.text
+                        Accessible.ignored: true
+                    }
+
+                    StatusLabel {
+                        objectName: "statusBarDisconnectedLabel"
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: root.isDisconnected
+                        text: I18n.i18nc("@info:status", "Playback engine not running")
+                        color: root.uiPalette.text
+                        Accessible.ignored: true
+                    }
+                }
             }
         }
 
@@ -270,141 +379,196 @@ ToolBar {
             }
         }
 
-        // Repeat and shuffle, each a glyph and its menu item's words;
-        // nothing when both are off.
-        Row {
-            objectName: "statusBarRepeatShuffle"
-            visible: root.showTrackSections && (root.uiBridge.repeatMode === 1
-                || root.uiBridge.repeatMode === 2 || root.uiBridge.shuffleEnabled === true)
-            spacing: 16
-            Layout.alignment: Qt.AlignVCenter
-
-            Row {
-                visible: root.uiBridge.repeatMode === 1 || root.uiBridge.repeatMode === 2
-                spacing: 6
-                anchors.verticalCenter: parent.verticalCenter
-
-                StatusGlyph {
-                    anchors.verticalCenter: parent.verticalCenter
-                    source: root.uiBridge.repeatMode === 1 ? "media-playlist-repeat-song" : "media-playlist-repeat"
-                }
-
-                StatusLabel {
-                    objectName: "statusBarRepeatLabel"
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: root.uiBridge.repeatMode === 1
-                        ? I18n.i18nc("@info:status", "Repeat One Track")
-                        : I18n.i18nc("@info:status", "Repeat Whole Queue")
-                }
-            }
-
-            Row {
-                objectName: "statusBarShuffle"
-                visible: root.uiBridge.shuffleEnabled === true
-                spacing: 6
-                anchors.verticalCenter: parent.verticalCenter
-
-                StatusGlyph {
-                    objectName: "statusBarShuffleGlyph"
-                    anchors.verticalCenter: parent.verticalCenter
-                    source: "media-playlist-shuffle"
-                }
-
-                StatusLabel {
-                    objectName: "statusBarShuffleLabel"
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: I18n.i18nc("@info:status", "Shuffle")
-                }
-            }
-        }
-
-        // The format group: "FLAC · 16-bit / 44.1 kHz · Stereo · 557 kbps".
-        // It fills the room left, and shows as many of its parts as fit
-        // there whole, dropping them from the end (it went by the
-        // window's width, and showed "FLAC" alone with most of the bar
-        // empty). Its width is the layout's, never its text's, so what it
-        // shows cannot move the layout.
+        // The format, then repeat and shuffle, and the bar's free room after
+        // them: the format keeps one x as the modes toggle (after them, it
+        // jumped some 210 px). Not a layout: the format is as wide as the
+        // parts of it that fit the room the modes leave, so that they
+        // follow what it shows, and a layout would feed that back into the
+        // room.
         Item {
-            id: formatGroup
-            objectName: "statusBarFormat"
+            id: leadingGroups
             Layout.fillWidth: true
-            Layout.minimumWidth: 0
             Layout.fillHeight: true
-            clip: formatRow.implicitWidth > width
-            // How many of the parts fit: each one's width, after the first
-            // with the separator before it.
-            readonly property int shownCount: {
-                const parts = root.formatParts
-                const dot = Math.ceil(formatMetrics.advanceWidth(FormatUtils.fieldSeparator))
-                let used = 0
-                for (let i = 0; i < parts.length; ++i) {
-                    used += Math.ceil(formatMetrics.advanceWidth(parts[i])) + (i > 0 ? dot : 0)
-                    if (used > formatGroup.width) {
-                        return i
+            Layout.preferredWidth: formatGroup.wholeWidth + leadingGroups.modesRoom
+            // The modes whole, at the format's x once none of it fits: no
+            // gap before them then.
+            Layout.minimumWidth: modesRow.visible ? Math.ceil(modesRow.width) : 0
+            readonly property real modesGap: root.formatParts.length > 0 ? 16 : 0
+            readonly property real modesRoom: modesRow.visible
+                ? Math.ceil(modesRow.width) + leadingGroups.modesGap : 0
+
+            // The format group: "FLAC · 16-bit / 44.1 kHz · Stereo · 557 kbps".
+            // It shows as many of its parts as fit whole in the room the
+            // modes leave, dropping them from the end (it went by the
+            // window's width, and showed "FLAC" alone with most of the bar
+            // empty), and is as wide as those. A bitrate has the room of
+            // the most digits it has had in the track, so that one that
+            // changes doesn't move the modes after it.
+            Item {
+                id: formatGroup
+                objectName: "statusBarFormat"
+                height: parent.height
+                width: formatGroup.shownCount < root.formatParts.length
+                    ? (formatGroup.shownCount > 0 ? formatGroup.partEnds[formatGroup.shownCount - 1] : 0)
+                    : Math.min(formatGroup.wholeWidth, formatGroup.room)
+                clip: formatRow.implicitWidth > width
+                readonly property real room: Math.max(0, Math.floor(leadingGroups.width - leadingGroups.modesRoom))
+                // Where each part ends, after the first with the separator
+                // before it, and the bitrate with its room: the parts up to
+                // it measured as one, so the gap after them is the 16 px
+                // the modes keep (each part in whole pixels left up to 7 px
+                // more).
+                readonly property var partEnds: {
+                    const bitrateAt = root.bitrateKbps > 0 ? root.formatParts.length - 1 : -1
+                    const measured = root.formatParts.map((part, i) => i === bitrateAt
+                        ? root.bitrateText(Math.max(root.bitrateKbps, Math.pow(10, root.bitrateDigits) - 1))
+                        : part)
+                    return measured.map((part, i) =>
+                        formatGroup.widthOf(measured.slice(0, i + 1).join(FormatUtils.fieldSeparator)))
+                }
+                // All of it, with a bitrate's room also while none is known.
+                readonly property real wholeWidth: formatGroup.partEnds.length === 0 ? 0
+                    : formatGroup.partEnds[formatGroup.partEnds.length - 1] + (root.bitrateKbps > 0 ? 0
+                        : formatGroup.widthOf(FormatUtils.fieldSeparator) + root.bitrateRoom)
+                // In whole pixels of the font as it is: advanceWidth() alone
+                // tells no binding that the font it measures in has changed,
+                // and the first widths are in the font before the label's.
+                function widthOf(text) {
+                    return formatMetrics.font ? Math.ceil(formatMetrics.advanceWidth(text)) : 0
+                }
+                // How many of the parts fit.
+                readonly property int shownCount: {
+                    const ends = formatGroup.partEnds
+                    for (let i = 0; i < ends.length; ++i) {
+                        if (ends[i] > formatGroup.room) {
+                            return i
+                        }
+                    }
+                    return ends.length
+                }
+                readonly property var shownParts: root.formatParts.slice(0, formatGroup.shownCount)
+                readonly property string text: formatGroup.shownParts.join(FormatUtils.fieldSeparator)
+
+                // The status bar's 12 px label font, with its tabular figures.
+                FontMetrics {
+                    id: formatMetrics
+                    font: formatProbe.font
+                }
+                StatusLabel {
+                    id: formatProbe
+                    visible: false
+                    Accessible.ignored: true
+                }
+
+                Row {
+                    id: formatRow
+                    objectName: "statusBarFormatRow"
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: root.showTrackSections
+
+                    Repeater {
+                        model: formatGroup.shownParts
+
+                        delegate: Row {
+                            required property int index
+                            required property string modelData
+
+                            // The headers' separator, a middle dot between
+                            // two spaces, at their spacing (a dot
+                            // with 6 px either side stood wider than theirs).
+                            StatusLabel {
+                                objectName: "statusBarFormatSeparator"
+                                visible: index > 0
+                                text: FormatUtils.fieldSeparator
+                                color: root.uiPalette.textTertiary
+                                Accessible.ignored: true
+                            }
+
+                            StatusLabel {
+                                textFormat: Text.PlainText
+                                text: modelData
+                            }
+                        }
                     }
                 }
-                return parts.length
-            }
-            readonly property var shownParts: root.formatParts.slice(0, formatGroup.shownCount)
-            readonly property string text: formatGroup.shownParts.join(FormatUtils.fieldSeparator)
-
-            // The status bar's 12 px label font, with its tabular figures.
-            FontMetrics {
-                id: formatMetrics
-                font: formatProbe.font
-            }
-            StatusLabel {
-                id: formatProbe
-                visible: false
-                Accessible.ignored: true
             }
 
+            // Repeat and shuffle, each a glyph and its menu item's words, 16 px
+            // after the format; nothing when both are off.
             Row {
-                id: formatRow
-                objectName: "statusBarFormatRow"
-                anchors.verticalCenter: parent.verticalCenter
-                visible: root.showTrackSections
+                id: modesRow
+                objectName: "statusBarRepeatShuffle"
+                visible: root.showTrackSections && (root.uiBridge.repeatMode === 1
+                    || root.uiBridge.repeatMode === 2 || root.uiBridge.shuffleEnabled === true)
+                spacing: 16
+                x: formatGroup.width > 0 ? formatGroup.width + leadingGroups.modesGap : 0
+                y: Math.round((parent.height - height) / 2)
 
-                Repeater {
-                    model: formatGroup.shownParts
+                Row {
+                    visible: root.uiBridge.repeatMode === 1 || root.uiBridge.repeatMode === 2
+                    spacing: 6
+                    anchors.verticalCenter: parent.verticalCenter
 
-                    delegate: Row {
-                        required property int index
-                        required property string modelData
+                    StatusGlyph {
+                        objectName: "statusBarRepeatGlyph"
+                        anchors.verticalCenter: parent.verticalCenter
+                        size: root.smallGlyphSize
+                        source: root.uiBridge.repeatMode === 1 ? "media-playlist-repeat-song" : "media-playlist-repeat"
+                    }
 
-                        // The headers' separator, a middle dot between
-                        // two spaces, at their spacing (a dot
-                        // with 6 px either side stood wider than theirs).
-                        StatusLabel {
-                            objectName: "statusBarFormatSeparator"
-                            visible: index > 0
-                            text: FormatUtils.fieldSeparator
-                            color: root.uiPalette.textTertiary
-                            Accessible.ignored: true
-                        }
+                    StatusLabel {
+                        objectName: "statusBarRepeatLabel"
+                        anchors.verticalCenter: parent.verticalCenter
+                        // Whole pixels, for Shuffle's glyph after it.
+                        width: Math.ceil(implicitWidth)
+                        text: root.uiBridge.repeatMode === 1
+                            ? I18n.i18nc("@info:status", "Repeat One Track")
+                            : I18n.i18nc("@info:status", "Repeat Whole Queue")
+                    }
+                }
 
-                        StatusLabel {
-                            text: modelData
-                        }
+                Row {
+                    objectName: "statusBarShuffle"
+                    visible: root.uiBridge.shuffleEnabled === true
+                    spacing: 6
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    StatusGlyph {
+                        objectName: "statusBarShuffleGlyph"
+                        anchors.verticalCenter: parent.verticalCenter
+                        size: root.smallGlyphSize
+                        source: "media-playlist-shuffle"
+                    }
+
+                    StatusLabel {
+                        objectName: "statusBarShuffleLabel"
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: I18n.i18nc("@info:status", "Shuffle")
                     }
                 }
             }
         }
 
-        // The library scan: "Scanning “Music”… 34%" and a bar that moves
-        // with the scan's batches; narrow: "Scanning… 34%". Its words say
+        // The library scan: "Scanning “Music”…", a bar that moves with the
+        // scan's batches, and "34%"; narrow: "Scanning… 34%". Its words say
         // what the bar is (a bare bar read as a twin of the
         // Last.fm slot's). Without a total: "Scanning “Music”… 412 files",
         // the count being the progress; the bar shows once there is a total
-        // to fill it against. The percent keeps the width of "100%", in
-        // tabular figures, so nothing in the status bar moves as it counts.
+        // to fill it against. The parts are one unit, 6 px apart, as a glyph
+        // and its words are (the percent, right-aligned in the room of
+        // "100%" after the words, stood some 16 px off them). The percent
+        // keeps the width of "100%" after it, and the count without a total
+        // that of the widest count of its digits, at least "999 files", in
+        // tabular figures, so nothing in the status bar moves as it counts
+        // but at 1,000 and 10,000 files (the count's own width moved the
+        // words left at 10, 100 and 1,000 files).
         // Nothing in it moves on its own (#373: no indeterminate
         // animation), so it is still with the desktop's animations off.
         Row {
             id: scanGroup
             objectName: "statusBarScan"
             visible: root.scanning && root.showTrackSections
-            spacing: Kirigami.Units.largeSpacing
+            spacing: Kirigami.Units.smallSpacing + 2
             Layout.alignment: Qt.AlignVCenter
             readonly property real fraction: root.scanTotalKnown
                 ? Math.min(1, root.scanProcessed / root.scanTotal)
@@ -423,54 +587,76 @@ ToolBar {
                         : I18n.i18nc("@info:status", "Scanning library…")
             }
 
+            Rectangle {
+                id: scanBar
+                objectName: "statusBarScanBar"
+                anchors.verticalCenter: parent.verticalCenter
+                visible: !root.narrow && root.scanTotalKnown
+                // 72 by 6 px at the default font, and larger with a larger
+                // one, as the Last.fm bar is: as long as the glyphs grow,
+                // and as thick as that bar grows with its glyph. Its frame
+                // is the Last.fm trough's, and the fill inside it 4 px.
+                readonly property int frame: scrobbleIndicator.troughFrame
+                width: root.uiPalette.scaledSize(72)
+                height: Math.max(4, Math.round(root.uiPalette.scaledSize(root.smallGlyphSize) / 5))
+                    + 2 * frame
+                radius: height / 2
+                // The status bar's progress trough and fill, the Last.fm
+                // bar's: a frame at 3:1 on the status bar around the view,
+                // and in it the fill, the secondary text, never louder than
+                // the words beside it, so that the share scanned reads
+                // against the rest (a solid trough midway between the fill
+                // and the status bar was 2.7:1 / 2.5:1 to each, and in a
+                // light theme it washed out into the status bar).
+                color: root.uiPalette.statusBarTrough
+                border.width: frame
+                border.color: root.uiPalette.statusBarTroughFrame
+
+                Rectangle {
+                    objectName: "statusBarScanBarFill"
+                    x: scanBar.frame
+                    y: scanBar.frame
+                    height: scanBar.height - 2 * scanBar.frame
+                    // Whole pixels of the inside, rounded down: the bar
+                    // moves with the batches, and is full only once the
+                    // scan is.
+                    width: Math.floor((scanBar.width - 2 * scanBar.frame) * scanGroup.fraction)
+                    radius: height / 2
+                    color: root.uiPalette.statusBarFill
+                }
+            }
+
             StatusLabel {
                 id: scanCount
                 objectName: "statusBarScanCount"
                 anchors.verticalCenter: parent.verticalCenter
                 visible: text.length > 0
                 text: root.scanCountText
-                // A percent keeps the room of the widest, on the right of
-                // it, beside the bar.
-                width: root.scanTotalKnown
-                    ? Math.max(Math.ceil(implicitWidth), Math.ceil(fullPercentMetrics.advanceWidth))
-                    : implicitWidth
-                horizontalAlignment: Text.AlignRight
+                // The count keeps the room of the widest after it, the
+                // bar and the words before it staying where they are: a
+                // percent that of "100%", the files scanned that of the
+                // widest count of their digits, from "999 files".
+                width: Math.max(Math.ceil(implicitWidth), Math.ceil(widestCountMetrics.advanceWidth))
+                horizontalAlignment: Text.AlignLeft
 
                 TextMetrics {
-                    id: fullPercentMetrics
+                    id: widestCountMetrics
                     font: scanCount.font
-                    text: root.percentText(100)
-                }
-            }
-
-            Rectangle {
-                objectName: "statusBarScanBar"
-                anchors.verticalCenter: parent.verticalCenter
-                visible: !root.narrow && root.scanTotalKnown
-                width: 72
-                height: 4
-                radius: 2
-                color: ColorUtils.withAlpha(root.uiPalette.text, 0.15)
-
-                Rectangle {
-                    objectName: "statusBarScanBarFill"
-                    anchors.left: parent.left
-                    anchors.top: parent.top
-                    anchors.bottom: parent.bottom
-                    // Whole pixels, rounded down: the bar moves with the
-                    // batches, and is full only once the scan is.
-                    width: Math.floor(parent.width * scanGroup.fraction)
-                    radius: 2
-                    color: root.uiPalette.textSecondary
+                    text: root.scanTotalKnown
+                        ? root.percentText(100)
+                        : root.scannedFilesText(root.scanCountReserve)
                 }
             }
 
             HoverHandler {
                 id: scanHover
             }
-            ToolTip.visible: scanHover.hovered
-            ToolTip.delay: Kirigami.Units.toolTipDelay
-            ToolTip.text: scanToolTipText.text
+            StatusToolTip {
+                objectName: "statusBarScanToolTip"
+                owner: scanGroup
+                message: scanToolTipText.text
+                visible: scanHover.hovered
+            }
 
             QtObject {
                 id: scanToolTipText
@@ -496,18 +682,30 @@ ToolBar {
         }
 
         Components.ScrobbleIndicator {
+            id: scrobbleIndicator
             uiBridge: root.uiBridge
             uiPalette: root.uiPalette
+            // Hidden with the other track sections while the engine is
+            // stopped or not running.
+            engineRunning: root.showTrackSections
             // The issues button's height, so its glyph is centred on the
             // status bar.
             blockHeight: root.barHeight - 2
+            roomToBarTop: root.contentItem.y + y
+            toolTipClearance: root.toolTipClearance
             Layout.alignment: Qt.AlignVCenter
             onSettingsRequested: root.lastFmSettingsRequested()
         }
 
-        // The issues: "2 new issues" in the text colour with a negative
-        // warning glyph until the user has seen them, then "3 issues" and
-        // the glyph in the secondary colour, the glyph 16 px in both.
+        // The issues: "2 new issues" in the text colour beside a 16 px
+        // glyph until the user has seen them, then "3 issues" alone in the
+        // secondary colour. The glyph is the shape of the most severe new
+        // issue: an error's ring with a cross in the negative colour, or
+        // for warnings alone the warning's triangle in the secondary
+        // colour, which the word "new" marks (every new issue was red, so
+        // a scan's notice raised the alarm of a stopped engine). Once all
+        // are seen there is no glyph: a grey ring with a cross beside a
+        // count read as "dismiss these", so a glyph here always means new.
         // It opens Recent Issues; with none there is nothing to show.
         ToolButton {
             id: issuesButton
@@ -524,9 +722,12 @@ ToolBar {
             text: root.hasUnseenError
                 ? I18n.i18ncp("@action:button", "%1 new issue", "%1 new issues", root.unseenErrorCount)
                 : I18n.i18ncp("@action:button", "%1 issue", "%1 issues", root.errorCount)
-            readonly property color glyphColor: root.hasUnseenError
-                ? root.uiPalette.negative
-                : root.uiPalette.textSecondary
+            // The most severe new issue's glyph, from the one source the seek
+            // bar's ends-early mark and Recent Issues take theirs from.
+            readonly property int glyph: root.unseenIncludesError
+                ? ErrorUtils.GlyphError
+                : ErrorUtils.GlyphWarning
+            readonly property color glyphColor: ErrorUtils.glyphColor(issuesButton.glyph, root.uiPalette)
             readonly property color labelColor: root.hasUnseenError
                 ? root.uiPalette.text
                 : root.uiPalette.textSecondary
@@ -537,9 +738,12 @@ ToolBar {
                 ? ErrorUtils.describe(root.errorController.latest)
                 : ""
             // Keyboard focus shows the same tooltip as hover.
-            ToolTip.visible: (hovered || visualFocus) && !root.issuesOpen
-            ToolTip.delay: Kirigami.Units.toolTipDelay
-            ToolTip.text: I18n.i18nc("@info:tooltip", "Show Recent Issues")
+            StatusToolTip {
+                objectName: "statusBarErrorsToolTip"
+                owner: issuesButton
+                message: I18n.i18nc("@info:tooltip", "Show Recent Issues")
+                visible: (issuesButton.hovered || issuesButton.visualFocus) && !root.issuesOpen
+            }
             onClicked: root.errorController.historyRequested()
             // Plain Space presses the focused button, not the window's
             // Play/Pause shortcut.
@@ -579,8 +783,9 @@ ToolBar {
                     StatusGlyph {
                         objectName: "statusBarErrorsGlyph"
                         anchors.verticalCenter: parent.verticalCenter
+                        visible: root.hasUnseenError
                         size: root.errorGlyphSize
-                        source: Qt.resolvedUrl("../assets/status-warning.svg")
+                        source: Qt.resolvedUrl("../assets/" + ErrorUtils.glyphAsset(issuesButton.glyph))
                         color: issuesButton.glyphColor
                     }
 

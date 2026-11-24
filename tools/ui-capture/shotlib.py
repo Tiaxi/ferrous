@@ -230,7 +230,9 @@ class Session:
             out.append(dict(cls=m.group(1), title=m.group(2), name=m.group(3), visible=m.group(4) == "1",
                             w=int(m.group(5)), h=int(m.group(6)), active=m.group(11) in ("1", "true"),
                             parent=int(m.group(12)) if m.group(12) else -1, index=len(out),
-                            popup=int(m.group(10), 16) & 0xFF == 0x09))  # Qt::Popup: a menu's window
+                            tip=int(m.group(10), 16) & 0xFF == 0x0D,  # Qt::ToolTip: a tooltip's window
+                            # Qt::Popup, a menu's window, or Qt::ToolTip, a tooltip's: neither is a dialog
+                            popup=int(m.group(10), 16) & 0xFF in (0x09, 0x0D)))
         return out
 
     def dialog_windows(self):
@@ -244,6 +246,18 @@ class Session:
                  and not w["popup"]]
         parents = {w["parent"] for w in cands}
         return sorted(cands, key=lambda w: (w["index"] in parents, not w["active"]))
+
+    @staticmethod
+    def tooltip_windows(windows, dialog):
+        """The shown tooltip windows opened from `dialog`."""
+        return [w for w in windows if w["visible"] and w.get("tip") and w["parent"] == dialog["index"]]
+
+    @staticmethod
+    def area_with_room_above(frame, room):
+        """A frame (x, y, w, h) taken `room` px higher, as far as the screen goes."""
+        x, y, w, h = frame
+        top = max(0, y - room)
+        return (x, top, w, h + y - top)
 
     def dialog_window(self, timeout=0.0):
         """A visible top-level window other than the main window and the viewers (a dialog that is a
@@ -459,13 +473,22 @@ class Session:
                 if not frame:
                     raise RuntimeError("KWin knows no frame of the dialog whose menu is open: the menu would be missing")
                 nested = (frame, frame, [])
+            else:
+                tips = self.tooltip_windows(ws, dialog_window)
+                if tips:
+                    # so is a tooltip's window, which may rise over the frame's top (Edit Tags' first field's):
+                    # the screen inside the frame, taken higher by the tooltip's height
+                    frame = self.kwin_frame(dialog_window["title"])
+                    if not frame:
+                        raise RuntimeError("KWin knows no frame of the dialog whose tooltip shows: it would be missing")
+                    nested = (frame, self.area_with_room_above(frame, max(t["h"] for t in tips)), [])
             got = None
             if nested:
                 got = self.kwin_capture_area(path, nested[1])
                 if not got and not others:
                     raise RuntimeError("the screen inside the dialog's frame was not captured: its menu would be missing")
                 how = (f"with its KWin decoration, over {', '.join(nested[2])} (nested windows, captured together "
-                       "with their decorations)") if others else "with its KWin decoration and its open menu"
+                       "with their decorations)") if others else "with its KWin decoration and its open menu or tooltip"
             if not got:
                 nested = None
                 got = self.kwin_capture(path, expect=(dialog_window["w"] * self.scale, dialog_window["h"] * self.scale),

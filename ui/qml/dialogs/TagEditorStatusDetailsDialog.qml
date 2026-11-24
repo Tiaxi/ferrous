@@ -10,19 +10,25 @@ import "../logic/BreakableText.js" as BreakableText
 
 // The whole of the tag editor's last status, such as each file a save
 // could not write, in a window of its own over the editor: the editor's
-// summary, semibold, the lead, then each section of the details, its
-// heading over its files, each file 16 px in, in the text's colour, the
-// lines it wraps to under its own start (it was the plain text,
-// every line at the heading's x past the first). The heading of what
-// failed is semibold, in the negative colour; that of what succeeded is
-// regular, secondary, so the summary leads (all three were
-// semibold). It opens as tall as they are, up to a limit.
+// summary, semibold, the lead, then each section of the details, what
+// failed first, its heading over its files, each file 16 px in, the lines
+// it wraps to under its own start (it was the plain text, every line at
+// the heading's x past the first). The heading of what failed is semibold,
+// in the negative colour; that of what succeeded is regular, secondary, so
+// the summary leads (all three were semibold). A file's name is in the
+// text's colour, semibold under what failed and regular under what
+// succeeded, so the report has two weights (both were Medium, the one
+// weight 500 in it); a failed one's is on a line of its own, with why under
+// it, in plain words in the same colour where that is known, and the
+// system's text under that, secondary, as it gave it (the name ran straight into
+// the error, in one ink, after what succeeded; then the error was all that
+// said why, and read as a log). It opens as tall as they are, up to a
+// limit.
 Components.DialogWindow {
     id: root
 
     required property var tagEditorApi
 
-    readonly property real contentPadding: Kirigami.Units.gridUnit
     readonly property real contentSpacing: Kirigami.Units.largeSpacing
     readonly property real itemIndent: root.uiPalette.scaledSize(16)
     // The details' scroll bar shows only while they are taller than the
@@ -44,11 +50,13 @@ Components.DialogWindow {
     }
 
     // TagEditorController.statusDetailSections as rich text: each heading
-    // a paragraph, each item one of its own, indented, with 12 px before
-    // each section after the first (not a grid unit, 18 px). A path
-    // in an item breaks between its folders, those that fit on a line
-    // `width` wide whole, and an error's code stays whole (a line broke
-    // in "ferrous-tagsave").
+    // a paragraph, each file's name one of its own and, where it failed,
+    // its cause if known and the error under it, 2 px apart, all indented;
+    // 8 px between failed
+    // files and 12 px before each section after the first (not a grid
+    // unit, 18 px). A path in an error breaks between its folders, those
+    // that fit on a line `width` wide whole, and an error's code stays
+    // whole (a line broke in "ferrous-tagsave").
     function detailsHtmlAt(width) {
         const sections = root.tagEditorApi.statusDetailSections || []
         const indent = root.itemIndent
@@ -57,23 +65,45 @@ Components.DialogWindow {
             return detailsMetrics.advanceWidth(name) <= itemWidth
         }
         const sectionGap = root.uiPalette.scaledSize(12)
+        const fileGap = root.uiPalette.scaledSize(Kirigami.Units.largeSpacing)
+        const errorGap = root.uiPalette.scaledSize(2)
         const textColor = root.cssColor(root.uiPalette.text)
+        const errorStyle = "font-weight:400; color:" + root.cssColor(root.uiPalette.textSecondary)
+        const causeStyle = "font-weight:400; color:" + textColor
         let html = ""
         for (let i = 0; i < sections.length; ++i) {
             const section = sections[i] || {}
-            const headingStyle = section.failed === true
+            const failed = section.failed === true
+            const headingStyle = failed
                 ? "font-weight:600; color:" + root.cssColor(root.uiPalette.negative)
-                : "font-weight:400; color:" + root.cssColor(root.uiPalette.textSecondary)
-            html += "<p style=\"margin-top:" + (i > 0 ? sectionGap : 0) + "px; margin-bottom:0px; "
-                + headingStyle + "\">" + root.escaped(section.heading) + "</p>"
+                : errorStyle
+            html += root.paragraph(section.heading, i > 0 ? sectionGap : 0, 0, headingStyle)
+            // A file's name, in the text's colour: a failed one's semibold,
+            // above why it failed, which is regular (nothing set the name
+            // apart from the line under it); a saved one's regular, set
+            // apart from its secondary heading by its ink and indent.
+            const nameStyle = "font-weight:" + (failed ? "600" : "400") + "; color:" + textColor
             const items = section.items || []
             for (let j = 0; j < items.length; ++j) {
-                html += "<p style=\"margin-top:0px; margin-bottom:0px; margin-left:" + indent + "px; color:"
-                    + textColor + "\">"
-                    + root.escaped(BreakableText.breakableMessage(String(items[j] || "").trim(), fits)) + "</p>"
+                const file = items[j] || {}
+                html += root.paragraph(BreakableText.breakableMessage(String(file.name || "").trim(), fits),
+                    failed && j > 0 ? fileGap : 0, indent, nameStyle)
+                const cause = String(file.cause || "")
+                if (cause.length > 0) {
+                    html += root.paragraph(cause, errorGap, indent, causeStyle)
+                }
+                const error = String(file.error || "").trim()
+                if (error.length > 0) {
+                    html += root.paragraph(BreakableText.breakableMessage(error, fits), errorGap, indent, errorStyle)
+                }
             }
         }
         return html
+    }
+
+    function paragraph(text, gap, indent, style) {
+        return "<p style=\"margin-top:" + gap + "px; margin-bottom:0px; margin-left:" + indent + "px; " + style
+            + "\">" + root.escaped(text) + "</p>"
     }
 
     // Copies the selected details as they read, without the characters
@@ -99,7 +129,7 @@ Components.DialogWindow {
     }
 
     objectName: "tagEditorStatusDetailsDialog"
-    title: I18n.i18nc("@title:window", "Tag Editor Details")
+    title: I18n.i18nc("@title:window", "Tag Change Details")
     minimumWidth: Kirigami.Units.gridUnit * 20
     minimumHeight: Kirigami.Units.gridUnit * 9
     // Its width and its limit below with the default font grow with a

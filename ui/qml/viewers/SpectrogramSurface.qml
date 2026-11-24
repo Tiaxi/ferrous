@@ -19,6 +19,9 @@ Item {
     property bool viewerMode: false
     // The plot's width: the level meter's column takes the rest.
     property real plotWidth: root.width
+    // How much larger than the window's its own text is, the crosshair's
+    // readout and the scale's: as the lane heads' (PlotLayer.textScale).
+    property real textScale: 1
     // A time of the track to follow, such as where its file is cut off, or
     // -1; markerX is where the plot draws it, NaN while it does not.
     property real markerSeconds: -1
@@ -36,6 +39,11 @@ Item {
         const first = spectrogramRepeater.count > 0 ? spectrogramRepeater.itemAt(0) : null
         return first && first.spectrogramItem ? first.spectrogramItem.visibleEndSeconds : NaN
     }
+    // The view the user moved follows the playhead again in its track,
+    // where it showed `fromStartSeconds` to `fromEndSeconds`: told after
+    // visibleStartSeconds and visibleEndSeconds give where it is now, before
+    // detached, as the waveform tells them (SpectrogramItem's followedAgain).
+    signal followedAgain(real fromStartSeconds, real fromEndSeconds)
     // The lanes, each one's label ("" for none) and the one under the pointer.
     readonly property int laneCount: Math.max(1, root.channelDescriptors.length)
     readonly property var laneLabels: {
@@ -51,6 +59,19 @@ Item {
     property int hoveredLane: -1
     // Where the pointer is on the plot, in the scene, while a lane has it.
     property point pointerScenePosition: Qt.point(0, 0)
+    // Whether the pointer is on the plot, the seams between its lanes too,
+    // or holds a button pressed on it: while it does, the crosshair shows
+    // (SpectrogramItem's pointerOn).
+    readonly property bool pointerOn: root._seamHovered || root._lanePointerOn
+    readonly property bool _lanePointerOn: {
+        for (let i = 0; i < spectrogramRepeater.count; ++i) {
+            const pane = spectrogramRepeater.itemAt(i)
+            if (pane && pane.spectrogramItem && pane.spectrogramItem.pointerOn) {
+                return true
+            }
+        }
+        return false
+    }
     // Whether the plot waits for the track's first columns.
     readonly property bool awaitingData: {
         const first = spectrogramRepeater.count > 0 ? spectrogramRepeater.itemAt(0) : null
@@ -85,15 +106,54 @@ Item {
     property size reservedCorner: Qt.size(0, 0)
     // What the lowest lane's label and buttons take of it; see PlotLayer.
     property rect laneHeadBounds: Qt.rect(0, 0, 0, 0)
-    // What each lane's label and buttons take of it, by the lane's index;
-    // see PlotLayer's laneHeadBoundsByLane.
-    property var laneHeadBoundsByLane: []
-    // The pointer hides once the overlays have faded out, not as they start.
-    readonly property int pointerCursorShape: root.interactiveOverlaysVisible || root.interactiveOverlaysLevel > 0
-        ? Qt.ArrowCursor
-        : Qt.BlankCursor
+    // How far down into their lanes the heads reach, at most; see
+    // PlotLayer's laneHeadsFoot.
+    property real laneHeadsFoot: 0
+    // The band at the top of every lane that a plate takes in any of them,
+    // the heads' or the corner's: at rest the lanes are alike, all their
+    // lines under it.
+    readonly property real restTopClearance: Math.max(root.laneHeadsFoot, root.reservedCorner.height)
+    // The evenly spaced lines of each lane at rest, three where the first
+    // of three is clear of that band, fewer in shorter lanes; an even count
+    // where a lane has the pane's middle, as the mixed view's one has, so
+    // that none strikes through what is centred there ("Analysing…").
+    readonly property int restLineCount: {
+        const lane = Math.floor((root.height - (root.laneCount - 1)) / root.laneCount)
+        const middleLane = root.laneCount % 2 === 1
+        for (let lines = middleLane ? 4 : 3; lines > 0; lines -= middleLane ? 2 : 1) {
+            if (lane / (lines + 1) >= root.restTopClearance + 8) {
+                return lines
+            }
+        }
+        return 0
+    }
+    // The lane a middle press last held the view on, which tells when its
+    // pan ends: the hand is the whole plot's, as the drag may go on over
+    // another lane.
+    property SpectrogramItem _panLane: null
+    // The pointer hides once the overlays have faded out, not as they start;
+    // hidden, it stays so. While a pan holds the plot it is a closed hand,
+    // as over the album art's.
+    readonly property int pointerCursorShape: !root.interactiveOverlaysVisible && root.interactiveOverlaysLevel <= 0
+        ? Qt.BlankCursor
+        : root.panning ? Qt.ClosedHandCursor : Qt.ArrowCursor
     property var channelDescriptors: []
+    // The crosshair's one x, which every lane draws its line at, the
+    // pointer's own too, and what told it: the lane or the seams' area the
+    // pointer is on. Only that one takes it back as the pointer leaves it:
+    // the leave of the lane it left comes after the enter of the one it
+    // went on, and took the line from the others (H15).
     property double _crosshairSharedX: -1.0
+    property Item _crosshairSource: null
+    function shareCrosshair(source, x) {
+        if (x >= 0) {
+            root._crosshairSource = source
+            root._crosshairSharedX = x
+        } else if (root._crosshairSource === source) {
+            root._crosshairSource = null
+            root._crosshairSharedX = -1.0
+        }
+    }
     // The zooms the user chose, or 0 for the default zoom, which a view
     // then follows: that of a short track changes with the plot's width and
     // once the track's length is known.
@@ -144,6 +204,15 @@ Item {
     // Whether the centered view stays where a middle-drag moved it rather
     // than following the playhead.
     readonly property bool detached: sharedViewFollow.detached
+    // Whether autoscroll moves it.
+    readonly property bool autoscrolling: sharedViewFollow.autoscrolling
+    // Whether a middle-drag pans it, on whichever lane it began.
+    readonly property bool panning: root._panLane !== null && root._panLane.panning
+    // Whether a middle press holds it, from the press to the release.
+    readonly property bool panPressed: root._panLane !== null && root._panLane.panPressed
+    // Where, in the scene, it was pressed, or let go.
+    readonly property point panScenePosition: root._panLane !== null
+        ? root._panLane.panScenePosition : Qt.point(0, 0)
     // The view follows the playhead again, at once.
     function followPlayhead() {
         sharedViewFollow.followPlayhead()
@@ -359,19 +428,38 @@ Item {
     // A fullscreen viewer closing right after a resize still reports it.
     Component.onDestruction: sendBackendWidth()
 
+    // Whether the pointer is on a seam between the lanes, which is neither
+    // lane's and has only this area under it: it is on the plot, and the
+    // lanes draw the crosshair's line and time through it, as for a pointer
+    // on another lane (the corner's row and the crosshair went there, a
+    // 1 px gap in one move across the plot).
+    readonly property bool _seamHovered: pointerArea.containsMouse && spectrogramRepeater.count > 1
+        && pointerArea.mouseX < root.plotWidth
+        && PlotLanes.laneAt(pointerArea.mouseY, spectrogramRepeater.count, root.height) < 0
+    function shareSeamCrosshair() {
+        root.shareCrosshair(pointerArea, root._seamHovered ? pointerArea.mouseX : -1.0)
+    }
+    on_SeamHoveredChanged: root.shareSeamCrosshair()
+
     MouseArea {
+        id: pointerArea
         objectName: "spectrogramSurfacePointerArea"
         anchors.fill: parent
         acceptedButtons: Qt.NoButton
         hoverEnabled: true
         cursorShape: root.pointerCursorShape
         onPositionChanged: function(mouse) {
+            if (root._seamHovered) {
+                root.shareSeamCrosshair()
+            }
             root.notePointerActivity(mouse.x, mouse.y)
         }
     }
 
-    // The seams between the lanes: at rest a cut in the plot's deep violet,
-    // apart from its rest lines (UiPalette's plotRestLaneSeam).
+    // The seams between the lanes: at rest a cut in the plot's deep violet
+    // with a lit edge, apart from its rest lines (UiPalette's
+    // plotRestLaneSeam and plotRestLaneSeamEdge, and the groove below);
+    // playing, the lighter violet under a dark foot (the foot below).
     Rectangle {
         objectName: "spectrogramLaneSeams"
         width: root.plotWidth
@@ -426,11 +514,23 @@ Item {
                     showCrosshairTime: index === spectrogramRepeater.count - 1
                     laneHeadBounds: index === spectrogramRepeater.count - 1
                         ? root.laneHeadBounds : Qt.rect(0, 0, 0, 0)
-                    laneLabelBounds: root.laneHeadBoundsByLane[index] || Qt.rect(0, 0, 0, 0)
-                    readoutPlateColor: root.uiPalette.spectrogramPlot.plotPlate
+                    restLineCount: root.restLineCount
+                    restTopClearance: root.restTopClearance
+                    // The plot's plate, opaque: the strongest traces
+                    // showed through the readouts' digits. The lane heads'
+                    // and the zoom's plates keep its 88 %.
+                    readoutPlateColor: {
+                        const plate = root.uiPalette.spectrogramPlot.plotPlate
+                        return Qt.rgba(plate.r, plate.g, plate.b, 1)
+                    }
                     readoutPlateEdgeColor: root.uiPalette.spectrogramPlot.plotPlateEdge
                     readoutTextColor: root.uiPalette.spectrogramPlot.plotText
+                    textScale: root.textScale
                     gridEnabled: root.uiBridge.showSpectrogramScale
+                    // Beside the meter's column, the kHz ticks end 8 px
+                    // clear of its edge, so they and the meter's marks
+                    // read as two scales, not one cluster.
+                    scaleEdgeClearance: root.plotWidth < root.width ? 8 : 0
                     // At rest, the scale's lines where a session will put
                     // its ticks.
                     analysisFftSize: root.uiBridge.fftSize || 0
@@ -441,9 +541,29 @@ Item {
                     // one's markerX places the note.
                     markerSeconds: root.markerSeconds
                     crosshairSharedX: root._crosshairSharedX
-                    onCrosshairHoverChanged: (x) => { root._crosshairSharedX = x }
+                    // A lane the pointer left for a seam leaves the line to it.
+                    onCrosshairHoverChanged: (x) => {
+                        root.shareCrosshair(spectrogramPaneItem, x)
+                        if (x < 0) {
+                            root.shareSeamCrosshair()
+                        }
+                    }
                     zoomEnabled: root.uiBridge.spectrogramZoomEnabled
                     viewFollow: sharedViewFollow
+                    // The first lane's view is the plot's (visibleStartSeconds).
+                    onFollowedAgain: (fromStartSeconds, fromEndSeconds) => {
+                        if (index === 0) {
+                            root.followedAgain(fromStartSeconds, fromEndSeconds)
+                        }
+                    }
+                    // A wheel zoom is the pointer's activity too, also
+                    // where it rests.
+                    onWheelZoomed: (scenePosition) => root.notePointerActivity(scenePosition.x, scenePosition.y)
+                    onPanPressedChanged: {
+                        if (spectrogramPaneItem.panPressed) {
+                            root._panLane = spectrogramPaneItem
+                        }
+                    }
                     stretchShortTracks: root.uiBridge.stretchShortTracks
                     // Each lane at its own default, which its data tells.
                     zoomLevel: root._chosenZoomLevel > 0
@@ -523,10 +643,30 @@ Item {
         }
     }
 
+    // Playing, each seam between the lanes has a dark foot: the upper
+    // lane's last row in plotLaneSeamFoot over the seam's 1 px, so the seam
+    // is two rows, dark over the lighter violet, as the rest seam is built
+    // in two (UiPalette's plotLaneSeamFoot).
+    Repeater {
+        model: root.atRest ? 0 : Math.max(0, spectrogramRepeater.count - 1)
+
+        delegate: Rectangle {
+            required property int index
+
+            objectName: "spectrogramLaneSeamFoot"
+            width: root.plotWidth
+            y: PlotLanes.bottom(index, spectrogramRepeater.count, root.height) - 1
+            height: 1
+            color: root.uiPalette.plotLaneSeamFoot
+        }
+    }
+
     // At rest, never played, each seam between the lanes is a groove: 3 px
     // of plotRestLaneSeam centred on it, over the lanes' rows beside it,
-    // so it reads as a cut between them (1 px of it was hard to find). The
-    // lanes keep their heights; playing, the seam is 1 px.
+    // its top row lit in plotRestLaneSeamEdge, so it reads as a cut between
+    // the lanes, apart from their fainter single rest lines (dark alone it
+    // was hard to find). The lanes keep their heights; playing, the seam is
+    // 1 px under its foot.
     Repeater {
         model: root.atRest ? Math.max(0, spectrogramRepeater.count - 1) : 0
 
@@ -538,6 +678,13 @@ Item {
             y: PlotLanes.bottom(index, spectrogramRepeater.count, root.height) - 1
             height: 3
             color: root.uiPalette.plotRestLaneSeam
+
+            Rectangle {
+                objectName: "spectrogramRestSeamEdge"
+                width: parent.width
+                height: 1
+                color: root.uiPalette.plotRestLaneSeamEdge
+            }
         }
     }
 }

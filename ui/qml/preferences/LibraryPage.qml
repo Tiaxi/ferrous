@@ -44,6 +44,40 @@ Preferences.PreferencesPage {
         return Math.min(widest, root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 8))
     }
 
+    // The rows' inset, and the gap between their parts.
+    readonly property real rootRowInset: Kirigami.Units.largeSpacing + 2
+    // The widest folder's line whole: its icon, name, path and track count,
+    // as the rows draw them, and the list's frame.
+    readonly property real rootLineWidth: {
+        // The binding follows the fonts: advanceWidth() is a function,
+        // which it cannot follow.
+        rootPathMetrics.font
+        rootCountMetrics.font
+        if (root.rootEntries.length === 0) {
+            return 0
+        }
+        let pathAndCount = 0
+        for (let i = 0; i < root.rootEntries.length; ++i) {
+            const entry = root.rootEntries[i] || {}
+            pathAndCount = Math.max(pathAndCount, Math.ceil(rootPathMetrics.advanceWidth(entry.path || ""))
+                + Math.ceil(rootCountMetrics.advanceWidth(root.trackCountText(entry.trackCount || 0))))
+        }
+        const name = root.rootNameColumnWidth > 0
+            ? Math.ceil(root.rootNameColumnWidth) + root.uiPalette.scaledSize(root.rootRowInset) : 0
+        return 2 * rootListFrame.frameWidth + 4 * root.rootRowInset + root.uiPalette.labelIconSize
+            + name + pathAndCount
+    }
+    // The labels go above the fields where that line doesn't fit beside
+    // them, with the list's width for it (at 24 pt in a narrow window, the
+    // paths read "/srv/…lbums"). Up to 27 grid units, scaled with the font,
+    // about what Configure has beside them at the size it opens at on a
+    // screen with room: there a longer path elides, and the labels stay.
+    fieldsReadingWidth: Math.min(root.rootLineWidth, root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 27))
+
+    function trackCountText(count) {
+        return I18n.i18ncp("@info", "%1 track", "%1 tracks", count)
+    }
+
     function rootDisplayName(entry) {
         return entry ? (entry.displayName || entry.path || "") : ""
     }
@@ -144,6 +178,18 @@ Preferences.PreferencesPage {
                 y: rootListFrame.frameWidth
                 width: parent.width
                 height: root.uiPalette.rowHeight
+            }
+
+            FontMetrics {
+                id: rootPathMetrics
+                font: root.uiPalette.baseFont
+            }
+
+            FontMetrics {
+                id: rootCountMetrics
+                font.family: root.uiPalette.baseFont.family
+                font.pointSize: root.uiPalette.smallPointSize
+                font.features: root.uiPalette.tabularFigures
             }
 
             // Measures the folder names as the rows draw them.
@@ -252,10 +298,9 @@ Preferences.PreferencesPage {
                     Accessible.role: Accessible.ListItem
                     Accessible.name: rootRow.rootName.length > 0
                         ? I18n.i18nc("@info folder name, path, track count", "%1, %2, %3",
-                            rootRow.rootName, rootRow.rootPath,
-                            I18n.i18ncp("@info", "%1 track", "%1 tracks", rootRow.trackCount))
+                            rootRow.rootName, rootRow.rootPath, root.trackCountText(rootRow.trackCount))
                         : I18n.i18nc("@info path, track count", "%1, %2", rootRow.rootPath,
-                            I18n.i18ncp("@info", "%1 track", "%1 tracks", rootRow.trackCount))
+                            root.trackCountText(rootRow.trackCount))
 
                     onClicked: {
                         rootList.currentIndex = rootRow.index
@@ -297,9 +342,9 @@ Preferences.PreferencesPage {
                         RowLayout {
                             Layout.fillWidth: true
                             Layout.preferredHeight: root.uiPalette.rowHeight
-                            Layout.leftMargin: Kirigami.Units.largeSpacing + 2
-                            Layout.rightMargin: Kirigami.Units.largeSpacing + 2
-                            spacing: Kirigami.Units.largeSpacing + 2
+                            Layout.leftMargin: root.rootRowInset
+                            Layout.rightMargin: root.rootRowInset
+                            spacing: root.rootRowInset
 
                             Kirigami.Icon {
                                 objectName: "libraryRootIcon"
@@ -342,7 +387,7 @@ Preferences.PreferencesPage {
                             Label {
                                 objectName: "libraryRootTrackCount"
                                 textFormat: Text.PlainText
-                                text: I18n.i18ncp("@info", "%1 track", "%1 tracks", rootRow.trackCount)
+                                text: root.trackCountText(rootRow.trackCount)
                                 font.pointSize: root.uiPalette.smallPointSize
                                 font.features: root.uiPalette.tabularFigures
                                 color: root.uiPalette.textTertiaryOn(rootRow.highlighted, rootRow.hovered)
@@ -433,6 +478,13 @@ Preferences.PreferencesPage {
         }
     }
 
+    // Watching is the library's setting, not one of the folders' actions
+    // (4 px under their buttons, it read as one).
+    Components.FormGroupGap {
+        objectName: "libraryWatchGap"
+        uiPalette: root.uiPalette
+    }
+
     CheckBox {
         id: watchCheckBox
         objectName: "libraryWatchCheckBox"
@@ -445,7 +497,7 @@ Preferences.PreferencesPage {
     Components.FormHelpText {
         objectName: "libraryWatchHelp"
         uiPalette: root.uiPalette
-        indent: watchCheckBox.contentItem.x
+        checkBox: watchCheckBox
         text: I18n.i18nc("@info", "New, changed and removed files appear without a rescan, and the folders "
             + "are rescanned at startup. Folders that can’t be watched, such as network shares, "
             + "are rescanned every 30 minutes instead.")
@@ -466,28 +518,31 @@ Preferences.PreferencesPage {
     Components.AppMenu {
         id: rootContextMenu
         objectName: "libraryRootContextMenu"
-        MenuItem {
+        Components.AppMenuItem {
             text: I18n.i18nc("@action:inmenu %1 is the file manager", "Open in %1", root.uiBridge.fileBrowserName || "")
             icon.name: "system-file-manager"
             onTriggered: root.openCurrentRoot()
         }
-        MenuItem {
+        Components.AppMenuItem {
             text: I18n.i18nc("@action:inmenu", "Rename…")
             icon.name: "edit-rename"
             onTriggered: root.renameCurrentRoot()
         }
-        MenuItem {
+        Components.AppMenuItem {
             text: I18n.i18nc("@action:inmenu", "Rescan")
             icon.name: "view-refresh"
             onTriggered: root.rescanCurrentRoot()
         }
-        MenuItem {
+        Components.AppMenuItem {
             objectName: "libraryRootRescanAllMenuItem"
             text: I18n.i18nc("@action:inmenu", "Rescan All Folders")
+            // A folder with sync arrows, not Rescan's: the two read apart,
+            // and the menu's glyph column has no hole.
+            icon.name: "folder-sync"
             onTriggered: root.uiBridge.rescanAllLibraryRoots()
         }
         MenuSeparator {}
-        MenuItem {
+        Components.AppMenuItem {
             text: I18n.i18nc("@action:inmenu", "Remove")
             icon.name: "list-remove"
             onTriggered: root.removeCurrentRoot()

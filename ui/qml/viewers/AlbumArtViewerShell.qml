@@ -29,14 +29,32 @@ Item {
     property string positionText: "00:00"
     // Whether the image's details show, for the info button.
     property bool infoVisible: false
+    // How far their column is shown and how wide it is once shown, which
+    // the windowed plate gives way to.
+    property real infoReveal: 0
+    property real infoWidth: 0
     // The art's zoom, 1 when it fits, and what fits it again.
     property real zoomLevel: 1.0
     property var resetView: null
+    // The art's pointer, which the areas over it that take a press for the
+    // focus show, as they would show an arrow of their own.
+    property int artCursorShape: Qt.ArrowCursor
     // A preview from Replace from iTunes, whose label and buttons are in
     // the image's details (AlbumArtSurface), which show throughout it: the
     // Image Details button hides meanwhile, and Escape goes back to the
     // results, as closeViewer does then.
     property bool previewActive: false
+    // Whether the controls show a preview's: while the viewer is open, as
+    // it is; closed, as it closed, while the viewer fades out (Back to
+    // Results showed Image Details on the plate on the fade's first frame).
+    property bool shownPreviewActive: false
+    Binding {
+        target: root
+        property: "shownPreviewActive"
+        value: root.previewActive
+        when: root.viewerOpen
+        restoreMode: Binding.RestoreNone
+    }
     // Whether the title strip shows over the whole screen when the pointer
     // moves: the Preferences setting.
     property bool stripEnabled: true
@@ -63,6 +81,12 @@ Item {
     // How far down the controls' plate in the main window reaches, from the
     // top of the art: its margin and its height, which follows the font.
     readonly property real popupControlsBottom: albumArtPopupControls.y + albumArtPopupControls.height
+    // How far in from the art's right edge Close's centre is, on the plate
+    // or in the strip, whose axis Copy Path under it shares.
+    readonly property real closeAxisInset: !root.useWholeScreenViewerMode
+        ? albumArtPopupControls.anchors.rightMargin + albumArtPopupControls.padding
+            + root.uiPalette.toolButtonSize / 2
+        : (root.fullscreenWindow ? root.fullscreenWindow.strip.closeAxisInset : -1)
     property alias fullscreenControlsHideDelay: fullscreenControlsAutoHide.hideDelay
     readonly property bool fullscreenControlsVisible: fullscreenControlsAutoHide.controlsVisible
     // The controls as they fade: 1 shown, 0 hidden.
@@ -91,6 +115,9 @@ Item {
             ? root.fullscreenWindow !== null && root.fullscreenWindow.strip.focusInside
             : albumArtViewer.visible && root.windowRoot !== null
                 && root.isInside(root.windowRoot.activeFocusItem, albumArtPopupControls)
+                // Focus from a click doesn't hold them, as in the
+                // visualization viewer's plate.
+                && root.windowRoot.activeFocusItem.focusReason !== Qt.MouseFocusReason
     }
 
     // Made the first time the viewer opens over the whole screen and kept,
@@ -156,11 +183,23 @@ Item {
         Qt.callLater(root.syncPresentation)
     }
 
+    // Sees a press on the art and where it moves, whatever takes it, for a
+    // drag to count as pointer activity. It is on the area over the art
+    // that has every press first: the art, which takes it, keeps it from
+    // handlers on what is under it.
+    component DragWatch: PointHandler {
+        acceptedButtons: Qt.AllButtons
+        onActiveChanged: fullscreenControlsAutoHide.pressTracked(
+            active, point.scenePosition, point.scenePressPosition)
+        onPointChanged: fullscreenControlsAutoHide.pressTracked(
+            active, point.scenePosition, point.scenePressPosition)
+    }
+
     // The info toggle: the tint while the details show, the ring only for
     // keyboard focus. Hidden during a preview, whose details always show,
     // it takes no room.
     component InfoButton: Components.ViewerToolButton {
-        visible: !root.previewActive
+        visible: !root.shownPreviewActive
         width: visible ? implicitWidth : 0
         uiPalette: root.uiPalette
         // Checked follows the viewer, which the I key toggles too.
@@ -193,6 +232,11 @@ Item {
         // was before, so the popup does not close for it.
         contentItem: FocusScope {
             focus: true
+            // The floor, the art, its details and the plate fade as one
+            // picture on the window under them: each at the popup's opacity
+            // alone, the floor showed through the art, whose middle was 13 %
+            // darker than the mix of the fade's ends. Only while it fades.
+            layer.enabled: albumArtViewer.opacity > 0 && albumArtViewer.opacity < 1
             // Any key brings the controls back, so Tab reaches them.
             Keys.onPressed: function(event) {
                 fullscreenControlsAutoHide.wake()
@@ -269,11 +313,11 @@ Item {
 
         // Nothing of its own: the art's surface, which is in the popup while
         // it shows, fading in and out too, has the media surface's black
-        // floor, in both themes. A second floor here doubled it as the popup
-        // faded: its children fade one by one, not as one layer, so two
-        // floors at half opacity left a quarter of the window, and as the
-        // viewer opened the window went dark before the art came in, a
-        // blink of 33 ms.
+        // floor, in both themes, in the content's layer. A second floor here
+        // doubled it as the popup faded, outside that layer: two floors at
+        // half opacity left a quarter of the window, and as the viewer
+        // opened the window went dark before the art came in, a blink of
+        // 33 ms.
         background: Item {
             objectName: "albumArtPopupBackground"
         }
@@ -293,11 +337,14 @@ Item {
             MouseArea {
                 anchors.fill: parent
                 z: 1
+                cursorShape: root.artCursorShape
                 acceptedButtons: Qt.AllButtons
                 onPressed: function(mouse) {
                     albumArtPopupViewFocus.forceActiveFocus(Qt.MouseFocusReason)
                     mouse.accepted = false
                 }
+
+                DragWatch {}
             }
         }
 
@@ -316,8 +363,9 @@ Item {
             anchors.top: parent.top
             anchors.right: parent.right
             anchors.margins: 5
-            implicitWidth: popupControls.implicitWidth + 4
-            implicitHeight: popupControls.implicitHeight + 4
+            readonly property real padding: 2
+            implicitWidth: popupControls.implicitWidth + 2 * padding
+            implicitHeight: popupControls.implicitHeight + 2 * padding
             opacity: root.fullscreenControlsLevel
             visible: root.fullscreenControlsVisible || root.fullscreenControlsLevel > 0
 
@@ -326,8 +374,16 @@ Item {
                     point.scenePosition.x, point.scenePosition.y)
             }
 
+            // With the details' column under the whole of it, the plate is
+            // no box: the column is its colour, and holds the buttons (it
+            // drew a box inside the column). It fades as the column comes
+            // under it, and still takes the presses between its buttons.
+            // Wider than the column, it is over the art too, and stays.
             Components.PlotPlate {
+                readonly property bool overColumn:
+                    albumArtPopupControls.width + albumArtPopupControls.anchors.rightMargin <= root.infoWidth
                 anchors.fill: parent
+                fadeLevel: overColumn ? 1 - root.infoReveal : 1
                 plotColors: root.uiPalette.mediaPlot
                 uiPalette: root.uiPalette
                 takesPointer: true
@@ -336,8 +392,8 @@ Item {
 
             Components.ViewerControls {
                 id: popupControls
-                x: 2
-                y: 2
+                x: albumArtPopupControls.padding
+                y: albumArtPopupControls.padding
                 uiPalette: root.uiPalette
                 closeButtonName: "albumArtPopupCloseButton"
                 plotColors: root.uiPalette.mediaPlot
@@ -457,11 +513,14 @@ Item {
                         MouseArea {
                             anchors.fill: parent
                             z: 1
+                            cursorShape: root.artCursorShape
                             acceptedButtons: Qt.AllButtons
                             onPressed: function(mouse) {
                                 albumArtFullscreenViewFocus.forceActiveFocus(Qt.MouseFocusReason)
                                 mouse.accepted = false
                             }
+
+                            DragWatch {}
                         }
                     }
 
@@ -479,6 +538,8 @@ Item {
                         uiBridge: root.uiBridge
                         positionText: root.positionText
                         closeButtonName: "albumArtFullscreenCloseButton"
+                        // The zoom set off, as on the plate in the window.
+                        dividers: true
                         controlsVisible: root.fullscreenControlsVisible
                         controlsLevel: root.fullscreenControlsLevel
                         available: root.stripEnabled

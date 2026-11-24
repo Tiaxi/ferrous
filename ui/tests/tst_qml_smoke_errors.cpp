@@ -2,6 +2,8 @@
 
 #include "QmlSmokeTest.h"
 
+#include <QQmlProperty>
+
 // Error reporting, and saving before quitting.
 class ErrorsSmokeTest : public QmlSmokeTest {
     Q_OBJECT
@@ -35,13 +37,14 @@ private slots:
 
 namespace {
 
-// Sends an error from the bridge as BridgeClient does. The categories and
-// severities are BinaryBridgeCodec's.
+// Sends an error from the bridge as BridgeClient does, with the system's
+// text `detail`. The categories and severities are BinaryBridgeCodec's.
 bool sendBridgeError(QObject *bridge, const QString &message, int category = 1,
-                     int severity = 1, const QString &subject = QString()) {
+                     int severity = 1, const QString &subject = QString(),
+                     const QString &detail = QString()) {
     return QMetaObject::invokeMethod(bridge, "bridgeError", Q_ARG(QString, message),
                                      Q_ARG(int, category), Q_ARG(int, severity),
-                                     Q_ARG(QString, subject));
+                                     Q_ARG(QString, subject), Q_ARG(QString, detail));
 }
 
 // The content of the popup `popup`, which the error dialog's rows are under.
@@ -255,6 +258,18 @@ void ErrorsSmokeTest::errorHistoryCountsRepeatsAndKeepsTheLatest() {
     QVERIFY(sendBridgeError(ui.bridge, message, 1, 0, QStringLiteral("/music/other.flac")));
     QVERIFY(sendBridgeError(ui.bridge, message, 2, 0, subject));
     QCOMPARE(errorHistoryMessages(ui.errors).size(), 4);
+    // As is a failure the system tells another way; the same text again
+    // is a repeat. The entry keeps its system's text.
+    const QString denied = QStringLiteral("failed to replace /c/settings.txt: Permission denied (os error 13)");
+    const QString full = QStringLiteral("failed to replace /c/settings.txt: No space left on device (os error 28)");
+    const QString saving = QStringLiteral("Settings couldn\u2019t be saved");
+    QVERIFY(sendBridgeError(ui.bridge, saving, 6, 1, QStringLiteral("/c/settings.txt"), denied));
+    QVERIFY(sendBridgeError(ui.bridge, saving, 6, 1, QStringLiteral("/c/settings.txt"), full));
+    QVERIFY(sendBridgeError(ui.bridge, saving, 6, 1, QStringLiteral("/c/settings.txt"), full));
+    QCOMPARE(errorHistoryMessages(ui.errors).size(), 6);
+    QCOMPARE(entries->index(0, 0).data(entries->roleNames().key("detail")).toString(), full);
+    QCOMPARE(entries->index(0, 0).data(entries->roleNames().key("count")).toInt(), 2);
+    QCOMPARE(entries->index(1, 0).data(entries->roleNames().key("detail")).toString(), denied);
 
     // Of more than it keeps, the latest.
     QVERIFY(QMetaObject::invokeMethod(ui.errors, "clear"));
@@ -361,6 +376,12 @@ void ErrorsSmokeTest::displaySleepFailureShowsInTheFullscreenViewer() {
     QTRY_VERIFY(visibleItemNamed(fullscreen, QStringLiteral("viewerIssuesButton")) != nullptr);
     QQuickItem *issuesButton = visibleItemNamed(fullscreen, QStringLiteral("viewerIssuesButton"));
     QCOMPARE(issuesButton->property("text").toString(), QStringLiteral("1 new issue"));
+    // A warning alone: the status bar's triangle in the words' colour, not
+    // the negative an error has.
+    QVERIFY(QQmlProperty::read(issuesButton, QStringLiteral("icon.name")).toString()
+                .endsWith(QStringLiteral("status-warning.svg")));
+    QCOMPARE(issuesButton->property("glyphColor").value<QColor>(),
+             issuesButton->property("baseTextColor").value<QColor>());
     QQuickItem *strip = visibleItemNamed(fullscreen, QStringLiteral("spectrogramFullscreenStrip"));
     QQuickItem *close = visibleItemNamed(fullscreen, QStringLiteral("spectrogramFullscreenCloseButton"));
     QVERIFY(strip != nullptr && close != nullptr);
@@ -370,7 +391,7 @@ void ErrorsSmokeTest::displaySleepFailureShowsInTheFullscreenViewer() {
     QVERIFY(sceneRectOf(issuesButton).right() <= sceneRectOf(close).left());
     const QStringList messages = errorHistoryMessages(ui.errors);
     QCOMPARE(messages.size(), 1);
-    QVERIFY2(messages.first().contains(QStringLiteral("Couldn't keep the screen awake")),
+    QVERIFY2(messages.first().contains(QStringLiteral("Couldn\u2019t keep the screen awake")),
              qPrintable(messages.first()));
     QVERIFY(messages.first().contains(QStringLiteral("no idle service")));
 
@@ -408,7 +429,7 @@ void ErrorsSmokeTest::stoppedBackendShowsMessageAndDisablesControls() {
 
     // What the bridge client reports when the relay finds the backend gone.
     const QString reason = QStringLiteral(
-        "The Ferrous backend stopped unexpectedly. Restart Ferrous to continue.");
+        "The playback engine stopped unexpectedly. Restart Ferrous to continue.");
     QVERIFY(ui.bridge->setProperty("backendFailure", reason));
 
     QTRY_VERIFY(message->property("visible").toBool());
@@ -418,16 +439,45 @@ void ErrorsSmokeTest::stoppedBackendShowsMessageAndDisablesControls() {
     QVERIFY(!mainSplit->property("enabled").toBool());
     // Recent Issues lists it, and the status bar's tooltip gives it.
     QCOMPARE(errorHistoryMessages(ui.errors), QStringList{reason});
-    QCOMPARE(evaluateOn(ui.item("statusBarBackendStoppedLabel"), QStringLiteral("ToolTip.text")).toString(),
-             reason);
+    QCOMPARE(ui.item("statusBarEngineError")->property("toolTipText").toString(), reason);
 }
 
 namespace {
 
-// Answers the fallback bridge's save request with this ID.
-bool answerStateSave(QObject *bridge, int requestId, bool saved, const QString &message = {}) {
+// The quit failure's paragraphs of the system's errors, under `message`,
+// in order.
+QList<QQuickItem *> quitFailureErrorLines(QQuickItem *message) {
+    QList<QQuickItem *> lines;
+    for (QQuickItem *child : message->childItems()) {
+        if (child->objectName() == QLatin1String("quitSaveFailedMessageLine") && child->isVisible()) {
+            lines << child;
+        }
+    }
+    std::sort(lines.begin(), lines.end(), [](QQuickItem *a, QQuickItem *b) { return a->y() < b->y(); });
+    return lines;
+}
+
+// A failed save before quitting, as BridgeClient's quitSaveFailureMap gives
+// it: the settings, and the queue if `queue`, with `cause` and the system's
+// text `detail`.
+QVariantMap quitSaveFailure(const QString &detail, const QString &cause = {}, bool queue = false) {
+    return {{QStringLiteral("settings"), true},
+            {QStringLiteral("queue"), queue},
+            {QStringLiteral("scrobbles"), false},
+            {QStringLiteral("cause"), cause},
+            {QStringLiteral("detail"), detail}};
+}
+
+// Answers the fallback bridge's save request with this ID: saved, or failed
+// with the system's text `detail`.
+bool answerStateSave(QObject *bridge, int requestId, bool saved, const QString &detail = {}) {
     return QMetaObject::invokeMethod(bridge, "stateSaveFinished", Q_ARG(int, requestId),
-        Q_ARG(bool, saved), Q_ARG(QString, message));
+        Q_ARG(bool, saved), Q_ARG(QVariant, saved ? QVariantMap() : quitSaveFailure(detail)));
+}
+
+// Makes the fallback bridge's saves fail with `failure`, or succeed with none.
+bool failStateSaves(QObject *bridge, const QVariantMap &failure) {
+    return bridge->setProperty("stateSaveFailure", failure.isEmpty() ? QVariant() : QVariant(failure));
 }
 
 // Runs the save timeout's handler now, in place of the running timer.
@@ -443,8 +493,6 @@ int lastStateSaveRequest(QObject *bridge) {
     return bridge->property("lastStateSaveRequestId").toInt();
 }
 
-const QString kStateSaveTimeoutMessage = QStringLiteral(
-    "The backend did not answer in time; settings and the queue may not have been saved.");
 
 } // namespace
 
@@ -479,51 +527,65 @@ void ErrorsSmokeTest::failedSaveBeforeQuitShowsTheErrorAndRetrySaves() {
     QVERIFY2(ui.loaded(), "Main.qml failed to show");
     const auto restoreQuit = keepRunningWhenTheWindowCloses();
     const QString error = QStringLiteral(
-        "Settings could not be saved: failed to write /config/ferrous/settings.txt: "
-        "No space left on device (os error 28)");
-    QVERIFY(ui.bridge->setProperty("stateSaveError", error));
+        "failed to write /config/ferrous/settings.txt: No space left on device (os error 28)\n"
+        "failed to write /config/ferrous/session.txt: No space left on device (os error 28)");
+    QVERIFY(failStateSaves(ui.bridge, quitSaveFailure(error, QStringLiteral("noSpace"), true)));
 
     ui.window->close();
 
     QTRY_VERIFY(ui.saveFailed->property("visible").toBool());
-    // The error as it is; shown with its path broken between folders and
-    // its "(os error 28)" whole.
+    // The system's text as it is, each error a paragraph of its own; shown
+    // with its paths broken between folders and its "(os error 28)" whole.
     QObject *message = ui.saveFailedMessage;
     QCOMPARE(message->property("message").toString(), error);
-    QCOMPARE(message->property("text").toString().remove(QChar(0x200b)).remove(QChar(0x2060))
-                 .replace(QChar(0x00a0), QLatin1Char(' ')),
-             error);
-    QVERIFY(message->property("text").toString().contains(QStringLiteral("(os error 28)")));
+    const QList<QQuickItem *> errorLines = quitFailureErrorLines(qobject_cast<QQuickItem *>(message));
+    QCOMPARE(errorLines.size(), 2);
+    QStringList shownErrors;
+    for (QQuickItem *line : errorLines) {
+        shownErrors << line->property("text").toString().remove(QChar(0x200b)).remove(QChar(0x2060))
+                           .replace(QChar(0x00a0), QLatin1Char(' '));
+        // Whole: as it is, or with no-break spaces where it wraps.
+        QVERIFY(line->property("text").toString().contains(
+            QRegularExpression(QStringLiteral("\\(os[ \u00a0]error[ \u00a0]28\\)"))));
+        QCOMPARE(line->property("textFormat").toInt(), int(Qt::PlainText));
+    }
+    QCOMPARE(shownErrors.join(QLatin1Char('\n')), error);
     QVERIFY(ui.window->isVisible());
-    // The heading says what happened in words; the system's error is the
-    // line below it, in the secondary colour, not the heading.
+    // The lead names what wasn't saved, the cause says why in plain words,
+    // and the system's text is under them, in the secondary colour, as Tag
+    // Change Details orders a failed file's lines.
     QQuickItem *heading = ui.item("quitSaveFailedHeading");
+    QQuickItem *cause = ui.item("quitSaveFailedCause");
     auto *messageItem = qobject_cast<QQuickItem *>(message);
     QQuickItem *details = ui.item("quitSaveFailedDetails");
-    QVERIFY(heading != nullptr && messageItem != nullptr && details != nullptr);
-    QTRY_VERIFY(heading->isVisible() && messageItem->isVisible());
+    QVERIFY(heading != nullptr && cause != nullptr && messageItem != nullptr && details != nullptr);
+    QTRY_VERIFY(heading->isVisible() && cause->isVisible() && messageItem->isVisible());
     const QString headingText = heading->property("text").toString();
-    // It says so once, on one line, and not in the title's words again;
-    // what the changes can be is in the text below.
-    QCOMPARE(headingText, QStringLiteral("Some recent changes were not saved."));
-    QVERIFY(!headingText.contains(QStringLiteral("could not be saved")));
+    QCOMPARE(headingText, QStringLiteral("Ferrous couldn’t save its settings or the queue."));
+    QCOMPARE(cause->property("text").toString(), QStringLiteral("There isn’t enough free space on the disk."));
+    QCOMPARE(cause->property("textFormat").toInt(), int(Qt::PlainText));
     QCOMPARE(heading->property("lineCount").toInt(), 1);
-    // The lead, semibold, as every dialog's first sentence is; the error and
-    // what follows regular, secondary.
+    QVERIFY(sceneRectOf(cause).top() >= sceneRectOf(heading).bottom());
+    QVERIFY(sceneRectOf(messageItem).top() >= sceneRectOf(cause).bottom());
+    // The lead, semibold, as every dialog's first sentence is; the cause
+    // regular in the text's own ink; the system's text regular, secondary.
     QCOMPARE(heading->property("font").value<QFont>().weight(), QFont::DemiBold);
-    QCOMPARE(messageItem->property("font").value<QFont>().weight(), QFont::Normal);
+    QCOMPARE(cause->property("font").value<QFont>().weight(), QFont::Normal);
+    QCOMPARE(colorOf(cause, "color"), colorOf(heading, "color"));
+    QCOMPARE(errorLines.first()->property("font").value<QFont>().weight(), QFont::Normal);
+    // What Quit Anyway loses is what the lead says wasn't saved.
     QCOMPARE(details->property("text").toString(),
-             QStringLiteral("Unsaved changes can include settings, queue changes and Last.fm scrobbles. "
-                            "Retry saves again, for example after freeing disk space. Quit Anyway closes "
-                            "Ferrous and loses them."));
+             QStringLiteral("Quit Anyway loses unsaved settings and queue changes."));
+    // No cure that contradicts the cause above it, such as a denied
+    // permission (it advised freeing disk space under one).
+    QVERIFY(!details->property("text").toString().contains(QStringLiteral("disk space")));
     QVERIFY(sceneRectOf(details).top() >= sceneRectOf(messageItem).bottom());
     QVERIFY2(!headingText.contains(QStringLiteral("os error")), qPrintable(headingText));
     QVERIFY(sceneRectOf(messageItem).top() >= sceneRectOf(heading).bottom());
-    QCOMPARE(message->property("textFormat").toInt(), int(Qt::PlainText));
-    QVERIFY(colorOf(message, "color") != colorOf(heading, "color"));
+    QVERIFY(colorOf(errorLines.first(), "color") != colorOf(heading, "color"));
 
     // The disk has room again.
-    QVERIFY(ui.bridge->setProperty("stateSaveError", QString()));
+    QVERIFY(failStateSaves(ui.bridge, {}));
     QVERIFY(clickButton(ui.window, QStringLiteral("quitSaveFailedRetryButton")));
 
     QTRY_VERIFY(!ui.window->isVisible());
@@ -545,7 +607,7 @@ void ErrorsSmokeTest::aFailedSaveBeforeQuitIsNotHiddenByRecentErrors() {
     QVERIFY(QMetaObject::invokeMethod(ui.errors, "historyRequested"));
     settle();
     QTRY_VERIFY(ui.recentErrors->property("opened").toBool());
-    QVERIFY(ui.bridge->setProperty("stateSaveError", QStringLiteral("No space left on device")));
+    QVERIFY(failStateSaves(ui.bridge, quitSaveFailure(QStringLiteral("No space left on device"))));
 
     ui.window->close();
     settle();
@@ -566,7 +628,7 @@ void ErrorsSmokeTest::retryTakesNoSecondAnswerAsTheDialogFades() {
 
     ui.window->close();
     const int first = lastStateSaveRequest(ui.bridge);
-    QVERIFY(answerStateSave(ui.bridge, first, false, QStringLiteral("Settings could not be saved")));
+    QVERIFY(answerStateSave(ui.bridge, first, false, QStringLiteral("failed to write /config/settings.txt")));
     QTRY_VERIFY(ui.saveFailed->property("opened").toBool());
     // A window of its own above the main window.
     auto *dialogWindow = qobject_cast<QQuickWindow *>(ui.saveFailed);
@@ -601,7 +663,7 @@ void ErrorsSmokeTest::enterRetriesAsSoonAsTheSaveFailureShows() {
 
     ui.window->close();
     const int first = lastStateSaveRequest(ui.bridge);
-    QVERIFY(answerStateSave(ui.bridge, first, false, QStringLiteral("Settings could not be saved")));
+    QVERIFY(answerStateSave(ui.bridge, first, false, QStringLiteral("failed to write /config/settings.txt")));
     QTRY_VERIFY(ui.saveFailed->property("visible").toBool());
     auto *dialogWindow = qobject_cast<QQuickWindow *>(ui.saveFailed);
     QVERIFY(dialogWindow != nullptr);
@@ -616,7 +678,7 @@ void ErrorsSmokeTest::enterRetriesAsSoonAsTheSaveFailureShows() {
     QCOMPARE(lastStateSaveRequest(ui.bridge), retry);
 
     // The retry fails too; Escape, at once, keeps Ferrous open.
-    QVERIFY(answerStateSave(ui.bridge, retry, false, QStringLiteral("Settings could not be saved")));
+    QVERIFY(answerStateSave(ui.bridge, retry, false, QStringLiteral("failed to write /config/settings.txt")));
     QTRY_VERIFY(ui.saveFailed->property("visible").toBool());
     QVERIFY(keyboardInPopupContent(ui.saveFailed));
     QTest::keyClick(dialogWindow, Qt::Key_Escape);
@@ -637,7 +699,13 @@ void ErrorsSmokeTest::saveAnsweredAfterItsTimeoutStillClosesTheWindow() {
     QCOMPARE(requestId, 1);
     QVERIFY(timeOutStateSave(ui.window));
     QTRY_VERIFY(ui.saveFailed->property("visible").toBool());
-    QCOMPARE(ui.saveFailedMessage->property("text").toString(), kStateSaveTimeoutMessage);
+    // It can't say they weren't saved, only that it doesn't know; there is
+    // no system's text.
+    QCOMPARE(ui.item("quitSaveFailedHeading")->property("text").toString(),
+             QStringLiteral("Ferrous couldn’t confirm that its settings and the queue were saved."));
+    QCOMPARE(ui.item("quitSaveFailedCause")->property("text").toString(),
+             QStringLiteral("Saving didn’t finish in time."));
+    QVERIFY(!qobject_cast<QQuickItem *>(ui.saveFailedMessage)->isVisible());
     QVERIFY(ui.window->isVisible());
 
     // Slow storage finishes the save after all.
@@ -664,17 +732,17 @@ void ErrorsSmokeTest::answerToAnEarlierSaveAttemptDoesNotSettleARetry() {
     QTRY_VERIFY(!ui.saveFailed->property("visible").toBool());
 
     // Neither answer to the first attempt settles the retry.
-    QVERIFY(answerStateSave(ui.bridge, first, false, QStringLiteral("Settings could not be saved")));
+    QVERIFY(answerStateSave(ui.bridge, first, false, QStringLiteral("failed to write /config/settings.txt")));
     QVERIFY(answerStateSave(ui.bridge, first, true));
     QCoreApplication::processEvents();
     QVERIFY(ui.window->isVisible());
     QVERIFY(!ui.saveFailed->property("visible").toBool());
 
     // The retry's own answer does: its failure is shown, not the first's.
-    const QString error = QStringLiteral("Settings could not be saved: disk full");
+    const QString error = QStringLiteral("failed to write /config/settings.txt: disk full");
     QVERIFY(answerStateSave(ui.bridge, retry, false, error));
     QTRY_VERIFY(ui.saveFailed->property("visible").toBool());
-    QCOMPARE(ui.saveFailedMessage->property("text").toString(), error);
+    QCOMPARE(ui.saveFailedMessage->property("message").toString(), error);
 
     // A success after another retry closes the window.
     QVERIFY(clickButton(ui.window, QStringLiteral("quitSaveFailedRetryButton")));
@@ -733,8 +801,8 @@ void ErrorsSmokeTest::failedSaveAfterMprisQuitShowsTheDialogOverAMinimizedWindow
     QVERIFY2(ui.loaded(), "Main.qml failed to show");
     const auto restoreQuit = keepRunningWhenTheWindowCloses();
     const auto restoreMainWindow = useAsMainWindow(ui.window);
-    const QString error = QStringLiteral("Settings could not be saved");
-    QVERIFY(ui.bridge->setProperty("stateSaveError", error));
+    const QString error = QStringLiteral("failed to write /config/settings.txt");
+    QVERIFY(failStateSaves(ui.bridge, quitSaveFailure(error)));
     ui.window->showMinimized();
     QTRY_COMPARE(ui.window->visibility(), QWindow::Minimized);
 
@@ -742,7 +810,7 @@ void ErrorsSmokeTest::failedSaveAfterMprisQuitShowsTheDialogOverAMinimizedWindow
 
     // The dialog is drawn in the window, so the window comes forward with it.
     QTRY_VERIFY(ui.saveFailed->property("visible").toBool());
-    QCOMPARE(ui.saveFailedMessage->property("text").toString(), error);
+    QCOMPARE(ui.saveFailedMessage->property("message").toString(), error);
     QVERIFY(ui.window->isVisible());
     QTRY_VERIFY(ui.window->visibility() != QWindow::Minimized);
 
@@ -757,7 +825,7 @@ void ErrorsSmokeTest::quitTimeErrorClosesAFullscreenViewerFirst() {
     QVERIFY(surface != nullptr);
     const auto restoreQuit = keepRunningWhenTheWindowCloses();
     const auto restoreMainWindow = useAsMainWindow(ui.window);
-    QVERIFY(ui.bridge->setProperty("stateSaveError", QStringLiteral("Settings could not be saved")));
+    QVERIFY(failStateSaves(ui.bridge, quitSaveFailure(QStringLiteral("failed to write /config/settings.txt"))));
 
     // The visualization viewer over the whole screen, a modal window of its own.
     ui.bridge->setProperty("viewerFullscreenMode", 1);
@@ -1084,6 +1152,7 @@ void ErrorsSmokeTest::viewerIssuesButtonsOpenRecentErrorsAboveTheViewer() {
         const char *windowName;
         const char *name;
         const char *closeName;
+        bool strip = true;
     };
     const QList<Viewer> viewers{
         {"openSpectrogramViewer", "spectrogramViewerOpen", 0, nullptr, "spectrogram popup",
@@ -1094,10 +1163,15 @@ void ErrorsSmokeTest::viewerIssuesButtonsOpenRecentErrorsAboveTheViewer() {
          "spectrogram fullscreen", "spectrogramFullscreenCloseButton"},
         {"openAlbumArtViewerForCurrentArt", "albumArtViewerOpen", 1, "albumArtFullscreenWindow",
          "album art fullscreen", "albumArtFullscreenCloseButton"},
+        // With the title strip turned off, its corner plate carries the
+        // button (it was never given the errors).
+        {"openSpectrogramViewer", "spectrogramViewerOpen", 1, "spectrogramFullscreenWindow",
+         "spectrogram fullscreen, strip off", "spectrogramFullscreenCornerCloseButton", false},
     };
     for (const Viewer &shown : viewers) {
         const QByteArray name(shown.name);
         bridge->setProperty("viewerFullscreenMode", shown.fullscreenMode);
+        bridge->setProperty("showFullscreenTitleStrip", shown.strip);
         QVERIFY(QMetaObject::invokeMethod(viewer, shown.open));
         settle();
         QTRY_VERIFY(viewer->property(shown.openProperty).toBool());

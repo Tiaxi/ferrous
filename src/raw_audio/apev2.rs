@@ -8,6 +8,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use super::is_raw_surround_file;
+use crate::edit_failure::{EditFailure, EditStep};
 
 const APE_PREAMBLE: &[u8; 8] = b"APETAGEX";
 const APE_TAG_HEADER_BYTES: usize = 32;
@@ -365,19 +366,22 @@ pub(crate) fn format_ape_number_pair(number: Option<u32>, total: Option<u32>) ->
 pub(crate) fn edit_appended_apev2_text_items(
     path: &Path,
     edits: &[(ApeTextField, Option<String>)],
-) -> Result<(), String> {
+) -> Result<(), EditFailure> {
     if !is_raw_surround_file(path) {
         return Err(format!(
             "APEv2 write is only supported for AC3/DTS files: {}",
             path.to_string_lossy()
-        ));
+        )
+        .into());
     }
     crate::safe_save::rewrite_via_temp_copy(path, |file| {
-        apply_apev2_text_edits(file, edits).map_err(|err| {
-            format!(
-                "failed to update APEv2 tag in {}: {err}",
-                path.to_string_lossy()
-            )
+        apply_apev2_text_edits(file, edits).map_err(|failure| {
+            failure.map_message(|err| {
+                format!(
+                    "failed to update APEv2 tag in {}: {err}",
+                    path.to_string_lossy()
+                )
+            })
         })
     })
 }
@@ -385,7 +389,8 @@ pub(crate) fn edit_appended_apev2_text_items(
 fn apply_apev2_text_edits(
     file: &mut File,
     edits: &[(ApeTextField, Option<String>)],
-) -> Result<(), String> {
+) -> Result<(), EditFailure> {
+    let failed = |err: std::io::Error| EditFailure::io(EditStep::Write, &err, err.to_string());
     let file_len = file.seek(SeekFrom::End(0)).map_err(|err| err.to_string())?;
     let (tag_start, mut items) = match read_apev2_footer(file, file_len) {
         Some(footer) => read_apev2_items(file, file_len, footer)?,
@@ -421,12 +426,11 @@ fn apply_apev2_text_edits(
         }
     }
 
-    file.set_len(tag_start).map_err(|err| err.to_string())?;
+    file.set_len(tag_start).map_err(failed)?;
     if !items.is_empty() {
         file.seek(SeekFrom::Start(tag_start))
             .map_err(|err| err.to_string())?;
-        file.write_all(&build_apev2_tag(&items)?)
-            .map_err(|err| err.to_string())?;
+        file.write_all(&build_apev2_tag(&items)?).map_err(failed)?;
     }
     Ok(())
 }
@@ -832,7 +836,8 @@ mod tests {
 
         let error =
             edit_appended_apev2_text_items(&path, &[(ApeTextField::Title, Some("New".into()))])
-                .expect_err("tag with uncounted items is not rewritten");
+                .expect_err("tag with uncounted items is not rewritten")
+                .to_string();
 
         assert!(error.contains("malformed"), "{error}");
         assert_eq!(std::fs::read(&path).expect("read file"), bytes);
@@ -899,7 +904,8 @@ mod tests {
 
         let error =
             edit_appended_apev2_text_items(&path, &[(ApeTextField::Title, Some("New".into()))])
-                .expect_err("malformed tag is not rewritten");
+                .expect_err("malformed tag is not rewritten")
+                .to_string();
 
         assert!(error.contains("malformed"), "{error}");
         assert_eq!(std::fs::read(&path).expect("read file"), bytes);

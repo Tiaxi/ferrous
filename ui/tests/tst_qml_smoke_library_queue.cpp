@@ -3379,7 +3379,10 @@ void LibraryQueueSmokeTest::emptyLibraryAndFileMenuAddALibraryFolder() {
     engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
     QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
-    QTRY_COMPARE(bridge.property("libraryRootCount").toInt(), 0);
+    // The backend tells the UI when it has read the library, also an empty
+    // one; only then is no root a first run.
+    QTRY_VERIFY_WITH_TIMEOUT(bridge.property("libraryLoaded").toBool(), 10000);
+    QCOMPARE(bridge.property("libraryRootCount").toInt(), 0);
 
     QObject *folderDialog = window->findChild<QObject *>(QStringLiteral("scanFolderDialog"));
     QObject *nameDialog = window->findChild<QObject *>(QStringLiteral("libraryRootNameDialog"));
@@ -3556,13 +3559,13 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
     QCOMPARE(weight(cell(2, "title")), QFont::Normal);
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
 
-    // An unreadable file: the status bar's warning sign, at its size and
+    // An unreadable file: the status bar's error mark, at its size and
     // in its negative colour, and a quieter title (Breeze's dialog-warning
     // as a mask was a solid grey triangle).
     QVERIFY(errors->setProperty("unreadablePaths",
                                 QVariantMap{{QStringLiteral("/music/3.flac"),
                                              QStringLiteral("Cannot read the file")}}));
-    QTRY_VERIFY(glyphName(3).endsWith(QStringLiteral("/assets/status-warning.svg")));
+    QTRY_VERIFY(glyphName(3).endsWith(QStringLiteral("/assets/status-error.svg")));
     QCOMPARE(color(glyph(3)), paletteColor("negative"));
     QVERIFY(glyph(3)->property("isMask").toBool());
     QVariant warningSize;
@@ -3589,7 +3592,7 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
     QCOMPARE(tint(3), QStringLiteral("#00000000"));
     QCOMPARE(color(cell(4, "order")), paletteColor("textTertiarySelected"));
     QCOMPARE(color(cell(3, "order")), paletteColor("textTertiary"));
-    QCOMPARE(color(cell(2, "title")), paletteColor("now"));
+    QCOMPARE(color(cell(2, "title")), paletteColor("nowSelected"));
     QVERIFY(!ring(4));
     // With focus from the keyboard, in the active window: the active tint,
     // and a ring on the current row only.
@@ -3611,7 +3614,7 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
     QTest::mouseMove(window, queueRowPoint(view, 4, 0.5));
     QTRY_COMPARE(tint(4), paletteColor("selectionHovered"));
     QCOMPARE(tint(2), paletteColor("selection"));
-    QCOMPARE(color(cell(2, "title")), paletteColor("now"));
+    QCOMPARE(color(cell(2, "title")), paletteColor("nowSelected"));
     QTest::mouseMove(window, queueRowPoint(view, 3, 0.5));
     QTRY_COMPARE(tint(4), paletteColor("selection"));
     QCOMPARE(tint(3), QStringLiteral("#00000000"));
@@ -3842,11 +3845,12 @@ void LibraryQueueSmokeTest::queueDropLineKeepsTheScrollbarLaneOnlyWhileItShows()
     QCOMPARE(indicator->y(), boundary - 1);
     QCOMPARE(indicator->y() + indicator->height() / 2, boundary);
 
-    // A long one: the scrollbar shows, and the line stops at its lane.
+    // A long one: the scrollbar shows, and the line stops where the rows'
+    // focus ring does, 2 px short of its lane.
     QVERIFY(rows.insertRowsAt(4, queueRows(4, 60)));
     pane.bridge->setProperty("queueLength", 60);
     QTRY_VERIFY(scrollBar->isVisible());
-    QCOMPARE(indicator->width(), view->width() - lane);
+    QCOMPARE(indicator->width(), view->width() - lane - 2);
 }
 
 namespace {

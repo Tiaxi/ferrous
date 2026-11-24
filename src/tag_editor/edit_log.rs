@@ -149,6 +149,7 @@ mod tests {
             path: path.to_string(),
             ok,
             error: (!ok).then(|| "the file is read-only".to_string()),
+            cause: None,
         }
     }
 
@@ -183,6 +184,7 @@ mod tests {
                 new_path: Some(format!("/fixture/library/{n:02} Title.flac")),
                 ok: true,
                 error: None,
+                cause: None,
             })
             .collect();
         // Left as it was: nothing to log.
@@ -191,6 +193,7 @@ mod tests {
             new_path: Some("/fixture/library/kept.flac".to_string()),
             ok: true,
             error: None,
+            cause: None,
         });
         log_renames(&results);
         let lines = test_log::all();

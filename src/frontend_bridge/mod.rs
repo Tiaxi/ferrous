@@ -26,6 +26,7 @@ use crate::playback::{
     PathRenames, PlaybackCommand, PlaybackEngine, PlaybackEvent, PlaybackSnapshot, PlaybackState,
     RepeatMode,
 };
+use crate::save_cause::{SaveCause, SaveProblem};
 use crate::worker_thread::{spawn_joinable, JoinableThread};
 
 mod commands;
@@ -47,6 +48,7 @@ mod queue_relay;
 mod queue_sync;
 mod queue_undo;
 mod queue_validation;
+mod quit_failure;
 mod search;
 mod search_query;
 mod search_suggest;
@@ -76,6 +78,7 @@ pub use keyboard_shortcuts::KeyboardShortcuts;
 pub use queue_columns::{QueueColumnSettings, QueueColumnWidths};
 pub use queue_sync::{QueueEdit, QueueUpdate};
 pub use queue_undo::{QueueUndoKind, QueueUndoRestored, QueueUndoState};
+pub use quit_failure::QuitSaveFailure;
 pub(crate) use search::is_main_album_disc_section;
 use search::{drain_search_results, process_search_results, SearchWorkerQuery};
 pub use window_layout::{WindowGeometry, WindowLayout};
@@ -488,7 +491,7 @@ pub enum BridgeEvent {
     /// to show the user if a save failed.
     StateSaved {
         request_id: u32,
-        result: Result<(), String>,
+        result: Result<(), QuitSaveFailure>,
     },
     /// The window layout saved in the settings, sent once at startup, for
     /// the UI to show the window with, the widths of the queue's columns,
@@ -551,6 +554,10 @@ pub struct BridgeSnapshot {
     pub analysis: AnalysisSnapshot,
     pub metadata: TrackMetadata,
     pub library: Arc<LibrarySnapshot>,
+    /// Whether `library` is the library worker's, rather than the empty one
+    /// the bridge starts with: until then, no root is not yet known to mean
+    /// none.
+    pub library_loaded: bool,
     pub library_status: LibraryStatus,
     pub(crate) queue_details: Arc<HashMap<PathBuf, IndexedTrack>>,
     pub library_artist_count: usize,
@@ -795,6 +802,15 @@ impl Default for BridgeSettings {
     }
 }
 
+/// Whether the bridge's library is the library worker's yet, or still the
+/// empty one it starts with.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum LibraryLoad {
+    #[default]
+    Pending,
+    Loaded,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(super) struct BridgeState {
     queue_detail_generation: u64,
@@ -803,6 +819,9 @@ pub(super) struct BridgeState {
     analysis: AnalysisSnapshot,
     metadata: TrackMetadata,
     library: Arc<LibrarySnapshot>,
+    /// Whether the library worker's first event has been applied; see
+    /// [`BridgeSnapshot::library_loaded`].
+    library_load: LibraryLoad,
     library_status: LibraryStatus,
     /// Finds `library`'s tracks by path.
     library_index: library_index::LibraryPathIndex,
@@ -1048,6 +1067,7 @@ impl BridgeState {
             analysis: self.analysis.clone(),
             metadata,
             library: self.library.clone(),
+            library_loaded: self.library_load == LibraryLoad::Loaded,
             library_status: self.library_status.clone(),
             queue_details: self.queue_details.clone(),
             library_artist_count: self.library_artist_count,
@@ -2082,10 +2102,9 @@ impl BridgeLoopRuntime {
                 if let Some(request_id) = self.quit_save_waiting_for_lastfm() {
                     self.finish_quit_save(
                         request_id,
-                        Some(
-                            "Last.fm stopped unexpectedly; scrobbles it had not saved are lost."
-                                .to_string(),
-                        ),
+                        Some(QuitSaveFailure::scrobbles(SaveProblem::other(
+                            "Last.fm stopped unexpectedly; scrobbles it had not saved are lost",
+                        ))),
                         event_tx,
                     );
                 }
@@ -2438,7 +2457,11 @@ impl BridgeLoopRuntime {
                 urgency
             }
             LastFmEvent::SavedForQuit { request_id, result } => {
-                self.finish_quit_save(request_id, result.err(), event_tx);
+                self.finish_quit_save(
+                    request_id,
+                    result.err().map(QuitSaveFailure::scrobbles),
+                    event_tx,
+                );
                 SnapshotUrgency::None
             }
         }
@@ -2460,7 +2483,7 @@ impl BridgeLoopRuntime {
     fn answer_save_for_quit(
         &mut self,
         request_id: u32,
-        result: Result<(), String>,
+        result: Result<(), QuitSaveFailure>,
         event_tx: &Sender<BridgeEvent>,
     ) {
         if self.lastfm_may_hold_unsaved_scrobbles() && !self.quit_save.lastfm_stopped {
@@ -2516,16 +2539,23 @@ impl BridgeLoopRuntime {
             self.finish_quit_save(request_id, None, event_tx);
             return;
         }
-        let problem = format!(
-            "Last.fm: {at_risk} {} not saved and would be lost on quit. Last.fm is busy, \
-             possibly waiting for the network, and could not save {} in time.",
-            if at_risk == 1 {
-                "scrobble is"
-            } else {
-                "scrobbles are"
-            },
-            if at_risk == 1 { "it" } else { "them" }
+        // The dialog says why; the log keeps how many.
+        log_warning(
+            ErrorCategory::LastFm,
+            &format!(
+                "{at_risk} {} not saved before quitting: Last.fm is busy, possibly waiting \
+                 for the network",
+                if at_risk == 1 {
+                    "scrobble was"
+                } else {
+                    "scrobbles were"
+                }
+            ),
         );
+        let problem = QuitSaveFailure::scrobbles(SaveProblem {
+            cause: SaveCause::Busy,
+            detail: String::new(),
+        });
         self.finish_quit_save(request_id, Some(problem), event_tx);
     }
 
@@ -2541,7 +2571,7 @@ impl BridgeLoopRuntime {
     fn finish_quit_save(
         &mut self,
         request_id: u32,
-        lastfm_problem: Option<String>,
+        lastfm_problem: Option<QuitSaveFailure>,
         event_tx: &Sender<BridgeEvent>,
     ) {
         if self
@@ -2557,16 +2587,12 @@ impl BridgeLoopRuntime {
             return;
         };
         self.quit_save.deadline = None;
-        let failures: Vec<String> = saved.err().into_iter().chain(lastfm_problem).collect();
+        let failure = QuitSaveFailure::joined(saved.err().into_iter().chain(lastfm_problem));
         let _ = try_send_event(
             event_tx,
             BridgeEvent::StateSaved {
                 request_id,
-                result: if failures.is_empty() {
-                    Ok(())
-                } else {
-                    Err(failures.join("\n"))
-                },
+                result: failure.map_or(Ok(()), Err),
             },
         );
     }
@@ -2859,21 +2885,25 @@ impl BridgeLoopRuntime {
             return;
         }
         let mut failures = Vec::new();
-        for (result, reported) in [
-            (outcome.settings, &mut self.save_errors.settings),
-            (outcome.session, &mut self.save_errors.session),
+        for (result, reported, failed) in [
+            (
+                outcome.settings,
+                &mut self.save_errors.settings,
+                QuitSaveFailure::settings as fn(SaveProblem) -> QuitSaveFailure,
+            ),
+            (
+                outcome.session,
+                &mut self.save_errors.session,
+                QuitSaveFailure::queue,
+            ),
         ] {
             match result {
                 Some(Ok(())) => *reported = None,
-                Some(Err(failure)) => failures.push(failure.message),
+                Some(Err(failure)) => failures.push(failed(failure.problem)),
                 None => {}
             }
         }
-        let result = if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(failures.join("\n"))
-        };
+        let result = QuitSaveFailure::joined(failures).map_or(Ok(()), Err);
         for request_id in quit_requests {
             self.answer_save_for_quit(request_id, result.clone(), event_tx);
         }
@@ -2883,17 +2913,13 @@ impl BridgeLoopRuntime {
     fn persist_stopped(&mut self, event_tx: &Sender<BridgeEvent>) {
         self.persist_failed();
         for (_, request_id) in std::mem::take(&mut self.quit_save.persisting) {
-            self.answer_save_for_quit(
-                request_id,
-                Err(PERSIST_STOPPED_MESSAGE.to_string()),
-                event_tx,
-            );
+            self.answer_save_for_quit(request_id, Err(persist_stopped_failure()), event_tx);
         }
     }
 
     /// Hand the settings and the session over to be saved for quitting.
     /// Returns the request to wait for, or why there is none to wait for.
-    fn request_save_for_quit(&mut self) -> Result<Option<u64>, String> {
+    fn request_save_for_quit(&mut self) -> Result<Option<u64>, QuitSaveFailure> {
         if !self.persisted_state_enabled {
             return Ok(None);
         }
@@ -2907,7 +2933,7 @@ impl BridgeLoopRuntime {
             .request(Some(self.state.settings.clone()), Some(session));
         requested.map(Some).map_err(|persist::PersistStopped| {
             self.persist_failed();
-            PERSIST_STOPPED_MESSAGE.to_string()
+            persist_stopped_failure()
         })
     }
 
@@ -2978,8 +3004,11 @@ impl BridgeLoopRuntime {
 }
 
 /// Why a save was not made: the thread that saves has stopped.
-const PERSIST_STOPPED_MESSAGE: &str =
-    "The settings and the queue could not be saved: the thread that saves them stopped.";
+fn persist_stopped_failure() -> QuitSaveFailure {
+    QuitSaveFailure::settings_and_queue(SaveProblem::other(
+        "the thread that saves the settings and the queue stopped",
+    ))
+}
 
 /// What a save before quitting waits for.
 #[derive(Default)]
@@ -2990,7 +3019,7 @@ struct QuitSave {
     /// A save that waits for Last.fm to save scrobbles it holds only in
     /// memory: its request ID, and how saving the settings and the session
     /// went.
-    waiting_for_lastfm: Option<(u32, Result<(), String>)>,
+    waiting_for_lastfm: Option<(u32, Result<(), QuitSaveFailure>)>,
     /// Set once the Last.fm service has stopped unexpectedly; nothing waits
     /// for it then.
     lastfm_stopped: bool,
@@ -3017,12 +3046,9 @@ fn report_save(
         *reported = None;
         return true;
     };
-    if reported.as_ref() != Some(&failure.identity) {
-        let error = BridgeError::error(ErrorCategory::Settings, failure.message)
-            .about(failure.identity.0.to_string_lossy());
-        if send_error(event_tx, error) {
-            *reported = Some(failure.identity);
-        }
+    if reported.as_ref() != Some(&failure.identity) && send_error(event_tx, failure.bridge_error())
+    {
+        *reported = Some(failure.identity);
     }
     false
 }
@@ -3116,13 +3142,17 @@ fn run_bridge_loop(
         Err(message) => {
             let _ = try_send_event(
                 event_tx,
-                BridgeEvent::Failed(format!(
-                    "The Ferrous backend stopped after an {message}. Restart Ferrous to continue."
-                )),
+                BridgeEvent::Failed(engine_stopped_after(&message)),
             );
             false
         }
     }
+}
+
+/// What the UI shows for a bridge that stopped after the panic `message`
+/// tells of: the status bar calls it the playback engine.
+fn engine_stopped_after(message: &str) -> String {
+    format!("The playback engine stopped after an {message}. Restart Ferrous to continue.")
 }
 
 /// Read the settings, before the workers start, and send the UI the window
@@ -3425,15 +3455,31 @@ mod tests {
             &mut reported,
             &event_tx
         ));
-        let messages = error_messages(&event_rx);
-        assert_eq!(messages.len(), 1, "{messages:?}");
+        let errors: Vec<BridgeError> = event_rx
+            .try_iter()
+            .filter_map(|event| match event {
+                BridgeEvent::Error(error) => Some(error),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        // The title says what couldn't be saved; the system's text, apart,
+        // says why, for Recent Issues' detail line.
+        assert_eq!(errors[0].message, "Settings couldn\u{2019}t be saved");
+        assert_eq!(errors[0].subject, settings_path.display().to_string());
         assert!(
-            messages[0].starts_with(&format!(
-                "Settings could not be saved: {} links to {}, which cannot be reached: ",
+            errors[0].detail.starts_with(&format!(
+                "{} links to {}, which cannot be reached: ",
                 settings_path.display(),
                 target.display(),
             )),
-            "{messages:?}"
+            "{errors:?}"
+        );
+        assert!(
+            errors[0]
+                .logged_message()
+                .starts_with("Settings couldn\u{2019}t be saved: "),
+            "the log has both, as before"
         );
         assert_eq!(
             std::fs::read_link(&settings_path).expect("the link is kept"),
@@ -3863,10 +3909,7 @@ mod tests {
         runtime.settle_persistence(&event_tx);
         let messages = error_messages(&event_rx);
         assert_eq!(messages.len(), 1, "{messages:?}");
-        assert!(
-            messages[0].starts_with("Settings could not be saved"),
-            "{messages:?}"
-        );
+        assert_eq!(messages, ["Settings couldn\u{2019}t be saved"]);
         assert!(runtime.flags.settings_dirty);
         assert_eq!(
             runtime.flags.settings_save_timing,
@@ -4084,10 +4127,7 @@ mod tests {
         runtime.settle_persistence(&event_tx);
         let messages = error_messages(&event_rx);
         assert_eq!(messages.len(), 1, "{messages:?}");
-        assert!(
-            messages[0].starts_with("Settings could not be saved"),
-            "{messages:?}"
-        );
+        assert_eq!(messages, ["Settings couldn\u{2019}t be saved"]);
         assert!(runtime.flags.settings_dirty);
         assert_eq!(
             runtime.flags.settings_save_timing,
@@ -4491,13 +4531,25 @@ mod tests {
         // The save does not wait for the network: past its deadline it
         // reports the loss, and the UI keeps the window open.
         runtime.expire_quit_save(Instant::now() + QUIT_SAVE_LASTFM_TIMEOUT, &event_tx);
-        match state_saved(&event_rx) {
-            Some((1, Err(message))) => assert!(
-                message.contains("1 scrobble is not saved and would be lost on quit"),
-                "{message}"
-            ),
-            other => panic!("expected the loss, got {other:?}"),
-        }
+        assert_eq!(
+            state_saved(&event_rx),
+            Some((
+                1,
+                Err(QuitSaveFailure::scrobbles(SaveProblem {
+                    cause: SaveCause::Busy,
+                    detail: String::new(),
+                }))
+            )),
+            "the scrobbles, which Last.fm was too busy to save"
+        );
+        assert_eq!(
+            test_log::lines_containing("not saved before quitting"),
+            [
+                "[ferrous] [lastfm] warning: 1 scrobble was not saved before quitting: \
+              Last.fm is busy, possibly waiting for the network"
+            ],
+            "the log keeps how many"
+        );
 
         // Last.fm's late answer settles nothing more.
         network.release.send(()).expect("release the request");
@@ -4601,15 +4653,21 @@ mod tests {
             "Last.fm saves them first"
         );
         assert_eq!(state_saved(&event_rx), None, "the answer waits for Last.fm");
-        let lost = "Last.fm: 2 scrobbles were not saved and would be lost on quit.";
+        let lost = SaveProblem::io(
+            std::io::ErrorKind::StorageFull,
+            "failed to save /data/lastfm_queue.json: No space left on device (os error 28)",
+        );
         runtime.handle_wake(
             BridgeLoopWake::LastFm(LastFmEvent::SavedForQuit {
                 request_id: 2,
-                result: Err(lost.to_string()),
+                result: Err(lost.clone()),
             }),
             &event_tx,
         );
-        assert_eq!(state_saved(&event_rx), Some((2, Err(lost.to_string()))));
+        assert_eq!(
+            state_saved(&event_rx),
+            Some((2, Err(QuitSaveFailure::scrobbles(lost))))
+        );
 
         // A retry replaces the save it retries; Last.fm's answer to the
         // older one is not taken for it.
@@ -4641,7 +4699,8 @@ mod tests {
         runtime.handle_wake(BridgeLoopWake::WorkerStopped(Worker::LastFm), &event_tx);
         assert!(matches!(
             state_saved(&event_rx),
-            Some((5, Err(message))) if message.contains("Last.fm stopped unexpectedly")
+            Some((5, Err(failure))) if failure.scrobbles
+                && failure.detail().contains("Last.fm stopped unexpectedly")
         ));
         runtime.handle_wake(
             BridgeLoopWake::Command(BridgeCommand::SaveState(6)),
@@ -5105,12 +5164,13 @@ mod tests {
     impl HeldMetadataFixture {
         fn change_track(&mut self, path: &Path, kind: TrackChangeKind) {
             self.runtime.handle_wake(
-                BridgeLoopWake::Playback(PlaybackEvent::TrackChanged {
-                    path: path.to_path_buf(),
-                    queue_index: 0,
+                BridgeLoopWake::Playback(PlaybackEvent::track_change(
+                    path.to_path_buf(),
+                    0,
                     kind,
-                    track_token: 2,
-                }),
+                    2,
+                    &self.runtime.state.playback,
+                )),
                 &self.event_tx,
             );
         }
@@ -5267,8 +5327,10 @@ mod tests {
             .try_iter()
             .map(|command| match command {
                 PlaybackCommand::LoadQueue(tracks) => format!("load {tracks:?}"),
+                PlaybackCommand::PlayQueue(tracks) => format!("play {tracks:?}"),
                 PlaybackCommand::AddToQueue(tracks) => format!("add {tracks:?}"),
                 PlaybackCommand::PlayAt(index) => format!("play at {index}"),
+                PlaybackCommand::StartAt(index) => format!("start at {index}"),
                 PlaybackCommand::Play => "play".to_string(),
                 other => format!("{other:?}"),
             })
@@ -5297,12 +5359,7 @@ mod tests {
         assert_eq!(runtime.state.selected_queue_index, Some(0));
         assert_eq!(
             queue_ops(&engine_rx),
-            vec![
-                format!("load {:?}", vec![track]),
-                "play at 0".to_string(),
-                "play".to_string(),
-                format!("add {album:?}"),
-            ]
+            vec![format!("play {:?}", vec![track]), format!("add {album:?}"),]
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -5348,11 +5405,7 @@ mod tests {
         assert_eq!(runtime.state.selected_queue_index, Some(0));
         assert_eq!(
             queue_ops(&engine_rx),
-            vec![
-                format!("load {tracks:?}"),
-                "play at 0".to_string(),
-                "play".to_string(),
-            ],
+            vec![format!("play {tracks:?}"),],
             "one queue change, playing from the first file"
         );
         let _ = std::fs::remove_dir_all(dir);
@@ -5407,14 +5460,7 @@ mod tests {
         apply_next_import_result(&mut runtime, &event_tx);
 
         assert_eq!(runtime.state.queue, album, "the append was discarded");
-        assert_eq!(
-            queue_ops(&engine_rx),
-            vec![
-                format!("load {album:?}"),
-                "play at 0".to_string(),
-                "play".to_string(),
-            ]
-        );
+        assert_eq!(queue_ops(&engine_rx), vec![format!("play {album:?}"),]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -5974,6 +6020,65 @@ mod tests {
             .collect()
     }
 
+    /// Until the engine reports where its track went, the snapshot sent
+    /// with a queue edit keeps the playing row on the row it was: moved
+    /// with it, or none when the edit took it out.
+    #[test]
+    fn a_queue_edit_takes_the_playing_row_with_it() {
+        let _guard = test_guard();
+        let (mut runtime, _engine_rx, event_tx, _album) = queue_order_runtime();
+        let (a, b, c, d) = (
+            p("/music/a.flac"),
+            p("/music/b.flac"),
+            p("/music/c.flac"),
+            p("/music/d.flac"),
+        );
+        let playing_row = |runtime: &BridgeLoopRuntime| {
+            runtime.state.snapshot(false).playback.current_queue_index
+        };
+        replace_queue(&mut runtime, &[a, b, c.clone(), d.clone()], &event_tx);
+        runtime.state.playback.current = Some(c.clone());
+        runtime.state.playback.current_queue_index = Some(2);
+
+        let edits = [
+            (BridgeQueueCommand::Remove(0), Some(1), "a row before it"),
+            (
+                BridgeQueueCommand::RemoveMany(vec![2]),
+                Some(1),
+                "a row after it",
+            ),
+            (
+                BridgeQueueCommand::Move { from: 1, to: 0 },
+                Some(0),
+                "its own row moved",
+            ),
+            (
+                BridgeQueueCommand::Move { from: 1, to: 0 },
+                Some(1),
+                "a row moved past it",
+            ),
+            (BridgeQueueCommand::Remove(1), None, "its own row"),
+        ];
+        for (edit, row, case) in edits {
+            runtime.handle_command(BridgeCommand::Queue(edit), &event_tx);
+            assert_eq!(playing_row(&runtime), row, "{case}");
+            if let Some(row) = row {
+                assert_eq!(runtime.state.queue.get(row), Some(&c), "{case}");
+            }
+        }
+
+        replace_queue(&mut runtime, &[c.clone(), d.clone()], &event_tx);
+        runtime.state.playback.current_queue_index = Some(0);
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::Replace {
+                tracks: vec![d, c],
+                autoplay: true,
+            }),
+            &event_tx,
+        );
+        assert_eq!(playing_row(&runtime), None, "a replaced queue");
+    }
+
     #[test]
     fn moving_rows_moves_them_all_one_undo_puts_them_back_and_a_redo_moves_them_again() {
         let _guard = test_guard();
@@ -6198,14 +6303,7 @@ mod tests {
         apply_next_import_result(&mut runtime, &event_tx);
         let selection = vec![other.clone(), first.clone(), second.clone()];
         assert_eq!(runtime.state.queue, selection);
-        assert_eq!(
-            queue_ops(&engine_rx),
-            vec![
-                format!("load {selection:?}"),
-                "play at 0".to_string(),
-                "play".to_string(),
-            ]
-        );
+        assert_eq!(queue_ops(&engine_rx), vec![format!("play {selection:?}"),]);
         // One undo brings back the queue the selection replaced.
         let offer = runtime.state.snapshot(false).queue_undo;
         assert_eq!(offer.kind, Some(QueueUndoKind::Replaced));
@@ -6986,6 +7084,175 @@ mod tests {
         std::fs::remove_dir_all(dir).expect("remove fixture");
     }
 
+    /// A WAV file of `millis` milliseconds of a quiet tone at `path`.
+    fn write_tone_wav(path: &Path, millis: u32) {
+        const RATE: u32 = 8_000;
+        let samples: Vec<u8> = (0..RATE * millis / 1_000)
+            .flat_map(|index| {
+                let sample = i16::try_from(index % 64).unwrap_or_default() * 64;
+                sample.to_le_bytes()
+            })
+            .collect();
+        let data = u32::try_from(samples.len()).expect("fixture size");
+        let mut bytes = Vec::with_capacity(samples.len() + 44);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&RATE.to_le_bytes());
+        bytes.extend_from_slice(&(RATE * 2).to_le_bytes());
+        bytes.extend_from_slice(&2_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data.to_le_bytes());
+        bytes.extend_from_slice(&samples);
+        std::fs::write(path, bytes).expect("fixture track");
+    }
+
+    /// Starting a row, or a new queue, from Stop and from Pause publishes
+    /// the row only as playing: the engine's switch reaches the UI whole,
+    /// however the bridge's wakes fall between the engine's events.
+    #[test]
+    fn a_started_row_is_published_only_as_playing() {
+        let _guard = test_guard();
+        let dir = std::env::temp_dir().join(format!(
+            "ferrous-bridge-start-published-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let files: Vec<PathBuf> = ["a.wav", "b.wav", "c.wav"]
+            .iter()
+            .map(|name| {
+                let path = dir.join(name);
+                write_tone_wav(&path, 4_000);
+                path
+            })
+            .collect();
+        let starts = [
+            (BridgeQueueCommand::PlayAt(1), files[1].clone(), 1),
+            (
+                BridgeQueueCommand::Replace {
+                    tracks: vec![files[2].clone(), files[0].clone()],
+                    autoplay: true,
+                },
+                files[2].clone(),
+                0,
+            ),
+        ];
+        for from in [PlaybackState::Stopped, PlaybackState::Paused] {
+            for (start, target, row) in &starts {
+                let case = format!("{start:?} from {from:?}");
+                let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+                let (analysis_tx, _analysis) = unbounded();
+                let (playback, engine_events) =
+                    crate::playback::PlaybackEngine::on_test_output(analysis_tx);
+                runtime.playback = playback;
+                // The engine's events reach the loop one per wake.
+                let (forward, playback_rx) = unbounded();
+                runtime.playback_rx = playback_rx;
+                let (event_tx, event_rx) = unbounded();
+                let deadline = Instant::now() + Duration::from_secs(20);
+                let wake_until =
+                    |runtime: &mut BridgeLoopRuntime,
+                     what: &str,
+                     done: &dyn Fn(&BridgeState) -> bool| {
+                        while !done(&runtime.state) {
+                            runtime.playback.command(PlaybackCommand::Poll);
+                            let event = engine_events
+                                .recv_deadline(deadline)
+                                .unwrap_or_else(|_| panic!("{case}: {what}"));
+                            forward.send(event).expect("forward the event");
+                            runtime.handle_wake(BridgeLoopWake::Tick, &event_tx);
+                        }
+                    };
+                let command = |runtime: &mut BridgeLoopRuntime, cmd: BridgeCommand| {
+                    runtime.handle_wake(BridgeLoopWake::Command(cmd), &event_tx);
+                };
+                command(
+                    &mut runtime,
+                    BridgeCommand::Queue(BridgeQueueCommand::Replace {
+                        tracks: files[..2].to_vec(),
+                        autoplay: false,
+                    }),
+                );
+                wake_until(&mut runtime, "the queue did not open", &|state| {
+                    state.playback.current.as_ref() == Some(&files[0])
+                });
+                if from == PlaybackState::Paused {
+                    command(
+                        &mut runtime,
+                        BridgeCommand::Playback(BridgePlaybackCommand::Play),
+                    );
+                    wake_until(&mut runtime, "the first row did not play", &|state| {
+                        state.playback.state == PlaybackState::Playing
+                            && state.playback.position >= Duration::from_millis(200)
+                    });
+                    command(
+                        &mut runtime,
+                        BridgeCommand::Playback(BridgePlaybackCommand::Pause),
+                    );
+                    wake_until(&mut runtime, "the first row did not pause", &|state| {
+                        state.playback.state == PlaybackState::Paused
+                    });
+                }
+                runtime.flags.pending_snapshot = SnapshotUrgency::Immediate;
+                runtime.maybe_emit_pending_snapshot(&event_tx);
+                let before = event_rx
+                    .try_iter()
+                    .filter_map(|event| match event {
+                        BridgeEvent::Snapshot(snapshot) => Some(*snapshot),
+                        _ => None,
+                    })
+                    .last()
+                    .expect("a published snapshot");
+                let old = (
+                    before.playback.current.clone(),
+                    before.playback.current_queue_index,
+                    before.playback.state,
+                    before.play_serial,
+                );
+
+                command(&mut runtime, BridgeCommand::Queue(start.clone()));
+                wake_until(&mut runtime, "the row did not play", &|state| {
+                    state.playback.current.as_ref() == Some(target)
+                        && state.playback.state == PlaybackState::Playing
+                        && state.playback.position >= Duration::from_millis(300)
+                });
+                let published: Vec<_> = event_rx
+                    .try_iter()
+                    .filter_map(|event| match event {
+                        BridgeEvent::Snapshot(snapshot) => Some(*snapshot),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(!published.is_empty(), "{case}");
+                for snapshot in &published {
+                    let shown = (
+                        snapshot.playback.current.clone(),
+                        snapshot.playback.current_queue_index,
+                        snapshot.playback.state,
+                        snapshot.play_serial,
+                    );
+                    // The track before, also on no row once a new queue
+                    // replaced its own, until the engine switches.
+                    if shown == old || shown == (old.0.clone(), None, old.2, old.3) {
+                        continue;
+                    }
+                    assert_eq!(
+                        (shown.0.as_ref(), shown.1, shown.2),
+                        (Some(target), Some(*row), PlaybackState::Playing),
+                        "{case}: the UI saw the switch in part"
+                    );
+                    assert_ne!(shown.3, old.3, "{case}: a play without its serial");
+                }
+            }
+        }
+        std::fs::remove_dir_all(dir).expect("remove fixture");
+    }
+
     #[test]
     fn queued_files_are_checked_after_events_and_never_while_idle() {
         use crate::playback::{PlaybackEvent, TrackChangeKind};
@@ -7042,12 +7309,13 @@ mod tests {
         idle(&mut runtime, &event_tx);
 
         runtime.handle_wake(
-            BridgeLoopWake::Playback(PlaybackEvent::TrackChanged {
-                path: files[0].clone(),
-                queue_index: 0,
-                kind: TrackChangeKind::Manual,
-                track_token: 1,
-            }),
+            BridgeLoopWake::Playback(PlaybackEvent::track_change(
+                files[0].clone(),
+                0,
+                TrackChangeKind::Manual,
+                1,
+                &runtime.state.playback,
+            )),
             &event_tx,
         );
         assert_eq!(checks(&runtime), 2, "a track change");
@@ -7757,12 +8025,16 @@ mod tests {
     }
 
     fn gapless_change(path: &str, queue_index: usize) -> PlaybackEvent {
-        PlaybackEvent::TrackChanged {
-            path: p(path),
+        PlaybackEvent::track_change(
+            p(path),
             queue_index,
-            kind: crate::playback::TrackChangeKind::Gapless,
-            track_token: 2,
-        }
+            crate::playback::TrackChangeKind::Gapless,
+            2,
+            &PlaybackSnapshot {
+                state: PlaybackState::Playing,
+                ..PlaybackSnapshot::default()
+            },
+        )
     }
 
     #[test]

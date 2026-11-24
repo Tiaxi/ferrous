@@ -27,8 +27,18 @@ pub(crate) fn find_folder_cover(dir: &Path) -> Option<PathBuf> {
 /// returned.
 pub(crate) fn find_named_cover(dir: &Path) -> Option<PathBuf> {
     let first = FolderImages::read(dir).ok()?.into_cover()?;
-    let name = first.file_name()?.to_str()?;
-    cover_rank(name)?.recognised().then_some(first)
+    has_cover_name(&first).then_some(first)
+}
+
+/// Whether `path` names an image that holds a folder's cover under a
+/// recognised name, such as `Cover.JPG`, by its name alone; it reads
+/// nothing. Artwork apply overwrites a folder cover with such a name and
+/// adds `cover.<ext>` beside one with another, such as `back.jpg`.
+pub(crate) fn has_cover_name(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(cover_rank)
+        .is_some_and(CoverRank::recognised)
 }
 
 /// Whether `path` names an image that a folder's cover can be chosen from,
@@ -230,6 +240,25 @@ mod tests {
         assert_eq!(find_folder_cover(&dir), Some(dir.join("Cover.JPG")));
         assert_eq!(find_named_cover(&dir), Some(dir.join("Cover.JPG")));
         fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn only_recognised_image_names_are_cover_names() {
+        for name in ["cover.jpg", "Cover.JPG", "FOLDER.png", "front.jpeg"] {
+            assert!(has_cover_name(&Path::new("/album").join(name)), "{name}");
+        }
+        // Other images, such as a back scan or the cache's embedded art, and
+        // files that are not images, are not.
+        for name in [
+            "back.jpg",
+            "0123456789abcdef0123456789abcdef.png",
+            "cover.webp",
+            "cover",
+            "front.flac",
+        ] {
+            assert!(!has_cover_name(&Path::new("/album").join(name)), "{name}");
+        }
+        assert!(!has_cover_name(Path::new("/")));
     }
 
     #[test]

@@ -409,6 +409,7 @@ bool decodeLibraryMetaSection(const QByteArray &payload, DecodedLibraryMeta *out
     float etaSeconds = -1.0f;
     quint8 filesTotalKnown = 0;
     quint32 filesTotal = 0;
+    quint8 loaded = 0;
     quint16 rootPathCount = 0;
 
     if (!reader.readU32(&rootCount)
@@ -427,6 +428,8 @@ bool decodeLibraryMetaSection(const QByteArray &payload, DecodedLibraryMeta *out
         || !reader.readU8(&filesTotalKnown)
         || filesTotalKnown > 1
         || !reader.readU32(&filesTotal)
+        || !reader.readU8(&loaded)
+        || loaded > 1
         || !reader.readU16(&rootPathCount)) {
         return false;
     }
@@ -499,6 +502,7 @@ bool decodeLibraryMetaSection(const QByteArray &payload, DecodedLibraryMeta *out
     out->filesTotal = filesTotalKnown != 0
         ? static_cast<int>(std::min<quint32>(filesTotal, std::numeric_limits<int>::max()))
         : -1;
+    out->loaded = loaded != 0;
     out->rootPaths = rootPaths;
     out->rootEntries = rootEntries;
     out->viewStatePresent = viewStatePresent;
@@ -567,6 +571,8 @@ bool decodeMetadataSection(const QByteArray &payload, DecodedMetadata *out) {
     if (!reader.atEnd() && !reader.readUtf8(&out->libraryPath)) return false;
     quint32 trackTotal = 0;
     if (!reader.atEnd() && !reader.readU32(&trackTotal)) return false;
+    quint8 coverNamed = 0;
+    if (!reader.atEnd() && (!reader.readU8(&coverNamed) || coverNamed > 1)) return false;
     if (!reader.atEnd()) return false;
     out->present = true;
     out->sampleRateHz = static_cast<int>(sampleRateHz);
@@ -577,6 +583,7 @@ bool decodeMetadataSection(const QByteArray &payload, DecodedMetadata *out) {
     out->trackNumber = static_cast<int>(trackNumber);
     out->trackTotal = static_cast<int>(
         std::min(trackTotal, static_cast<quint32>(std::numeric_limits<int>::max())));
+    out->coverNamed = coverNamed != 0;
     return true;
 }
 
@@ -1206,15 +1213,17 @@ bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QStrin
             quint8 severity = 0;
             QString subject;
             QString message;
+            QString detail;
             ok = sectionReader.readU8(&category) && category <= ErrorCategoryLast
                 && sectionReader.readU8(&severity) && severity <= ErrorSeverityError
                 && sectionReader.readUtf8(&subject) && sectionReader.readUtf8(&message)
-                && sectionReader.atEnd();
+                && sectionReader.readUtf8(&detail) && sectionReader.atEnd();
             if (ok) {
                 out->errorCategory = category;
                 out->errorSeverity = severity;
                 out->errorSubject = subject;
                 out->errorMessage = message;
+                out->errorDetail = detail;
             }
             break;
         }
@@ -1258,14 +1267,20 @@ bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QStrin
             Reader sectionReader(sectionPayload);
             quint32 requestId = 0;
             quint8 saved = 0;
-            QString message;
+            quint8 subjects = 0;
+            quint8 cause = 0;
+            QString detail;
             ok = sectionReader.readU32(&requestId) && sectionReader.readU8(&saved) && saved <= 1
-                && sectionReader.readUtf8(&message) && sectionReader.atEnd();
+                && sectionReader.readU8(&subjects) && (subjects & ~QuitSaveSubjectsAll) == 0
+                && sectionReader.readU8(&cause) && cause <= QuitSaveCauseLast
+                && sectionReader.readUtf8(&detail) && sectionReader.atEnd();
             if (ok) {
                 out->hasStateSaved = true;
                 out->stateSaveRequestId = requestId;
                 out->stateSaved = saved == 1;
-                out->stateSaveError = message;
+                out->stateSaveSubjects = subjects;
+                out->stateSaveCause = cause;
+                out->stateSaveDetail = detail;
             }
             break;
         }

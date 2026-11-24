@@ -11,6 +11,7 @@ use lofty::prelude::Accessor;
 use lofty::tag::{ItemKey, Tag};
 use serde::{Deserialize, Serialize};
 
+use crate::edit_failure::{EditFailure, EditStep, FailureCause};
 use crate::file_edit_lock;
 use crate::frontend_bridge::library_tree::{album_row_key, section_row_key};
 use crate::library::{
@@ -28,6 +29,8 @@ use validation::TagTarget;
 #[cfg(test)]
 mod concurrency_tests;
 mod edit_log;
+#[cfg(test)]
+mod failure_cause_tests;
 #[cfg(test)]
 mod rename_tests;
 #[cfg(test)]
@@ -240,6 +243,9 @@ struct SaveResultRow {
     path: String,
     ok: bool,
     error: Option<String>,
+    /// Why, where the failure is sure of it; left out otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cause: Option<FailureCause>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -257,6 +263,10 @@ pub(crate) struct RenameResultRow {
     pub(crate) new_path: Option<String>,
     pub(crate) ok: bool,
     pub(crate) error: Option<String>,
+    /// Why the batch's rename stopped, where the failure is sure of it. It
+    /// is on each of the batch's files, as is the error (#741).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cause: Option<FailureCause>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -784,16 +794,17 @@ fn apply_standard_row_to_tag(
     path: &Path,
     row: &TagEditorRow,
     changed: &HashSet<TagField>,
-) -> Result<(), String> {
+) -> Result<(), EditFailure> {
     if changed.is_empty() {
         return Ok(());
     }
     let edit = file_edit_lock::lock(path);
     let mut tagged = crate::panic_guard::read_tags(path).map_err(|err| {
-        format!(
+        let message = format!(
             "failed to read tag data for {}: {err}",
             path.to_string_lossy()
-        )
+        );
+        EditFailure::lofty(EditStep::OpenToRead, &err, message)
     })?;
     let file_type = tagged.file_type();
     let primary_type = tagged.primary_tag_type();
@@ -810,7 +821,8 @@ fn apply_standard_row_to_tag(
         return Err(format!(
             "no writable tag type available for {}",
             path.to_string_lossy()
-        ));
+        )
+        .into());
     };
 
     if tagged.tag(writable_type).is_none() {
@@ -826,7 +838,8 @@ fn apply_standard_row_to_tag(
         return Err(format!(
             "failed to create writable tag for {}",
             path.to_string_lossy()
-        ));
+        )
+        .into());
     };
     let target = TagTarget::for_tag(
         writable_type,
@@ -844,7 +857,7 @@ fn apply_raw_row(
     path: &Path,
     row: &TagEditorRow,
     changed: &HashSet<TagField>,
-) -> Result<(), String> {
+) -> Result<(), EditFailure> {
     let target = TagTarget::RAW_APEV2;
     let year = validated_changes(row, changed, target)?;
     // A number and its total share one item, so the unchanged one is written
@@ -963,6 +976,7 @@ pub(crate) fn save_rows(request: SaveRequest) -> SaveResponse {
                 apply_standard_row_to_tag(&path, &row, &changed)
             }
         })
+        .map_err(EditFailure::from)
         .and_then(|result| result);
         match result {
             Ok(()) => {
@@ -971,13 +985,15 @@ pub(crate) fn save_rows(request: SaveRequest) -> SaveResponse {
                     path: row.path,
                     ok: true,
                     error: None,
+                    cause: None,
                 });
             }
-            Err(error) => {
+            Err(failure) => {
                 results.push(SaveResultRow {
                     path: row.path,
                     ok: false,
-                    error: Some(error),
+                    cause: failure.cause(),
+                    error: Some(failure.into()),
                 });
             }
         }
@@ -1022,6 +1038,7 @@ fn plan_renames(rows: &[TagEditorRow]) -> RenamePlan {
                     new_path: None,
                     ok: false,
                     error: Some(error),
+                    cause: None,
                 });
                 continue;
             }
@@ -1032,6 +1049,7 @@ fn plan_renames(rows: &[TagEditorRow]) -> RenamePlan {
                 new_path: Some(row.path.clone()),
                 ok: true,
                 error: None,
+                cause: None,
             });
             continue;
         }
@@ -1043,6 +1061,7 @@ fn plan_renames(rows: &[TagEditorRow]) -> RenamePlan {
                 error: Some(format!(
                     "target conflicts with another selected file: {previous_owner}"
                 )),
+                cause: None,
             });
             continue;
         }
@@ -1064,6 +1083,7 @@ fn plan_renames(rows: &[TagEditorRow]) -> RenamePlan {
                     "target already exists: {}",
                     target_path.to_string_lossy()
                 )),
+                cause: None,
             });
             continue;
         }
@@ -1093,6 +1113,7 @@ pub(crate) fn preview_rename_rows(request: &RenameRequest) -> RenameResponse {
                     new_path: Some(new_path),
                     ok: true,
                     error: None,
+                    cause: None,
                 }),
         )
         .map(|result| (result.path.clone(), result))
@@ -1136,13 +1157,16 @@ pub(crate) fn rename_rows_with_refresh(request: RenameRequest) -> (RenameRespons
 
     let refresh = match rename_indexed_metadata_paths(&renames) {
         Ok(refresh) => refresh,
-        Err(error) => {
+        Err(failure) => {
+            let cause = failure.cause();
+            let error = String::from(failure);
             for (old_path, new_path) in renamed_pairs {
                 results.push(RenameResultRow {
                     path: old_path,
                     new_path: Some(new_path),
                     ok: false,
                     error: Some(error.clone()),
+                    cause,
                 });
             }
             edit_log::log_renames(&results);
@@ -1173,6 +1197,7 @@ pub(crate) fn rename_rows_with_refresh(request: RenameRequest) -> (RenameRespons
             new_path: Some(new_path),
             ok: true,
             error: None,
+            cause: None,
         });
     }
 

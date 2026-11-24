@@ -25,17 +25,34 @@ Item {
     property real crosshairLevel: 1
     // Whether the plot draws the playhead; see Main.qml's mode switch.
     property bool playheadVisible: true
+    // Whether a viewer shows it, where its lanes' seam is the viewer's.
+    property bool viewerMode: false
     property var pointerActivity: null
     property size reservedCorner: Qt.size(0, 0)
     // What the lowest lane's label and buttons take of it; see PlotLayer.
     property rect laneHeadBounds: Qt.rect(0, 0, 0, 0)
     // The plot's width: the level meter's column takes the rest.
     property real plotWidth: root.width
+    // How much larger than the window's the crosshair's readout is: as the
+    // lane heads' (PlotLayer.textScale).
+    property real textScale: 1
     // A time of the track to follow, such as where its file is cut off, or
     // -1; markerX is where the plot draws it, NaN while it does not.
     property real markerSeconds: -1
     readonly property real markerX: waveform.markerX
     readonly property alias waveformItem: waveform
+    // Whether a middle-drag pans the view.
+    readonly property bool panning: waveform.panning
+    // Whether a middle press holds it, from the press to the release.
+    readonly property bool panPressed: waveform.panPressed
+    // Where, in the scene, it was pressed, or let go.
+    readonly property point panScenePosition: waveform.panScenePosition
+    // The pointer hides once the overlays have faded out, and stays so.
+    // While a pan holds the plot it is a closed hand, as over the album
+    // art's.
+    readonly property int pointerCursorShape: !root.interactiveOverlaysVisible && root.interactiveOverlaysLevel <= 0
+        ? Qt.BlankCursor
+        : root.panning ? Qt.ClosedHandCursor : Qt.ArrowCursor
     readonly property var plotColors: root.uiPalette.waveformPlot
     // The lanes: one per channel in the per-channel view, one otherwise.
     readonly property int laneCount: waveform.viewMode === 1 ? Math.max(1, waveform.channelCount) : 1
@@ -63,6 +80,10 @@ Item {
     readonly property int hoveredChannel: waveform.viewMode === 1 ? root.hoveredLane : -1
     // Where the pointer is on the plot, in the scene, while it is on it.
     readonly property point pointerScenePosition: waveformHover.point.scenePosition
+    // Whether the pointer is on the plot, the seams between its lanes too,
+    // or holds a button pressed on it: while it does, the crosshair shows
+    // (WaveformEditorItem's pointerOn).
+    readonly property bool pointerOn: waveform.pointerOn
     // Whether the plot waits for the track's overview.
     readonly property bool awaitingData: !root.uiBridge.waveformComplete
         && root.uiBridge.waveformCoverageSeconds <= 0
@@ -89,6 +110,12 @@ Item {
     WaveformEditorItem {
         id: waveform
         objectName: "waveformEditorItem"
+        // A wheel zoom is the pointer's activity too, also where it rests.
+        onWheelZoomed: (scenePosition) => {
+            if (root.pointerActivity) {
+                root.pointerActivity(scenePosition.x, scenePosition.y)
+            }
+        }
         width: root.plotWidth
         height: root.height
         // Hidden too: the item decodes nothing while it is not shown, and
@@ -122,13 +149,23 @@ Item {
         backgroundColor: root.plotColors.plotBg
         waveformColor: root.uiPalette.paneWave
         mutedWaveformColor: ColorUtils.mixColor(root.uiPalette.paneWave, root.plotColors.plotBg, 0.65)
-        centerLineColor: ColorUtils.withAlpha(root.uiPalette.text, 0.08)
-        laneSeamColor: root.plotColors.plotLaneSeam
+        // Before any audio each lane is a silent one: its centre line, and
+        // the seam between lanes the stronger line, 1 px as all the
+        // window's seams (UiPalette's waveformRestSeam).
+        centerLineColor: root.atRest ? root.uiPalette.waveformRestLine
+                                     : ColorUtils.withAlpha(root.uiPalette.text, 0.08)
+        laneSeamColor: root.atRest ? root.uiPalette.waveformRestSeam : root.plotColors.plotLaneSeam
         // The crosshair's readout on the plot's plates, as the
-        // spectrogram's, and its dashes in the plot's text.
-        readoutPlateColor: root.plotColors.plotPlate
+        // spectrogram's, and its dashes in the plot's text. Opaque, as the
+        // spectrogram's are: the dashed line and the peaks showed through
+        // the digits at the plot plates' 94 % (H22).
+        readoutPlateColor: {
+            const plate = root.plotColors.plotPlate
+            return Qt.rgba(plate.r, plate.g, plate.b, 1)
+        }
         readoutPlateEdgeColor: root.plotColors.plotPlateEdge
         readoutTextColor: root.plotColors.plotText
+        textScale: root.textScale
         // Dark: a light core in a black casing; light: a dark core in white.
         playheadColor: root.uiPalette.themeIsDark ? "#e8e8e8" : "#202326"
         playheadCasingColor: root.uiPalette.themeIsDark
@@ -140,31 +177,6 @@ Item {
             }
         }
 
-        // Before any audio, each lane's rest lines at half of full scale
-        // over and under its centre line, which the item draws, so the
-        // pane waits as an instrument, as the spectrogram's does with its
-        // rest lines. Gone with the first track, whose lanes they are in.
-        Repeater {
-            model: root.atRest ? root.laneCount * 2 : 0
-
-            delegate: Rectangle {
-                required property int index
-                // The item's lane: the centre line between its top and
-                // foot, its full scale a pixel inside them.
-                readonly property int lane: Math.floor(index / 2)
-                readonly property real laneTop: lane * waveform.height / root.laneCount
-                readonly property real laneBottom: (lane + 1) * waveform.height / root.laneCount
-                readonly property real centre: Math.floor((laneTop + laneBottom) / 2)
-                readonly property real fullScale: (laneBottom - laneTop) / 2 - 1
-                objectName: "waveformRestLine"
-                x: 0
-                y: Math.round(centre + (index % 2 === 0 ? -1 : 1) * fullScale / 2)
-                width: waveform.width
-                height: 1
-                color: root.uiPalette.waveformRestLine
-            }
-        }
-
         // The only hover handler over the waveform, and on the item itself.
         // The item takes hover for its crosshair, so a handler on a parent
         // never hears of the pointer. A hovered handler on an item above,
@@ -172,9 +184,7 @@ Item {
         HoverHandler {
             id: waveformHover
             objectName: "waveformSurfaceHoverHandler"
-            // The pointer hides once the overlays have faded out.
-            cursorShape: root.interactiveOverlaysVisible || root.interactiveOverlaysLevel > 0
-                ? Qt.ArrowCursor : Qt.BlankCursor
+            cursorShape: root.pointerCursorShape
             // A touch ends without a hover leave for the item.
             onHoveredChanged: {
                 if (!hovered) {

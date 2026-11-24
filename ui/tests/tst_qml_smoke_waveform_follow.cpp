@@ -21,6 +21,7 @@ private slots:
     void middleDragDetachesAndPans();
     void middleClickResetsNeitherVisualizationsZoom();
     void wheelZoomsAboutThePlayheadOrThePointer();
+    void pixelOnlyWheelZooms();
     void zoomOutHandoffKeepsTheDetachedView();
     void detachedViewGlidesBackFromItsReattachPoint_data();
     void detachedViewGlidesBackFromItsReattachPoint();
@@ -40,6 +41,11 @@ private slots:
     void autoscrollStopsAsTheViewComesBack_data();
     void autoscrollStopsAsTheViewComesBack();
     void autoscrollInAWindow();
+    void grabbedTimeHoldsStillThroughAPan_data();
+    void grabbedTimeHoldsStillThroughAPan();
+    void grabbedTimeHoldsFromThePress_data();
+    void grabbedTimeHoldsFromThePress();
+    void panShowsAClosedHand();
 };
 
 namespace {
@@ -397,6 +403,27 @@ void WaveformFollowSmokeTest::middleClickResetsNeitherVisualizationsZoom() {
     QCOMPARE(resets.count(), 0);
     QCOMPARE(zooms.count(), 0);
     QCOMPARE(spectrogram.zoomLevel(), zoom);
+}
+
+// Regression (H21): a wheel event with only a pixel delta, as touchpads
+// and Wayland send, zoomed the spectrogram but not the waveform. It zooms
+// by 120 pixels a notch, as the spectrogram's; a horizontal one doesn't.
+void WaveformFollowSmokeTest::pixelOnlyWheelZooms() {
+    WaveformEditorItem item;
+    TestTime time;
+    playZoomed(item, time, 8.0, 30.0);
+    const auto pixelWheel = [&item](QPoint pixels) {
+        QWheelEvent wheel(QPointF(50.0, 40.0), QPointF(50.0, 40.0), pixels, QPoint(),
+            Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+        item.wheelEvent(&wheel);
+        return wheel.isAccepted();
+    };
+    QVERIFY(pixelWheel(QPoint(0, 120)));
+    QCOMPARE(item.zoomLevel(), 10.0);
+    QVERIFY(pixelWheel(QPoint(0, -240)));
+    QCOMPARE(item.zoomLevel(), 6.4);
+    QVERIFY(!pixelWheel(QPoint(120, 0)));
+    QCOMPARE(item.zoomLevel(), 6.4);
 }
 
 // Following, the wheel zooms about the playhead and the view follows on;
@@ -1393,6 +1420,221 @@ void WaveformFollowSmokeTest::autoscrollInAWindow() {
     QVERIFY(window.isActive());
     QTRY_VERIFY(!item->m_autoscroll.active());
     QVERIFY(QGuiApplication::overrideCursor() == nullptr);
+}
+
+// A closed hand from the pan's drag distance to its release, as the album
+// art viewer's pan has. The viewer's hidden pointer stays hidden, and a
+// click's autoscroll keeps the resize cursor alone.
+void WaveformFollowSmokeTest::panShowsAClosedHand() {
+    QQmlApplicationEngine engine;
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Window 2.15
+import "components" as Components
+import "viewers" as Viewers
+
+Window {
+    id: paletteRoot
+    width: 600
+    height: 240
+    visible: true
+
+    QtObject {
+        id: bridge
+        property string playbackState: "Paused"
+        property string currentTrackPath: ""
+        property var waveformPeaksPacked: ""
+        property real waveformCoverageSeconds: 0
+        property bool waveformComplete: false
+        property real durationSeconds: 60
+        property int spectrogramViewMode: 1
+        property bool spectrogramZoomEnabled: true
+        property bool showSpectrogramCrosshair: true
+        property bool showFps: false
+        property int currentTrackChannels: 2
+        property var currentTrackChannelLabels: []
+        property var mutedChannels: []
+        property var soloedChannels: []
+    }
+
+    Viewers.WaveformSurface {
+        objectName: "handSurface"
+        anchors.fill: parent
+        uiBridge: bridge
+        uiPalette: Components.UiPalette { windowRoot: paletteRoot }
+    }
+}
+)QML"), QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml")), &errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.data());
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    window->requestActivate();
+    QVERIFY(QTest::qWaitForWindowActive(window));
+    auto *item = window->findChild<WaveformEditorItem *>(QStringLiteral("waveformEditorItem"));
+    QObject *surface = window->findChild<QObject *>(QStringLiteral("handSurface"));
+    QVERIFY(item != nullptr && surface != nullptr);
+    setTestPosition(*item, 30.0, 1);
+    item->setZoomLevel(8.0);
+    const auto moveTo = [window](QPoint at) { QTest::mouseMove(window, at); };
+    const QPoint start(400, 60);
+    moveTo(start);
+    QTRY_COMPARE(window->cursor().shape(), Qt::ArrowCursor);
+
+    QTest::mousePress(window, Qt::MiddleButton, Qt::NoModifier, start);
+    moveTo(QPoint(397, 60));
+    QCOMPARE(window->cursor().shape(), Qt::ArrowCursor);
+    moveTo(QPoint(340, 60));
+    QCOMPARE(window->cursor().shape(), Qt::ClosedHandCursor);
+    QVERIFY(QGuiApplication::overrideCursor() == nullptr);
+    // A track change, gapless or Repeat-One, leaves the button's pan held.
+    setTestPosition(*item, 0.5, 2);
+    QCOMPARE(window->cursor().shape(), Qt::ClosedHandCursor);
+
+    // Hidden with the viewer's controls, it stays so.
+    surface->setProperty("interactiveOverlaysVisible", false);
+    // Qt takes a handler's cursor with the pointer's next event.
+    moveTo(QPoint(330, 60));
+    QCOMPARE(window->cursor().shape(), Qt::BlankCursor);
+    surface->setProperty("interactiveOverlaysVisible", true);
+    moveTo(QPoint(329, 60));
+    QCOMPARE(window->cursor().shape(), Qt::ClosedHandCursor);
+    QTest::mouseRelease(window, Qt::MiddleButton, Qt::NoModifier, QPoint(330, 60));
+    // At once, with the pointer still.
+    QCOMPARE(window->cursor().shape(), Qt::ArrowCursor);
+
+    QTest::mouseClick(window, Qt::MiddleButton, Qt::NoModifier, QPoint(330, 60));
+    QVERIFY(item->m_autoscroll.active());
+    QCOMPARE(QGuiApplication::overrideCursor()->shape(), Qt::SizeHorCursor);
+    QTest::keyClick(window, Qt::Key_Escape);
+    QVERIFY(!item->m_autoscroll.active());
+    QVERIFY(QGuiApplication::overrideCursor() == nullptr);
+}
+
+void WaveformFollowSmokeTest::grabbedTimeHoldsStillThroughAPan_data() {
+    QTest::addColumn<double>("scale");
+    QTest::addColumn<double>("width");
+    QTest::addColumn<double>("pressX");
+    QTest::newRow("whole pixel") << 1.0 << kWidth << 300.0;
+    QTest::newRow("half pixel") << 1.0 << kWidth << 300.5;
+    QTest::newRow("late in a pixel") << 1.0 << kWidth << 300.9;
+    // A time halfway between two hundredths, which rounding could take
+    // either way from one move to the next.
+    QTest::newRow("halfway between hundredths") << 1.0 << kWidth << 308.2;
+    QTest::newRow("at 125 %") << 1.25 << 401.0 << 300.7;
+    QTest::newRow("at 200 %") << 2.0 << kWidth << 300.3;
+}
+
+// Through a pan the crosshair's time holds still on the time grabbed, at any
+// fraction of a pixel of the pointer, as playback goes on.
+void WaveformFollowSmokeTest::grabbedTimeHoldsStillThroughAPan() {
+    QFETCH(double, scale);
+    QFETCH(double, width);
+    QFETCH(double, pressX);
+    QQuickWindow window;
+    if (scale != 1.0 && !showOnScreen(window, scale)) {
+        QSKIP("no screen of that scale");
+    }
+    WaveformEditorItem item;
+    if (scale != 1.0) item.setParentItem(window.contentItem());
+    TestTime time;
+    playZoomed(item, time, 8.0, 30.0);
+    item.setWidth(width);
+    // What the crosshair reads at `x`: the time a click there seeks to.
+    const auto readout = [&](double x) {
+        const double seconds = rightClickAt(item, x);
+        const auto [start, end] = viewOf(item);
+        return CrosshairReadout::formatCrosshairTime(seconds,
+            CrosshairReadout::crosshairTimeDecimals((end - start) / (width * scale)));
+    };
+    const QString grabbed = readout(pressX);
+    sendMouse(item, QEvent::MouseButtonPress, pressX, Qt::MiddleButton, Qt::MiddleButton);
+    QList<double> moves;
+    for (double x = pressX - 20.3; x > 20.0; x -= 4.7) moves.append(x);
+    for (double x = 25.1; x < 380.0; x += 7.37) moves.append(x);
+    for (const double x : std::as_const(moves)) {
+        sendMouse(item, QEvent::MouseMove, x, Qt::NoButton, Qt::MiddleButton);
+        time.advance(0.001);
+        frame(item);
+        QVERIFY(item.detached());
+        const QString shown = readout(x);
+        QVERIFY2(shown == grabbed,
+                 qPrintable(QStringLiteral("%1 at %2, grabbed %3").arg(shown).arg(x).arg(grabbed)));
+    }
+    sendMouse(item, QEvent::MouseButtonRelease, moves.last(), Qt::MiddleButton, Qt::NoButton);
+}
+
+void WaveformFollowSmokeTest::grabbedTimeHoldsFromThePress_data() {
+    QTest::addColumn<int>("then");
+    QTest::newRow("a drag pans") << 0;
+    QTest::newRow("a click starts autoscroll") << 1;
+    QTest::newRow("a press that leads nowhere") << 2;
+}
+
+// A middle press on a view that follows holds the view from the press, as
+// playback goes on: the time the crosshair shows under a pointer held still
+// stays the one pressed on until the drag pans from it (it moved on by a
+// tenth meanwhile, H20), and a click's autoscroll starts from it. Until
+// something moves it, the view says nothing of it, so that a click that
+// starts autoscroll does not show it moved (#655). A press that leads to
+// neither, as one taken away, leaves it to follow again.
+void WaveformFollowSmokeTest::grabbedTimeHoldsFromThePress() {
+    QFETCH(int, then);
+    WaveformEditorItem item;
+    TestTime time;
+    playZoomed(item, time, 8.0, 30.0);
+    QSignalSpy detachedChanges(&item, &WaveformEditorItem::detachedChanged);
+    const auto readout = [&](double x) {
+        const double seconds = rightClickAt(item, x);
+        const auto [start, end] = viewOf(item);
+        return CrosshairReadout::formatCrosshairTime(seconds,
+            CrosshairReadout::crosshairTimeDecimals((end - start) / kWidth));
+    };
+    const double pressX = 300.0;
+    const QString grabbed = readout(pressX);
+    const auto pressed = viewOf(item);
+    sendMouse(item, QEvent::MouseButtonPress, pressX, Qt::MiddleButton, Qt::MiddleButton);
+    // Held still for half a second of playback.
+    for (int step = 0; step < 30; ++step) {
+        time.advance(1.0 / 60.0);
+        frame(item);
+        QVERIFY2(sameView(viewOf(item), pressed),
+                 qPrintable(QStringLiteral("step %1: %2, pressed %3")
+                                .arg(step).arg(describe(viewOf(item)), describe(pressed))));
+        QVERIFY(!item.detached());
+    }
+    QVERIFY(item.positionSeconds() > 30.4);
+    QCOMPARE(detachedChanges.count(), 0);
+    if (then == 0) {
+        for (double x = pressX - 20.3; x > 100.0; x -= 6.3) {
+            sendMouse(item, QEvent::MouseMove, x, Qt::NoButton, Qt::MiddleButton);
+            time.advance(1.0 / 60.0);
+            frame(item);
+            const QString shown = readout(x);
+            QVERIFY2(shown == grabbed,
+                     qPrintable(QStringLiteral("%1 at %2, grabbed %3").arg(shown).arg(x).arg(grabbed)));
+        }
+        QVERIFY(item.panning());
+        QVERIFY(item.detached());
+        QCOMPARE(detachedChanges.count(), 1);
+        sendMouse(item, QEvent::MouseButtonRelease, 100.0, Qt::MiddleButton, Qt::NoButton);
+        QVERIFY(item.detached());
+    } else if (then == 1) {
+        sendMouse(item, QEvent::MouseButtonRelease, pressX, Qt::MiddleButton, Qt::NoButton);
+        QVERIFY(item.m_autoscroll.active());
+        QVERIFY(item.autoscrolling());
+        QVERIFY(item.detached());
+        QVERIFY2(sameView(viewOf(item), pressed), qPrintable(describe(viewOf(item))));
+        QCOMPARE(readout(pressX), grabbed);
+        item.m_autoscroll.stop();
+    } else {
+        item.mouseUngrabEvent();
+        QVERIFY(!item.detached());
+        QCOMPARE(detachedChanges.count(), 0);
+        QVERIFY2(sameView(viewOf(item), followingViewOf(item)), qPrintable(describe(viewOf(item))));
+        QVERIFY(!sameView(viewOf(item), pressed));
+    }
 }
 
 std::unique_ptr<QmlSmokeTest> makeWaveformFollowSmokeTest(const QString &userDirectoriesParent) {

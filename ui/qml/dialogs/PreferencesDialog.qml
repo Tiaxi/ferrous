@@ -371,7 +371,11 @@ Components.DialogWindow {
                         hovered: pageRow.hovered
                         selected: pageRow.highlighted
                         active: pageList.activeFocus
-                        focused: pageRow.highlighted && pageList.activeFocus
+                        // The ring only while the keyboard is in use,
+                        // as in the app's other lists (the folder list
+                        // beside it showed none after a click, this one
+                        // always).
+                        focused: pageRow.highlighted && pageList.activeFocus && InputModality.keyboard
                     }
 
                     contentItem: RowLayout {

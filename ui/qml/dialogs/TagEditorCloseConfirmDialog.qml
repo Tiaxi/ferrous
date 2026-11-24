@@ -94,7 +94,7 @@ Components.CompactDialogWindow {
             ? I18n.i18nc("@info", "Save tag changes before quitting Ferrous?")
             : (root.forReload
                 ? I18n.i18nc("@info", "Discard unsaved changes and reload the tags from the files?")
-                : I18n.i18nc("@info", "Save changes before closing the tag editor?"))
+                : I18n.i18nc("@info the window that closes is Edit Tags", "Save tag changes before closing?"))
     }
 
     Label {
@@ -102,14 +102,11 @@ Components.CompactDialogWindow {
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
         color: root.uiPalette.textSecondary
-        // What Discard closes: the tag editor, not this question.
+        // Only what Discard loses, before closing, quitting or reloading:
+        // the question says what follows, and Save is its own button (the
+        // body read the buttons out again). The noun comes first ("If you
+        // discard them, the changes are lost." had the pronoun before it).
         textFormat: Text.PlainText
-        text: root.forQuit
-            ? I18n.i18nc("@info", "Save writes the current edits and quits. "
-                + "Discard drops every unsaved change and quits. Cancel keeps Ferrous open.")
-            : (root.forReload
-                ? I18n.i18nc("@info", "Reloading drops every unsaved change. Cancel keeps editing.")
-                : I18n.i18nc("@info",
-                    "Save writes the current edits. Discard drops every unsaved change and closes the tag editor."))
+        text: I18n.i18nc("@info", "Discarded changes can’t be recovered.")
     }
 }

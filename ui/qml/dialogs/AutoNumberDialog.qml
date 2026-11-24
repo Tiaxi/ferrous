@@ -20,6 +20,9 @@ Components.CompactDialogWindow {
     // A start number's field fits four digits; its error wraps under it.
     readonly property real numberFieldWidth: root.uiPalette.gridUnit * 5
     readonly property real errorWidth: root.uiPalette.gridUnit * 14
+    // The room between the form's groups, 16 px with the default font,
+    // grows with it: at 24 pt, 16 px between 44 px lines merged them.
+    readonly property real groupSpacing: root.uiPalette.scaledSize(Kirigami.Units.largeSpacing * 2)
     // Breeze draws a check box's 16 px box in the middle of its 20 px
     // indicator, which leaves room for the focus frame: the check boxes,
     // box and text, move left by that room, so their boxes start where the
@@ -50,9 +53,13 @@ Components.CompactDialogWindow {
     objectName: "autoNumberDialog"
     title: I18n.i18nc("@title:window", "Auto Number")
     // As wide as its form, whose check boxes do not wrap, in the font
-    // they are in; the description above it wraps.
+    // they are in; the lead and the scope above it wrap.
     contentWidth: autoNumberForm.implicitWidth
     defaultWidth: Math.max(root.minimumWidth, root._neededWidth)
+    // The keyboard in the first field, its number selected, so that typing
+    // replaces it at once.
+    initialFocusItem: startingTrackField
+    onAboutToShow: startingTrackField.selectAll()
 
     footer: Components.DialogFooter {
 
@@ -76,20 +83,39 @@ Components.CompactDialogWindow {
         }
     }
 
-    // The description starts where the form does, and is no wider, so the
-    // dialog has one left edge however wide the user makes it.
-    Label {
-        objectName: "autoNumberDescription"
+    // The lead, semibold as every dialog's first sentence is, and under it
+    // which rows it numbers, secondary, as a confirmation's question and
+    // what it acts on (the whole of it, secondary, opened the window on
+    // its quietest text). They start where the form does, and are no
+    // wider, so the dialog has one left edge however wide the user makes it.
+    ColumnLayout {
         Layout.fillWidth: true
         Layout.maximumWidth: autoNumberForm.implicitWidth
         Layout.alignment: Qt.AlignHCenter
-        wrapMode: Text.WordWrap
-        color: root.uiPalette.textSecondary
-        textFormat: Text.PlainText
-        text: I18n.i18nc("@label", "Number the selected rows, or all rows if none are selected, using the current table order.")
+        spacing: 2
+
+        Label {
+            objectName: "autoNumberLead"
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+            font.weight: Font.DemiBold
+            color: root.uiPalette.text
+            textFormat: Text.PlainText
+            text: I18n.i18nc("@info", "Number tracks in the table’s order.")
+        }
+
+        Label {
+            objectName: "autoNumberDescription"
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+            color: root.uiPalette.textSecondary
+            textFormat: Text.PlainText
+            text: I18n.i18nc("@info the files that Auto Number numbers",
+                "Applies to the selected files, or all files if none are selected.")
+        }
     }
 
-    // One form in reading order, in three groups a FormGroupGap apart, the
+    // One form in reading order, in three groups a groupSpacing apart, the
     // form's own row spacing within them: the tracks' start and totals;
     // the discs' option, and the start and the reset at each disc that it
     // enables (the reset was in the last group, apart from the
@@ -111,6 +137,8 @@ Components.CompactDialogWindow {
             text: "1"
             inputMethodHints: Qt.ImhDigitsOnly
             validator: IntValidator { bottom: 1; top: root.maximumNumber }
+            // Enter numbers, as Enter in Add Library Folder's field adds.
+            onAccepted: root.apply()
         }
         Label {
             objectName: "autoNumberStartingTrackError"
@@ -126,17 +154,21 @@ Components.CompactDialogWindow {
         }
         // With the tracks (under the disc's start, it read as a
         // disc option): it writes each track's total, and the discs' too
-        // when it writes disc numbers.
+        // when it writes disc numbers, as it says ("Write totals" left the
+        // reader to guess which).
         CheckBox {
             id: writeTotalsCheck
             leftPadding: -root.checkBoxInset
             objectName: "autoNumberWriteTotalsCheck"
             checked: false
-            text: I18n.i18nc("@option:check", "Write totals")
+            text: writeDiscCheck.checked
+                ? I18n.i18nc("@option:check", "Write track and disc totals")
+                : I18n.i18nc("@option:check", "Write track totals")
         }
 
         Components.FormGroupGap {
             uiPalette: root.uiPalette
+            implicitHeight: root.groupSpacing - 2 * rowSpacing
         }
 
         CheckBox {
@@ -158,6 +190,8 @@ Components.CompactDialogWindow {
             enabled: writeDiscCheck.checked
             inputMethodHints: Qt.ImhDigitsOnly
             validator: IntValidator { bottom: 1; top: root.maximumNumber }
+            // Enter numbers, as Enter in Add Library Folder's field adds.
+            onAccepted: root.apply()
         }
         Label {
             objectName: "autoNumberStartingDiscError"
@@ -179,6 +213,7 @@ Components.CompactDialogWindow {
 
         Components.FormGroupGap {
             uiPalette: root.uiPalette
+            implicitHeight: root.groupSpacing - 2 * rowSpacing
         }
 
         CheckBox {

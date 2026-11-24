@@ -18,8 +18,11 @@ Preferences.PreferencesPage {
     // View › Reset Zoom's shortcut as the user reads it; empty for none.
     property string resetZoomShortcut: ""
 
-    // A combo box's width in the form, or what its longest option needs.
-    readonly property real comboWidth: Kirigami.Units.gridUnit * 9
+    // The combo boxes' one width in the form: 9 grid units, or what the
+    // widest of them needs for its options, as at a large font (each took
+    // its own there, four ragged widths in one column).
+    readonly property real comboWidth: Math.ceil(Math.max(Kirigami.Units.gridUnit * 9, viewComboBox.implicitWidth,
+        fftComboBox.implicitWidth, displayComboBox.implicitWidth, channelButtonsComboBox.implicitWidth))
 
     title: I18n.i18nc("@title preferences page", "Visualization")
 
@@ -31,9 +34,10 @@ Preferences.PreferencesPage {
     }
 
     Components.DialogComboBox {
+        id: viewComboBox
         objectName: "spectrogramViewComboBox"
         Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Channels:")
-        Layout.preferredWidth: Math.max(root.comboWidth, implicitWidth)
+        Layout.preferredWidth: root.comboWidth
         model: [
             I18n.i18nc("@item:inlistbox spectrogram view", "Downmix"),
             I18n.i18nc("@item:inlistbox spectrogram view", "Per channel")
@@ -43,9 +47,10 @@ Preferences.PreferencesPage {
     }
 
     Components.DialogComboBox {
+        id: fftComboBox
         objectName: "spectrogramFftComboBox"
         Kirigami.FormData.label: I18n.i18nc("@label:listbox", "FFT window:")
-        Layout.preferredWidth: Math.max(root.comboWidth, implicitWidth)
+        Layout.preferredWidth: root.comboWidth
         model: root.spectrogramFftChoices
         currentIndex: {
             const index = root.spectrogramFftChoices.indexOf(root.settings.value("fftSize"))
@@ -56,8 +61,10 @@ Preferences.PreferencesPage {
         }
     }
 
-    // The slider takes the column's width up to 18 grid units, and gives
-    // way before its value does, which always shows.
+    // The slider takes the column's width up to 18 grid units, scaled with
+    // the font, so that its value's larger text takes none of its track
+    // (270 px at 10 pt, it was 208 at 24 pt), and gives way before its
+    // value does, which always shows.
     RowLayout {
         id: dbRangeRow
         objectName: "dbRangeRow"
@@ -65,7 +72,9 @@ Preferences.PreferencesPage {
         Layout.fillWidth: true
         Layout.preferredWidth: Kirigami.Units.gridUnit * 12
         Layout.minimumWidth: Kirigami.Units.gridUnit * 6 + dbRangeRow.spacing + dbRangeValueLabel.Layout.minimumWidth
-        Layout.maximumWidth: Kirigami.Units.gridUnit * 18
+        Layout.maximumWidth: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 18)
+        // The ticks hang under the groove: 10 px from them to the next row.
+        Layout.bottomMargin: Kirigami.Units.smallSpacing + 2
         spacing: Kirigami.Units.largeSpacing
 
         Slider {
@@ -119,7 +128,7 @@ Preferences.PreferencesPage {
     Components.FormHelpText {
         objectName: "frequencyCapHelp"
         uiPalette: root.uiPalette
-        indent: frequencyCapCheckBox.contentItem.x
+        checkBox: frequencyCapCheckBox
         // The next group's subheading leaves the room to it.
         trailingSpace: 0
         text: I18n.i18nc("@info", "High-resolution tracks show up to 22.05 kHz for rates of the 44.1 kHz "
@@ -133,9 +142,10 @@ Preferences.PreferencesPage {
     }
 
     Components.DialogComboBox {
+        id: displayComboBox
         objectName: "spectrogramDisplayComboBox"
         Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Scrolling:")
-        Layout.preferredWidth: Math.max(root.comboWidth, implicitWidth)
+        Layout.preferredWidth: root.comboWidth
         model: [
             I18n.i18nc("@item:inlistbox spectrogram display", "Rolling"),
             I18n.i18nc("@item:inlistbox spectrogram display", "Centered")
@@ -153,6 +163,16 @@ Preferences.PreferencesPage {
     }
 
     CheckBox {
+        objectName: "spectrogramFpsCheckBox"
+        text: I18n.i18nc("@option:check", "Frame rate")
+        checked: root.settings.value("showFps")
+        onToggled: root.settings.setValue("showFps", checked)
+    }
+
+    // The last of the Show group's three, which stay together, so that its
+    // help is under it (under Frame rate, it read as that one's; before
+    // Frame rate, it set that apart).
+    CheckBox {
         id: crosshairCheckBox
         objectName: "spectrogramCrosshairCheckBox"
         text: I18n.i18nc("@option:check", "Crosshair on hover")
@@ -160,27 +180,24 @@ Preferences.PreferencesPage {
         onToggled: root.settings.setValue("showSpectrogramCrosshair", checked)
     }
 
-    CheckBox {
-        objectName: "spectrogramFpsCheckBox"
-        text: I18n.i18nc("@option:check", "Frame rate")
-        checked: root.settings.value("showFps")
-        onToggled: root.settings.setValue("showFps", checked)
-    }
-
-    // After the Show group's three check boxes, which stay together
-    // (Frame rate stood apart under this help text).
     Components.FormHelpText {
         objectName: "crosshairHelp"
         uiPalette: root.uiPalette
-        indent: crosshairCheckBox.contentItem.x
-        text: I18n.i18nc("@info", "With the crosshair, right-clicking the spectrogram in centered mode "
-            + "seeks to that position in the track.")
+        checkBox: crosshairCheckBox
+        // Under Crosshair, it is that box's, and says where a right-click
+        // seeks to, as SpectrogramItem does: the time under the crosshair,
+        // in centered mode only ("that point" had nothing to refer to). It
+        // fits on one line at 24 pt.
+        text: I18n.i18nc("@info", "In centered mode, a right-click seeks to the crosshair.")
     }
 
     CheckBox {
         objectName: "showLevelMeterCheckBox"
         Kirigami.FormData.label: I18n.i18nc("@label", "Level meter:")
-        text: I18n.i18nc("@option:check", "Show a level meter at the end of each lane")
+        // The label has said what it shows; a screen reader hears the whole
+        // phrase, the box alone.
+        text: I18n.i18nc("@option:check after the label Level meter", "Show at the end of each lane")
+        Accessible.name: I18n.i18nc("@option:check accessible name", "Show a level meter at the end of each lane")
         checked: root.settings.value("showLevelMeter")
         onToggled: root.settings.setValue("showLevelMeter", checked)
     }
@@ -192,9 +209,10 @@ Preferences.PreferencesPage {
     }
 
     Components.DialogComboBox {
+        id: channelButtonsComboBox
         objectName: "channelButtonsComboBox"
         Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Mute and solo buttons:")
-        Layout.preferredWidth: Math.max(root.comboWidth, implicitWidth)
+        Layout.preferredWidth: root.comboWidth
         model: [
             I18n.i18nc("@item:inlistbox channel buttons", "Never"),
             I18n.i18nc("@item:inlistbox channel buttons", "On hover"),
@@ -208,7 +226,9 @@ Preferences.PreferencesPage {
         id: zoomCheckBox
         objectName: "spectrogramZoomCheckBox"
         Kirigami.FormData.label: I18n.i18nc("@label", "Zoom:")
-        text: I18n.i18nc("@option:check", "Allow zooming")
+        // What it turns on ("Zoom: Allow zooming" said itself twice); the
+        // help has the rest.
+        text: I18n.i18nc("@option:check", "Scroll to zoom in and out")
         checked: root.settings.value("spectrogramZoomEnabled")
         onToggled: root.settings.setValue("spectrogramZoomEnabled", checked)
     }
@@ -216,16 +236,16 @@ Preferences.PreferencesPage {
     Components.FormHelpText {
         objectName: "zoomHelp"
         uiPalette: root.uiPalette
-        indent: zoomCheckBox.contentItem.x
+        checkBox: zoomCheckBox
         text: root.resetZoomShortcut.length > 0
-            ? I18n.i18nc("@info %1 is the shortcut of View › Reset Zoom", "Scroll to zoom in or out, and drag with the middle button to move a zoomed waveform or centered spectrogram. %1 resets the zoom.", root.resetZoomShortcut)
-            : I18n.i18nc("@info", "Scroll to zoom in or out, and drag with the middle button to move a zoomed waveform or centered spectrogram.")
+            ? I18n.i18nc("@info %1 is the shortcut of View › Reset Zoom", "Drag with the middle button to move a zoomed waveform or centered spectrogram. %1 resets the zoom.", root.resetZoomShortcut)
+            : I18n.i18nc("@info", "Drag with the middle button to move a zoomed waveform or centered spectrogram.")
     }
 
     CheckBox {
         objectName: "stretchShortTracksCheckBox"
         Kirigami.FormData.label: I18n.i18nc("@label", "Default zoom:")
-        text: I18n.i18nc("@option:check", "Stretch tracks shorter than the view to its full width")
+        text: I18n.i18nc("@option:check", "Stretch tracks shorter than the view to fill it")
         checked: root.settings.value("stretchShortTracks")
         onToggled: root.settings.setValue("stretchShortTracks", checked)
     }

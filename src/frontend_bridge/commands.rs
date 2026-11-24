@@ -2824,12 +2824,13 @@ mod tests {
         let path = p("/music/deferred.flac");
 
         playback_tx
-            .send(PlaybackEvent::TrackChanged {
-                path: path.clone(),
-                queue_index: 0,
-                kind: TrackChangeKind::Manual,
-                track_token: 1,
-            })
+            .send(PlaybackEvent::track_change(
+                path.clone(),
+                0,
+                TrackChangeKind::Manual,
+                1,
+                &state.playback,
+            ))
             .expect("send track-changed while stopped");
         let changed = pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
         assert!(changed);
@@ -2886,12 +2887,13 @@ mod tests {
             std::env::temp_dir().join(format!("ferrous-missing-{}/gone.flac", std::process::id()));
 
         let _ = process_playback_event(
-            PlaybackEvent::TrackChanged {
-                path: path.clone(),
-                queue_index: 0,
-                kind: TrackChangeKind::Manual,
-                track_token: 1,
-            },
+            PlaybackEvent::track_change(
+                path.clone(),
+                0,
+                TrackChangeKind::Manual,
+                1,
+                &state.playback,
+            ),
             &analysis,
             &metadata,
             &event_tx,
@@ -2938,7 +2940,7 @@ mod tests {
             .collect();
         assert_eq!(
             errors,
-            ["Couldn't play \u{201c}gone.flac\u{201d} (Resource not found); playback stopped."]
+            ["Couldn't play \u{201c}gone.flac\u{201d}; playback stopped."]
         );
     }
 
@@ -2996,12 +2998,13 @@ mod tests {
         state.metadata.album = "Old Album".to_string();
 
         playback_tx
-            .send(PlaybackEvent::TrackChanged {
-                path: p("/music/new.flac"),
-                queue_index: 1,
-                kind: TrackChangeKind::Natural,
-                track_token: 1,
-            })
+            .send(PlaybackEvent::track_change(
+                p("/music/new.flac"),
+                1,
+                TrackChangeKind::Natural,
+                1,
+                &state.playback,
+            ))
             .expect("send track-changed event");
         let changed = pump_playback_events(&playback_rx, &analysis, &metadata_service, &mut state);
         assert!(changed);
@@ -3097,12 +3100,13 @@ mod tests {
         );
         assert_eq!(state.playback.current.as_ref(), Some(&new_current));
         let _ = process_playback_event(
-            PlaybackEvent::TrackChanged {
-                path: old_next.clone(),
-                queue_index: 2,
-                kind: TrackChangeKind::Gapless,
-                track_token: 3,
-            },
+            PlaybackEvent::track_change(
+                old_next.clone(),
+                2,
+                TrackChangeKind::Gapless,
+                3,
+                &state.playback,
+            ),
             &analysis,
             &metadata,
             &event_tx,
@@ -3130,8 +3134,9 @@ mod tests {
             Ok(BridgeEvent::Error(error)) => {
                 assert_eq!(
                     error.message,
-                    "Couldn't play \u{201c}next.flac\u{201d} (Resource not found); skipped it."
+                    "Couldn't play \u{201c}next.flac\u{201d}; skipped it."
                 );
+                assert_eq!(error.detail, "Resource not found");
                 assert_eq!(error.category, super::super::ErrorCategory::Playback);
                 assert_eq!(error.severity, super::super::ErrorSeverity::Warning);
                 assert!(error.subject.ends_with("next.flac"), "{}", error.subject);

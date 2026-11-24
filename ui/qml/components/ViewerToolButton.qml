@@ -6,7 +6,8 @@ import org.kde.kirigami 2.20 as Kirigami
 import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/KeyUtils.js" as KeyUtils
 
-// A flat 24 px tool button, larger with a larger font, on the window's
+// A flat 24 px tool button, larger with a larger font, or the size of the
+// ViewerControls it is among (a title strip's are larger), on the window's
 // chrome or view colour, such as the viewers' info and close buttons: a
 // theme icon (`icon.name`), a symbolic mask of the app's own
 // (`icon.source`), or its text with `display:
@@ -18,6 +19,10 @@ import "../logic/KeyUtils.js" as KeyUtils
 // over the view, and checked is the mode switch's chosen segment: the
 // plot's text colour at 18 % inside a 1 px edge of its segmentEdge, so the
 // plates have one way to show a choice that is on (not an accent tint).
+// A checked toggle, which a click turns off, answers the pointer: its fill
+// goes to 26 % while hovered (at one fill it read as inert, though a click
+// changed it); a chosen segment of a choice, which a click leaves chosen,
+// stays as it is.
 ToolButton {
     id: root
 
@@ -39,29 +44,62 @@ ToolButton {
         : root.uiPalette.hover
     readonly property color pressedColor: ColorUtils.withAlpha(root.baseTextColor,
         root.plotColors ? 0.22 : 0.10)
+    // Whether a click turns it off: checked, and not one of a choice.
+    readonly property bool _togglesOff: root.checked && !root.autoExclusive
+    // On a plot, how much of its text colour the checked fill is: 18 %, and
+    // 26 % while the pointer is on a toggle that a click turns off. Only the
+    // amount fades, so a change of plot recolours it at once.
+    property real _checkedAmount: root._togglesOff && root.hovered ? 0.26 : 0.18
+    Behavior on _checkedAmount {
+        enabled: Kirigami.Units.shortDuration > 0
+        NumberAnimation {
+            duration: Kirigami.Units.shortDuration
+            easing.type: Easing.OutCubic
+        }
+    }
     readonly property color checkedColor: root.plotColors
-        ? ColorUtils.withAlpha(root.plotColors.plotText, 0.18) : root.uiPalette.selection
+        ? ColorUtils.withAlpha(root.plotColors.plotText, root._checkedAmount) : root.uiPalette.selection
     readonly property color focusRingColor: root.plotColors
         ? root.plotColors.plotFocusRing : root.uiPalette.focusRing
+    // The ViewerControls it is among, whose size it takes, or null: the
+    // viewer's own buttons are declared inside them, at any depth, such as
+    // the mode switch's in its row.
+    readonly property Item _controls: {
+        for (let item = root.parent; item; item = item.parent) {
+            if (item.viewerButtonSize !== undefined) {
+                return item
+            }
+        }
+        return null
+    }
+    readonly property int buttonSize: root._controls
+        ? root._controls.viewerButtonSize : root.uiPalette.toolButtonSize
+    readonly property int glyphSize: root._controls
+        ? root._controls.viewerIconSize : root.uiPalette.toolIconSize
 
     implicitWidth: root.display === AbstractButton.TextOnly
-        ? Math.max(root.uiPalette.toolButtonSize, label.implicitWidth + 2 * 6)
-        : root.uiPalette.toolButtonSize
-    implicitHeight: root.uiPalette.toolButtonSize
+        ? Math.max(root.buttonSize, label.implicitWidth + 2 * 6)
+        : root.buttonSize
+    implicitHeight: root.buttonSize
     padding: 0
     flat: true
     hoverEnabled: true
     display: AbstractButton.IconOnly
-    icon.width: root.uiPalette.toolIconSize
-    icon.height: root.uiPalette.toolIconSize
-    focusPolicy: Qt.TabFocus
+    icon.width: root.glyphSize
+    icon.height: root.glyphSize
+    // A press takes the focus too, for the mouse: a button the keyboard
+    // focused before lets it go, and with it its ring (with Tab focus
+    // alone, Close kept its ring while the pointer pressed Info).
+    focusPolicy: Qt.StrongFocus
 
     Accessible.name: root.text
 
-    // Space presses the focused button rather than playing or pausing; keys
-    // with modifiers stay the shortcuts'.
+    // Space presses the button the keyboard focused rather than playing or
+    // pausing; one a click focused leaves it to the shortcut, as it did
+    // before a click took the focus. Keys with modifiers stay the
+    // shortcuts'.
     Keys.onShortcutOverride: function(event) {
-        event.accepted = KeyUtils.isPlainSpace(event)
+        event.accepted = root.focusReason !== Qt.MouseFocusReason && KeyUtils.isPlainSpace(event)
     }
 
     ToolTip.text: root.toolTipText

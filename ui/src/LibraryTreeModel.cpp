@@ -401,6 +401,10 @@ bool LibraryTreeModel::revealPending() const {
     return !m_revealKey.isEmpty();
 }
 
+bool LibraryTreeModel::hasExpandedRows() const {
+    return m_hasExpandedRows;
+}
+
 void LibraryTreeModel::setLibraryTreeFromBinary(const QByteArray &treeBytes) {
     if (!m_parseInFlight && treeBytes.size() <= 16 * 1024) {
         ++m_parseGeneration;
@@ -538,6 +542,25 @@ int LibraryTreeModel::indexForSelectionKey(const QString &selectionKey) const {
         }
     }
     return -1;
+}
+
+QStringList LibraryTreeModel::selectionKeyPath(const QString &selectionKey) const {
+    const int row = indexForSelectionKey(selectionKey);
+    if (row < 0) {
+        return {};
+    }
+    // The rows that hold a row are the nearest rows above it, each less
+    // deep than the one it holds.
+    QStringList path{rowAt(row).selectionKey};
+    int depth = rowAt(row).depth;
+    for (int above = row - 1; above >= 0 && depth > 0; --above) {
+        const FlatRow &holder = rowAt(above);
+        if (holder.depth < depth) {
+            path.prepend(holder.selectionKey);
+            depth = holder.depth;
+        }
+    }
+    return path;
 }
 
 int LibraryTreeModel::sourceIndexForRow(int row) const {
@@ -1370,6 +1393,12 @@ void LibraryTreeModel::rebuildRows() {
     pruneSelection();
     if (oldCount != count()) {
         emit countChanged();
+    }
+    const bool hasExpanded = std::any_of(m_rows.cbegin(), m_rows.cend(),
+                                         [](const FlatRow &row) { return row.expanded; });
+    if (hasExpanded != m_hasExpandedRows) {
+        m_hasExpandedRows = hasExpanded;
+        emit hasExpandedRowsChanged();
     }
     emit treeApplied();
     // After the views took the rows and their positions.

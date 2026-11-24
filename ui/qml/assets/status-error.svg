@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- A failed row's mark, drawn for 16 px as a one-colour mask in the negative colour: a ring with a
+     cross in it, a pixel's weight as Breeze's small emblems draw them, 12 px across, the dot slot's
+     width (Breeze's dialog-error, a filled square, outweighed the 6 px dot it stands for). Filled
+     shapes rather than strokes, as Breeze draws its own icons. -->
+<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+<path fill-rule="evenodd" fill="#000" d="M8 2a6 6 0 1 0 0 12a6 6 0 1 0 0-12zM8 3a5 5 0 1 1 0 10a5 5 0 1 1 0-10z"/>
+<path fill="#000" d="M6.192 5.308L10.692 9.808 9.808 10.692 5.308 6.192zM9.808 5.308L10.692 6.192 6.192 10.692 5.308 9.808z"/>
+</svg>

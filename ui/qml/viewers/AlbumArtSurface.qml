@@ -45,8 +45,8 @@ Item {
     required property var uiPalette
     // Whether the viewer is over the whole screen: the details' text is
     // then a step larger, 1.2 times the window's, as the title strip's
-    // over them, the file's name 16 px, and their column as much wider,
-    // 336 px with its seam.
+    // over them, the file's name 16 px, and their column at least as much
+    // wider, 336 px with its seam, and as wide as a preview's.
     property bool fullscreen: false
     // The colours of the view, dark in both themes.
     readonly property var plot: root.uiPalette.mediaPlot
@@ -73,12 +73,15 @@ Item {
     // the larger text over the whole screen.
     readonly property int detailsIconSize: root.uiPalette.scaledSize(
         Math.round(Kirigami.Units.iconSizes.small * root.infoScale))
-    // The file's name: the body size; during a preview, a step larger, 12 pt
-    // with the default 10 pt font; over the whole screen, the details' size,
-    // as the title strip's track title over it (at 1.35 times, 18 px, it
-    // outranked that title).
-    readonly property real infoTitlePointSize: root.uiPalette.basePointSize
-        * (root.fullscreen ? root.uiPalette.fullscreenTextScale : (root.previewActive ? 1.2 : 1))
+    // The details' heading, the file's name or, during a preview, which
+    // image shows: in semibold, 1.15 times the details' text, 11.5 pt with
+    // the default 10 pt font (at their size, it was set off from the rows by
+    // its weight alone); over the whole screen, the details' size, as the
+    // title strip's track title over it (at 1.35 times, 18 px, it outranked
+    // that title).
+    readonly property real infoTitlePointSize: root.fullscreen
+        ? root.uiPalette.basePointSize * root.uiPalette.fullscreenTextScale
+        : root.infoPointSize * 1.15
     // The image's details, from BridgeClient.cachedImageFileDetails: path,
     // fileName, width, height, fileSizeText, format, embeddedCover.
     property var fileInfo: ({})
@@ -87,19 +90,83 @@ Item {
     property var switchComparisonImage: function() {}
     // How far the details keep below the top, clear of controls over them.
     property real infoTopInset: 0
+    // How far in from the view's right edge the centre of the viewer's
+    // Close is, over the details, whose Copy Path shares its axis; -1 where
+    // there is none, and Copy Path ends with the details.
+    property real controlsAxisInset: -1
     // A preview from Replace from iTunes: what it shows, such as "iTunes
-    // Candidate", and Back to Results, which closeViewer does then. With a
-    // candidate, Apply calls applyPreview while previewCanApply.
+    // Artwork", and Back to Results, which closeViewer does then. With a
+    // candidate, Apply iTunes Artwork calls applyPreview while
+    // previewCanApply.
     property bool previewActive: false
     property string previewLabel: ""
     property bool previewHasCandidate: false
     property bool previewCanApply: false
     property var applyPreview: null
     readonly property alias imageStatus: albumArtImageFull.status
+    // What the viewer shows of a preview and of a comparison: the state
+    // above while the viewer is open; closed, the state it closed with, as
+    // it fades out, as with the art, which stays the image it showed. (Back
+    // to Results ended the preview as the fade began: its heading, Show
+    // Current Album Art and its footer went on the fade's first frame, and
+    // the column narrowed, while the art faded.)
+    property bool shownPreviewActive: false
+    property string shownPreviewLabel: ""
+    property bool shownPreviewHasCandidate: false
+    property bool shownPreviewCanApply: false
+    property bool shownComparisonModeAvailable: false
+    Binding {
+        target: root
+        property: "shownPreviewActive"
+        value: root.previewActive
+        when: root.viewerOpen
+        restoreMode: Binding.RestoreNone
+    }
+    Binding {
+        target: root
+        property: "shownPreviewLabel"
+        value: root.previewLabel
+        when: root.viewerOpen
+        restoreMode: Binding.RestoreNone
+    }
+    Binding {
+        target: root
+        property: "shownPreviewHasCandidate"
+        value: root.previewHasCandidate
+        when: root.viewerOpen
+        restoreMode: Binding.RestoreNone
+    }
+    Binding {
+        target: root
+        property: "shownPreviewCanApply"
+        value: root.previewCanApply
+        when: root.viewerOpen
+        restoreMode: Binding.RestoreNone
+    }
+    Binding {
+        target: root
+        property: "shownComparisonModeAvailable"
+        value: root.comparisonModeAvailable
+        when: root.viewerOpen
+        restoreMode: Binding.RestoreNone
+    }
+    // Whether the details are headed by which image shows, over its file.
+    readonly property bool headedByImage: root.shownPreviewActive && root.shownPreviewLabel.length > 0
+    // The art's pointer, which the area over it shows too: zoomed, an open
+    // hand over the art, and a closed one while it is held to pan; the
+    // arrow over the details and over the fitted art.
+    readonly property int pointerCursorShape: root.zoom <= 1.0 ? Qt.ArrowCursor
+        : (albumArtPanArea.pressedButtons & Qt.LeftButton) ? Qt.ClosedHandCursor
+        : albumArtPanArea.containsMouse ? Qt.OpenHandCursor
+        : Qt.ArrowCursor
     readonly property bool zoomed: root.zoom > 1.0
     // How far the details are shown: 0 hidden, 1 shown. Showing or hiding
-    // them eases it over 120 ms, OutCubic (unless eased, the art jumped
-    // aside in one frame), and at once with Plasma's animations off. The
+    // them glides it over 2.4 short durations, 200 ms, OutCubic both ways,
+    // so the art settles into its place (unless eased, it jumped aside in
+    // one frame; over 120 ms of OutCubic it went 91 % of the way in 43 ms
+    // and still read as a jump, and over 150 ms of InOutQuad it stopped
+    // short rather than settling), and at once with Plasma's animations
+    // off. The
     // space they take, their reserve, follows it: the column slides in
     // over the view's right edge, whole, as wide as it rests, and the art
     // glides with it. Only showing or hiding them in the open viewer is
@@ -108,7 +175,7 @@ Item {
     // controller sets them before it opens it) has them at rest from its
     // first frame. (They slid in as it opened, hidden, and so out of the
     // Tab order, until the slide's first step.)
-    readonly property int infoRevealDuration: Math.round(Kirigami.Units.shortDuration * 1.2)
+    readonly property int infoRevealDuration: Math.round(Kirigami.Units.shortDuration * 2.4)
     property real infoReveal: root.infoVisible ? 1 : 0
     Behavior on infoReveal {
         enabled: root.infoRevealDuration > 0 && root.viewerOpen
@@ -120,37 +187,45 @@ Item {
     // The details' width with their seam, in whole pixels, times how far
     // they are shown.
     readonly property real infoReserve: Math.round(root.infoReveal * (infoColumn.width + 1))
+    // The details' width once shown, without their seam.
+    readonly property real infoWidth: infoColumn.width
     // The space the art fits in, across: the whole view, or while the
     // details show the space left of their seam less 16 px on each side,
     // during a preview 24 px, so the art never touches their seam (with no
     // gutter, a wide window's art met it). The gutter eases with the
     // details' reveal, as their reserve does.
-    readonly property real artMargin: (root.previewActive ? 24 : 16) * root.infoReveal
+    readonly property real artMargin: (root.shownPreviewActive ? 24 : 16) * root.infoReveal
     readonly property real fitLeft: root.artMargin
     readonly property real fitWidth: Math.max(1, albumArtViewport.width - root.infoReserve - 2 * root.artMargin)
     readonly property real fitCenterX: root.fitLeft + root.fitWidth / 2
     onFitWidthChanged: root.clampPan()
 
-    // A flat button of the details, reached with Tab, with its tooltip.
+    // A button of the details, reached with Tab, with its tooltip.
     // Space presses it rather than playing or pausing, which the viewer's
     // shortcuts would take; keys with modifiers stay the shortcuts'.
     // It is drawn in the plot's colours, as the strip's buttons are: the
-    // theme's icons would be a light theme's on the dark details. It shows
-    // only the hover tint; keyboard focus is the plot's 2 px ring 1 px
-    // outside it, with a 1 px gap in the details' colour.
+    // theme's icons would be a light theme's on the dark details. At rest it
+    // is a box with a 1 px edge, the plates' (flat, a line of text with a
+    // glyph, it read as one more row of the details, not as the column's
+    // action); the hover tint fills it inside that edge. While `current`, it
+    // is drawn as a checked toggle of the strip is. Keyboard focus is the
+    // plot's 2 px ring 1 px outside it, with a 1 px gap in the details'
+    // colour.
     component DetailsButton: Button {
         id: detailsButton
 
         property string toolTipText: ""
+        // Drawn checked: the comparison shows the other image.
+        property bool current: false
         readonly property color contentColor: root.plot.plotText
 
         focusPolicy: Qt.TabFocus
         hoverEnabled: true
         font.pointSize: root.infoPointSize
-        leftPadding: Math.round(8 * root.infoScale)
-        rightPadding: Math.round(8 * root.infoScale)
-        topPadding: Math.round(5 * root.infoScale)
-        bottomPadding: Math.round(5 * root.infoScale)
+        leftPadding: Math.round(6 * root.infoScale)
+        rightPadding: Math.round(6 * root.infoScale)
+        topPadding: Math.round(4 * root.infoScale)
+        bottomPadding: Math.round(4 * root.infoScale)
         spacing: Kirigami.Units.smallSpacing
         icon.width: root.detailsIconSize
         icon.height: root.detailsIconSize
@@ -178,10 +253,14 @@ Item {
                 anchors.centerIn: parent
                 spacing: detailsButton.spacing
 
+                // Its middle on the middle of the text's capitals, as the
+                // footer's chevron and checkmark sit, rather than on the
+                // middle of the text's line, which is lower.
                 Kirigami.Icon {
                     id: detailsButtonIcon
                     objectName: "albumArtDetailsButtonIcon"
-                    anchors.verticalCenter: parent.verticalCenter
+                    y: Math.round(detailsButtonLabel.y + detailsButtonLabel.baselineOffset
+                        - detailsButtonCapMetrics.capHeight / 2 - height / 2)
                     width: detailsButton.icon.width
                     height: detailsButton.icon.height
                     visible: detailsButton.icon.name.length > 0
@@ -202,15 +281,41 @@ Item {
                     color: detailsButton.contentColor
                     elide: Text.ElideRight
                     Accessible.ignored: true
+
+                    FontMetrics {
+                        id: detailsButtonCapMetrics
+                        readonly property real capHeight: detailsButtonCapMetrics.tightBoundingRect("H").height
+                        font: detailsButtonLabel.font
+                    }
                 }
             }
         }
 
         background: Item {
+            // Checked, as a toggle of the strip (ViewerToolButton): its
+            // fill and its edge.
+            Rectangle {
+                objectName: "albumArtDetailsButtonChecked"
+                anchors.fill: parent
+                radius: 3
+                visible: detailsButton.current
+                color: ColorUtils.withAlpha(root.plot.plotText, 0.18)
+            }
+
+            Rectangle {
+                objectName: "albumArtDetailsButtonEdge"
+                anchors.fill: parent
+                radius: 3
+                color: "transparent"
+                border.width: 1
+                border.color: detailsButton.current ? root.plot.segmentEdge : root.plot.plotPlateEdge
+            }
+
             Rectangle {
                 objectName: "albumArtDetailsButtonHover"
                 anchors.fill: parent
-                radius: 3
+                anchors.margins: 1
+                radius: 2
                 color: ColorUtils.withAlpha(root.plot.plotText,
                     detailsButton.down ? 0.18 : 0.12)
                 opacity: detailsButton.enabled && (detailsButton.hovered || detailsButton.down) ? 1 : 0
@@ -252,11 +357,13 @@ Item {
 
     // A button of the preview's footer: the style's own, as a dialog's
     // button row has, so Apply, the default, is Breeze's default button
-    // (a solid accent fill was unlike any other default button). The
+    // (a solid accent fill was unlike any other default button), its
+    // caption and glyph on the details' type scale (CaptionButton: they
+    // were 13 px under 16 px details). The
     // details are dark in both themes, so the buttons take
     // the complementary colours, Breeze's dark set in either. Space and
     // the tooltip as the details' other buttons.
-    component FooterButton: Button {
+    component FooterButton: Components.CaptionButton {
         property string toolTipText: ""
 
         Kirigami.Theme.inherit: false
@@ -453,7 +560,7 @@ Item {
             preventStealing: true
             property real lastX: 0
             property real lastY: 0
-            cursorShape: root.zoom > 1.0 ? Qt.OpenHandCursor : Qt.ArrowCursor
+            cursorShape: root.pointerCursorShape
 
             onPressed: function(mouse) {
                 if (mouse.button === Qt.RightButton) {
@@ -466,11 +573,6 @@ Item {
                 }
                 lastX = mouse.x
                 lastY = mouse.y
-                cursorShape = Qt.ClosedHandCursor
-            }
-
-            onReleased: {
-                cursorShape = root.zoom > 1.0 ? Qt.OpenHandCursor : Qt.ArrowCursor
             }
 
             onPositionChanged: function(mouse) {
@@ -529,8 +631,8 @@ Item {
             // the whole screen anyway.
             popupType: Popup.Item
 
-            MenuItem { action: root.replaceFromItunesAction }
-            MenuItem {
+            Components.AppMenuItem { action: root.replaceFromItunesAction }
+            Components.AppMenuItem {
                 enabled: false
                 visible: !root.replaceFromItunesAction.enabled
                 text: root.currentTrackItunesArtworkDisabledReason()
@@ -572,13 +674,16 @@ Item {
         x: infoColumn.x - 1
         width: 1
         height: parent.height
-        // The plates' edge on the floor, solid, over any art.
-        color: Qt.tint(root.plot.plotBg, root.plot.plotPlateEdge)
+        // The one seam colour, solid, over any art: as the footer's seam and
+        // the strip's rule, which it meets, the plates' edge on the details'
+        // strip colour (on the floor's black it was #242424 between their
+        // #333333, and nearly went against the black).
+        color: Qt.tint(root.plot.plotStrip, root.plot.plotPlateEdge)
     }
 
     // The details: the file's name, then label and value rows; then the
-    // folder's label on its own line, and its path on one line under it,
-    // elided in the middle, with Copy Path. The rows' labels share a column
+    // folder's label with Copy Path on its line, and the path under them
+    // across the column. The rows' labels share a column
     // as wide as the widest of them, up to two fifths of the row, so every
     // value starts at the same x and keeps the rest; a label wider than that
     // wraps between its words, and the column is never narrower than its
@@ -588,11 +693,17 @@ Item {
     // in a wide view, a quarter of it, up to 320 px, a seventh wider, so the
     // details are not crammed beside a wide art (as at 280 px in a 1600 px
     // window). Over the whole screen it follows its text, 1.2 times larger:
-    // 336 px, or 40 characters of that text (at 320 px a folder's path was
-    // cut beside the screen's room to spare).
-    // During a preview, it is wider for its buttons if they need it, up to
-    // half the view: in a narrower view, the buttons stack, so neither is
-    // cut short.
+    // 336 px, or as wide as what it holds whole wants, its widest row and
+    // the path's longest folder, up to two fifths of the screen (at 320 px
+    // a folder's path was cut beside the screen's room to spare; at 40
+    // characters of a large font, it stood empty beside a smaller art).
+    // During a preview, and over the whole screen whether a preview or
+    // not, it is as wide as a candidate's two buttons side by side want
+    // if two fifths of the view or its own width hold them; otherwise they
+    // stack, as a longer translation's do, and in a window it is up to half
+    // the view, and wider still, up to three quarters, where one of them
+    // alone needs more, as on a small screen with a large font, so neither
+    // is cut short.
     Item {
         id: infoColumn
         objectName: "albumArtInfoColumn"
@@ -601,20 +712,42 @@ Item {
         // Without its seam: 279 px, 319 px in a view 1280 px wide or more,
         // 335 px over the whole screen.
         readonly property real minimumWidth: Math.round(280 * infoColumn.widthScale) - 1
-        // Forty characters of the details' text; in a window, a quarter of
-        // the view's width wider in a wide one, as the column.
+        // Forty characters of the details' text, in a window, and a quarter
+        // of the view's width wider in a wide one, as the column.
         readonly property real fortyCharacters: Math.max(infoColumn.minimumWidth,
-            Math.ceil(infoFontMetrics.averageCharacterWidth * 40 * (root.fullscreen ? 1 : infoColumn.widthScale)) - 1)
+            Math.ceil(infoFontMetrics.averageCharacterWidth * 40 * infoColumn.widthScale) - 1)
+        // What the details hold whole, with the padding: the widest row's
+        // label and value on one line, the path's longest folder with its
+        // slash (where the path breaks), and the comparison's button. The
+        // column over the whole screen is as wide, so it is never wider
+        // than its text, nor cuts the path.
+        readonly property real contentWidth: Math.ceil(Math.max(infoRows.widestRow,
+            folderPathLabel.longestName, root.shownComparisonModeAvailable ? compareButton.implicitWidth : 0))
+            + 2 * root.infoPadding
         visible: root.infoReserve > 0
         // At the view's right edge once shown; past it, sliding in, while
         // they show or hide.
         x: root.width - root.infoReserve + 1
         anchors.top: parent.top
         anchors.bottom: parent.bottom
-        width: root.previewActive
-            ? Math.max(infoColumn.minimumWidth, Math.min(Math.floor(root.width / 2), Math.max(infoColumn.fortyCharacters,
-                Math.ceil(Math.max(previewBackButton.implicitWidth,
-                    previewApplyButton.visible ? previewApplyButton.implicitWidth : 0)) + 2 * root.infoPadding)))
+        readonly property real widestButton: Math.ceil(Math.max(previewBackButton.implicitWidth,
+            previewApplyButton.visible ? previewApplyButton.implicitWidth : 0)) + 2 * root.infoPadding
+        // A candidate's preview's two buttons side by side, with the
+        // padding: what its column is as wide as, in a wide view.
+        readonly property real buttonsSideBySide: Math.ceil(previewBackButton.implicitWidth
+            + previewButtons.spacing + previewApplyButton.implicitWidth) + 2 * root.infoPadding
+        // Over the whole screen, every column is as wide as a candidate's
+        // preview's, so the art rests at the same x in each (the details'
+        // was 22 px narrower than the preview's, and the art sat 12 px
+        // further right in one than in the other).
+        readonly property real buttonsRow: !previewApplyButton.visible && !root.fullscreen ? 0
+            : infoColumn.buttonsSideBySide
+        width: root.shownPreviewActive || root.fullscreen
+            ? Math.max(infoColumn.minimumWidth,
+                root.fullscreen ? Math.min(Math.floor(root.width * 0.4), infoColumn.contentWidth)
+                                : Math.min(Math.floor(root.width / 2), infoColumn.fortyCharacters),
+                infoColumn.buttonsRow <= Math.floor(root.width * 0.4) ? infoColumn.buttonsRow : 0,
+                root.shownPreviewActive ? Math.min(Math.floor(root.width * 0.75), infoColumn.widestButton) : 0)
             : Math.max(infoColumn.minimumWidth, Math.min(Math.floor(root.width * 0.4), infoColumn.fortyCharacters))
 
         // The details' text: the body font, 1.2 times it over the whole
@@ -667,18 +800,21 @@ Item {
                 anchors.topMargin: 12 + root.infoTopInset
                 spacing: 0
 
-                // During a preview, what it shows, such as "iTunes Candidate",
-                // over the file's name.
+                // During a preview, which image shows, such as "iTunes
+                // Artwork", is the heading, and its file's name is under it
+                // (the two images' files are often both "cover.jpg", which
+                // headed the details of either). A longer translation wraps.
                 Label {
                     objectName: "albumArtPreviewLabel"
                     Layout.fillWidth: true
-                    Layout.bottomMargin: 2
-                    visible: root.previewActive && text.length > 0
+                    Layout.bottomMargin: Math.round(Kirigami.Units.smallSpacing * root.infoScale)
+                    visible: root.headedByImage
                     textFormat: Text.PlainText
-                    text: root.previewLabel
-                    font.pointSize: root.infoLabelPointSize
-                    color: root.plot.plotTextSecondary
-                    elide: Text.ElideRight
+                    text: root.shownPreviewLabel
+                    font.pointSize: root.infoTitlePointSize
+                    font.weight: Font.DemiBold
+                    color: root.plot.plotText
+                    wrapMode: Text.WordWrap
                 }
 
                 // The labels' column: as wide as the widest label, and 80 px
@@ -692,18 +828,21 @@ Item {
                                       root.infoLabelColumnMinimum),
                              Math.floor(infoLayout.width * 0.4)))
 
+                // The heading, or the file's name under it, is 12 px clear of
+                // the rows, more over the whole screen (at 8 px it ran into
+                // them).
                 Label {
                     objectName: "albumArtInfoTitle"
                     Layout.fillWidth: true
-                    Layout.bottomMargin: Math.round(8 * root.infoScale)
+                    Layout.bottomMargin: Math.round(12 * root.infoScale)
                     textFormat: Text.PlainText
                     text: root.sourceKind === "embedded"
                         ? I18n.i18nc("@info:title album art stored in the track's file", "Embedded Image")
                         : ((root.fileInfo && root.fileInfo.fileName)
                             || PathUtils.pathFromAnyUrl(root.viewerSource).replace(/^.*\//, ""))
-                    font.pointSize: root.infoTitlePointSize
-                    font.weight: Font.DemiBold
-                    color: root.plot.plotText
+                    font.pointSize: root.headedByImage ? root.infoLabelPointSize : root.infoTitlePointSize
+                    font.weight: root.headedByImage ? Font.Normal : Font.DemiBold
+                    color: root.headedByImage ? root.plot.plotTextSecondary : root.plot.plotText
                     elide: Text.ElideMiddle
                 }
 
@@ -721,6 +860,23 @@ Item {
                         }
                         return widest
                     }
+                    // The widest row on one line: the labels' column, as
+                    // wide as its widest label, and the widest value (of
+                    // the rows the image has, whether the column shows or
+                    // not, so it is as wide as it rests while it slides).
+                    readonly property real widestRow: {
+                        let value = 0
+                        for (let i = 0; i < infoRows.count; ++i) {
+                            const row = infoRows.itemAt(i)
+                            if (row && row.modelData.value.length > 0) {
+                                value = Math.max(value, row.valueImplicitWidth)
+                            }
+                        }
+                        return value <= 0 ? 0
+                            : Math.max(Math.ceil(infoRows.widestWord), Math.ceil(infoRows.widestLabel),
+                                       root.infoLabelColumnMinimum) + infoRows.rowSpacing + value
+                    }
+                    readonly property real rowSpacing: 12
                     // The widest single word of any label: a label wraps only
                     // between its words.
                     readonly property real widestWord: {
@@ -755,6 +911,7 @@ Item {
                     delegate: RowLayout {
                         required property var modelData
                         readonly property real labelImplicitWidth: infoLabel.implicitWidth
+                        readonly property real valueImplicitWidth: infoValue.implicitWidth
                         readonly property real labelWidestWord: {
                             let widest = 0
                             for (const word of infoLabel.text.split(/\s+/)) {
@@ -775,7 +932,7 @@ Item {
                         Layout.preferredHeight: Math.round(Math.max(infoValue.implicitHeight,
                             infoLabel.implicitHeight + infoValue.baselineOffset - infoLabel.baselineOffset))
                         visible: modelData.value.length > 0
-                        spacing: 12
+                        spacing: infoRows.rowSpacing
 
                         Label {
                             id: infoLabel
@@ -812,15 +969,16 @@ Item {
                     }
                 }
 
-                // The folder: its label on a line of its own, and under it
-                // the path across the column's whole width, with Copy Path
-                // at its end (in the grid, the path had the values' part of
-                // the row and broke onto a second line). A long path wraps
-                // after a slash, on the lines it needs up to eight, and what
-                // does not fit is elided (on three lines, a large font cut a
-                // typical path short over an empty column). During a
-                // preview, under the candidate's label and Apply, it takes
-                // up to three.
+                // The folder: its label with Copy Path on a line of their
+                // own, and under them the path across the column's whole
+                // width (in the grid, the path had the values' part of
+                // the row and broke onto a second line; with Copy Path at
+                // its first line's end, the button floated away from what
+                // it copies). A long path wraps after a slash, on the lines
+                // it needs up to eight, and what does not fit is elided (on
+                // three lines, a large font cut a typical path short over
+                // an empty column). During a preview, under the candidate's
+                // label and Apply, it takes up to three.
                 ColumnLayout {
                     id: folderRow
                     objectName: "albumArtFolderRow"
@@ -828,35 +986,65 @@ Item {
                     Layout.fillWidth: true
                     Layout.topMargin: root.infoRowTopMargin
                     Layout.bottomMargin: root.infoRowBottomMargin
-                    spacing: Math.round(2 * root.infoScale)
+                    // The label and the path as close as the button, which
+                    // is taller than the label's line, lets them be.
+                    spacing: Math.max(Math.round(2 * root.infoScale),
+                        Math.ceil((copyPathButton.implicitHeight - folderHead.implicitHeight) / 2))
 
-                    Label {
-                        id: folderLabel
-                        objectName: "albumArtFolderLabel"
+                    // The label, and Copy Path centred on it, on one axis
+                    // with the viewer's Close above, so that the column has
+                    // one line of buttons at its edge. The button reaches
+                    // out into the column's padding there; it and its glyph
+                    // are a step larger over the whole screen, as the
+                    // details' text is. Its glyph is in Close's ink, so
+                    // the two read as one column of buttons (in the
+                    // labels' secondary ink, it read fainter and smaller
+                    // than Close above it).
+                    Item {
+                        id: folderHead
+                        objectName: "albumArtFolderHead"
                         Layout.fillWidth: true
-                        textFormat: Text.PlainText
-                        text: I18n.i18nc("@label the folder the image is in", "Folder")
-                        font.pointSize: root.infoLabelPointSize
-                        color: root.plot.plotTextSecondary
-                        elide: Text.ElideRight
+                        implicitHeight: Math.ceil(folderLabel.implicitHeight)
+
+                        Label {
+                            id: folderLabel
+                            objectName: "albumArtFolderLabel"
+                            width: Math.min(implicitWidth, Math.max(0, copyPathButton.x - Kirigami.Units.smallSpacing))
+                            height: folderHead.height
+                            textFormat: Text.PlainText
+                            text: I18n.i18nc("@label the folder the image is in", "Folder")
+                            font.pointSize: root.infoLabelPointSize
+                            color: root.plot.plotTextSecondary
+                            elide: Text.ElideRight
+                        }
+
+                        Components.ViewerToolButton {
+                            id: copyPathButton
+                            objectName: "albumArtCopyPathButton"
+                            x: root.controlsAxisInset < 0 ? folderHead.width - width
+                                : Math.round(folderHead.width + root.infoPadding - root.controlsAxisInset - width / 2)
+                            y: Math.round((folderHead.height - height) / 2)
+                            implicitWidth: Math.round(root.uiPalette.toolButtonSize * root.infoScale)
+                            implicitHeight: Math.round(root.uiPalette.toolButtonSize * root.infoScale)
+                            icon.width: root.detailsIconSize
+                            icon.height: root.detailsIconSize
+                            uiPalette: root.uiPalette
+                            plotColors: root.plot
+                            text: I18n.i18nc("@action:button", "Copy Path")
+                            icon.name: "edit-copy"
+                            Accessible.description: root.folderPath
+                            onClicked: root.copyText(root.folderPath)
+                        }
                     }
 
-                    // The path, and Copy Path at its end, centred on the
-                    // path's first line (not on the middle of its three
-                    // lines); taller than the line, it reaches up
-                    // beside the folder's label, whose one word is far to
-                    // its left. The button and its glyph are a step larger
-                    // over the whole screen, as the details' text is.
+                    // The path is sized by the row rather than by the
+                    // layout: its text follows its width, which a layout
+                    // would take from the text.
                     Item {
                         id: folderPathRow
                         objectName: "albumArtFolderPathRow"
-                        readonly property real spacing: 4
-                        // The height of one of the path's lines.
-                        readonly property real lineHeight: folderPathLabel.lineCount > 0
-                            ? folderPathLabel.contentHeight / folderPathLabel.lineCount
-                            : folderPathLabel.implicitHeight
                         Layout.fillWidth: true
-                        implicitHeight: Math.max(folderPathLabel.implicitHeight, copyPathButton.y + copyPathButton.height)
+                        implicitHeight: folderPathLabel.implicitHeight
 
                         Label {
                             id: folderPathLabel
@@ -865,9 +1053,17 @@ Item {
                             // short.
                             readonly property string path: root.displayPath(root.folderPath)
                             readonly property bool elided: folderPathLabel.truncated
+                            // Its longest folder with its slash, which a
+                            // line holds whole where it is as wide.
+                            readonly property real longestName: {
+                                let widest = 0
+                                for (const name of folderPathLabel.path.split("/")) {
+                                    widest = Math.max(widest, folderPathMetrics.advanceWidth(name + "/"))
+                                }
+                                return widest
+                            }
                             anchors.left: parent.left
-                            anchors.right: copyPathButton.left
-                            anchors.rightMargin: folderPathRow.spacing
+                            anchors.right: parent.right
                             // The lines break only between folders, never
                             // inside a folder's name that fits on a line.
                             // The tooltip, Copy Path and the accessible name
@@ -878,7 +1074,7 @@ Item {
                             textFormat: Text.PlainText
                             wrapMode: Text.Wrap
                             elide: Text.ElideRight
-                            maximumLineCount: root.previewActive ? 3 : 8
+                            maximumLineCount: root.shownPreviewActive ? 3 : 8
                             font.pointSize: root.infoPointSize
                             color: root.plot.plotText
                             Accessible.name: folderPathLabel.path
@@ -896,37 +1092,33 @@ Item {
                                 font: folderPathLabel.font
                             }
                         }
-
-                        Components.ViewerToolButton {
-                            id: copyPathButton
-                            objectName: "albumArtCopyPathButton"
-                            anchors.right: parent.right
-                            y: Math.round((folderPathRow.lineHeight - copyPathButton.height) / 2)
-                            implicitWidth: Math.round(root.uiPalette.toolButtonSize * root.infoScale)
-                            implicitHeight: Math.round(root.uiPalette.toolButtonSize * root.infoScale)
-                            icon.width: root.detailsIconSize
-                            icon.height: root.detailsIconSize
-                            uiPalette: root.uiPalette
-                            plotColors: root.plot
-                            text: I18n.i18nc("@action:button", "Copy Path")
-                            icon.name: "edit-copy"
-                            glyphColor: root.plot.plotTextSecondary
-                            Accessible.description: root.folderPath
-                            onClicked: root.copyText(root.folderPath)
-                        }
                     }
                 }
 
                 // From the iTunes artwork dialog: the other image to compare.
                 DetailsButton {
+                    id: compareButton
                     objectName: "albumArtCompareButton"
-                    visible: root.comparisonModeAvailable
+                    visible: root.shownComparisonModeAvailable
                     Layout.topMargin: Math.round(12 * root.infoScale)
-                    flat: true
-                    icon.name: "view-refresh"
+                    // Its box's left edge on the column's text edge, as the
+                    // rows' text above it.
+                    // Its glyph's box the size the glyph is drawn at, sharp.
+                    icon.width: Kirigami.Units.iconSizes.roundedIconSize(root.detailsIconSize)
+                    icon.height: Kirigami.Units.iconSizes.roundedIconSize(root.detailsIconSize)
+                    // Checked while the current art shows: the comparison is
+                    // on, and pressing it goes back to the candidate.
+                    current: root.sourceKind !== "itunes"
+                    // Two views side by side, drawn for 16 px in both Breeze
+                    // themes in 1 px lines, as the footer's chevron: the two
+                    // images compared (swap-panels' panes and arrows, in
+                    // 16 px, read as a smudge; view-refresh said reload,
+                    // exchange-positions is drawn for 22 px, and
+                    // document-swap's one sheet said replace, as Apply does).
+                    icon.name: "view-dual-symbolic"
                     text: root.sourceKind === "itunes"
                         ? I18n.i18nc("@action:button", "Show Current Album Art")
-                        : I18n.i18nc("@action:button artwork found on iTunes", "Show iTunes Candidate")
+                        : I18n.i18nc("@action:button artwork found on iTunes", "Show iTunes Artwork")
                     toolTipText: I18n.i18nc("@info:tooltip", "Left or Right switches between the two images")
                     onClicked: root.switchComparisonImage()
                 }
@@ -936,9 +1128,9 @@ Item {
         // The preview's footer, as a dialog's button row, at the bottom of
         // the details under a seam (following the details, the buttons
         // were crammed under them): at the end of a row, the default
-        // one, Apply, last. When they do not fit side by side, with a larger
-        // font or a longer translation, they stack, each the column's width,
-        // Back to Results first.
+        // one, Apply iTunes Artwork, last. When they do not fit side by
+        // side, with a larger font or a longer translation, they stack, each
+        // the column's width, Back to Results first.
         // Anchors and bindings place them, so they are in place the moment
         // Apply shows or hides: a layout would place them only at its next
         // polish, leaving Apply where it was laid out before, past the
@@ -946,7 +1138,7 @@ Item {
         Item {
             id: previewFooter
             objectName: "albumArtPreviewFooter"
-            visible: root.previewActive
+            visible: root.shownPreviewActive
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.bottom: parent.bottom
@@ -1005,13 +1197,18 @@ Item {
                         ? (previewButtons.height - height) / 2
                         : previewBackButton.height + previewButtons.spacing
                     width: previewButtons.oneRow ? implicitWidth : previewButtons.width
-                    visible: root.previewHasCandidate
-                    enabled: root.previewCanApply
+                    visible: root.shownPreviewHasCandidate
+                    enabled: root.shownPreviewCanApply
                     // Breeze draws the button marked default as such.
                     Accessible.defaultButton: true
                     icon.name: "dialog-ok-apply"
-                    text: I18n.i18nc("@action:button", "Apply")
-                    toolTipText: I18n.i18nc("@info:tooltip", "Replace the album art with this candidate")
+                    // Named, as it applies that artwork also while the
+                    // current art shows to compare ("Apply" read as applying
+                    // the image on show).
+                    text: I18n.i18nc("@action:button artwork found on iTunes; keep it short",
+                                     "Apply iTunes Artwork")
+                    toolTipText: I18n.i18nc("@info:tooltip",
+                                            "Replace the album art with the iTunes artwork")
                     onClicked: root.applyPreview()
                 }
             }

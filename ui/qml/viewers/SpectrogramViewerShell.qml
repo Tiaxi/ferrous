@@ -6,6 +6,7 @@ import QtQuick.Window 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
+import "../logic/PlotLanes.js" as PlotLanes
 import "../logic/VisualizationModes.js" as VisualizationModes
 
 Item {
@@ -32,21 +33,27 @@ Item {
     // title strip.
     property var uiBridge: null
     property string positionText: "00:00"
-    // How far the corner controls keep from the right edge, clear of the
-    // level meter's column.
-    property real cornerRightMargin: 5
+    // What the level meter's column takes of the view's right edge, which
+    // the corner's plate keeps clear of.
+    property real meterWidth: 0
+    // The corner plate's inset from the plot's corner: in the window, the
+    // lane heads'; over the whole screen, the title strip's 8 px, as its
+    // plate is on the strip's scale.
+    readonly property int cornerInset: root.useWholeScreenViewerMode ? 8 : 5
+    // Its inset from the plot's right edge: the corner's, or beside the
+    // level meter's column, 8 px from it (at 5 px, its edge all but met the
+    // meter's seam).
+    readonly property int cornerRightInset: root.meterWidth > 0 ? 8 : root.cornerInset
     // Whether the title strip shows over the whole screen when the pointer
     // moves: the Preferences setting.
     property bool stripEnabled: true
     // The plot's zoom, 1 at the default, and what resets it, for the strip.
     property real zoomLevel: 1.0
     property var resetZoom: null
-    // Whether the mode switch and the zoom are in the title strip rather
-    // than on the plot: over the whole screen while the strip is on, so the
-    // strip is the viewer's one place for its controls (the
-    // plot's plate under the strip's Close read as a second cluster). With
-    // the strip turned off, and in the main window, they stay on the plot.
-    readonly property bool controlsInStrip: root.wholeScreenOpen && root.stripEnabled
+    // Whether the view is moved away from the playhead, which the controls
+    // say, hiding as they do (#467), and Follow Playhead's shortcut.
+    property bool viewMoved: false
+    property string followShortcut: ""
 
     property alias popupHost: spectrogramPopupHost
     // The visualization, whose last frame the viewer in the main window
@@ -62,6 +69,9 @@ Item {
     // whole-screen window: `holdsVisualization` tells Main.qml not to take
     // it there until then (see SpectrogramPane).
     property Item visualization: null
+    // The plot's pointer, which the areas over it show: hidden with the
+    // controls, or a pan's closed hand.
+    readonly property int plotCursorShape: root.visualization?.pointerCursorShape ?? Qt.ArrowCursor
     // Whether the viewer in the main window shows: while it is open, and
     // while it fades out after it closes.
     readonly property bool popupShown: spectrogramViewer.visible
@@ -106,21 +116,22 @@ Item {
     readonly property Window fullscreenWindow: spectrogramFullscreenWindowLoader.item
     readonly property Item windowHost: root.fullscreenWindow ? root.fullscreenWindow.host : null
     property alias fullscreenControlsHideDelay: fullscreenControlsAutoHide.hideDelay
-    // What the visualization keeps clear of in its top right corner: in the
-    // main window, the viewer's controls, with the plot layer's mode switch
-    // `cornerGap` left of them; over the whole screen nothing, as the
-    // controls are in the title strip. It does not change as they auto-hide.
-    readonly property size reservedCorner: root.useWholeScreenViewerMode
-        ? Qt.size(0, 0)
-        : Qt.size(popupControls.width + root.cornerGap,
-                  popupControls.anchors.topMargin + popupControls.height + 1)
-    // Between the plot's mode switch and the viewer's controls: the 1 px
-    // divider of the corner's one plate, which the plot layer draws under
-    // both (as a row of plates, 8 px apart, the corner read as four
-    // controls rather than one).
-    readonly property int cornerGap: 1
-    // How far the visualization's controls, such as its mode switch and the
-    // first lane's Mute and Solo, keep below its top edge: over the whole
+    // The corner plate that holds the viewer's controls: in the window, and
+    // over the whole screen with the title strip turned off; none with the
+    // strip on, which holds them (the plot's plate under the strip's Close
+    // read as a second cluster).
+    readonly property Item cornerControls: !root.useWholeScreenViewerMode
+        ? popupControls
+        : (root.fullscreenWindow && !root.stripEnabled ? root.fullscreenWindow.corner : null)
+    // What the visualization keeps clear of in the plot's top right corner,
+    // meter's column apart: that plate, with the 1 px edge outside it. It
+    // does not change as it auto-hides.
+    readonly property size reservedCorner: root.cornerControls
+        ? Qt.size(root.cornerRightInset + root.cornerControls.width + 1,
+                  root.cornerInset + root.cornerControls.height + 1)
+        : Qt.size(0, 0)
+    // How far the visualization's controls, such as the first lane's Mute
+    // and Solo, keep below its top edge: over the whole
     // screen, the title strip's height while it can show. They show only
     // with the viewer's controls, so with the strip over the top edge; they
     // keep there while it is hidden, rather than move each time it shows.
@@ -129,13 +140,16 @@ Item {
     readonly property real controlsTopInset: root.wholeScreenOpen && root.fullscreenWindow
             && root.stripEnabled
         ? root.fullscreenWindow.strip.implicitHeight : 0
+    // Where the strip's title starts, for the lane heads under it to start
+    // there too, while it can show; -1 without it.
+    readonly property real stripTextInset: root.wholeScreenOpen && root.fullscreenWindow
+            && root.stripEnabled
+        ? root.fullscreenWindow.strip.textInset : -1
     readonly property bool fullscreenControlsVisible: fullscreenControlsAutoHide.controlsVisible
-    // Whether the pointer is on the viewer's own controls, the corner plate
-    // in the window or the title strip over the whole screen: that counts as
-    // on the view, so the plot's mode switch stays.
-    readonly property bool controlsHovered: root.wholeScreenOpen
-        ? (root.fullscreenWindow !== null && root.fullscreenWindow.strip.hovered)
-        : (root.viewerOpen && popupControls.hovered)
+    // Whether the pointer is on the corner plate, where the plot's crosshair
+    // gives way as it does on the plot's own plates.
+    readonly property bool cornerHovered: root.viewerOpen && root.cornerControls !== null
+        && root.cornerControls.hovered
     // The controls as they fade: 1 shown, 0 hidden. Everything that hides
     // with them takes it, the strip, the corner controls, the mode switch,
     // the lanes' buttons and what the plot draws for the pointer.
@@ -192,10 +206,64 @@ Item {
         id: fullscreenControlsAutoHide
         objectName: "spectrogramFullscreenControlsAutoHide"
         active: root.viewerOpen
-        // The controls stay while one of them has focus, however it got it:
-        // the keyboard, a click, or assistive technology.
+        // The controls stay while one of them has focus from the keyboard
+        // or assistive technology; the focus a click gives a button lets
+        // them hide after the pointer rests, as before the click.
         held: root.focusedItem !== root.viewFocus
             && root.isInside(root.focusedItem, root.viewerScope)
+            && root.focusedItem.focusReason !== Qt.MouseFocusReason
+    }
+
+    // Sees a press on the view and where it moves, whatever takes it, for a
+    // drag to count as pointer activity. It is on the area over the view
+    // that has every press first: the view's items, which take it, keep it
+    // from handlers on what is under them.
+    component DragWatch: PointHandler {
+        acceptedButtons: Qt.AllButtons
+        onActiveChanged: fullscreenControlsAutoHide.pressTracked(
+            active, point.scenePosition, point.scenePressPosition)
+        onPointChanged: fullscreenControlsAutoHide.pressTracked(
+            active, point.scenePosition, point.scenePressPosition)
+    }
+
+    // The viewer's mode switch, in the strip and on the corner plate: the
+    // current mode checked, in the look of a choice that is on, as the
+    // album art viewer's info toggle. The two are radio buttons to
+    // assistive technology, as on the main pane's plot.
+    component ModeSwitch: Row {
+        id: modeSwitch
+
+        required property var plotColors
+        required property string buttonName
+
+        spacing: 4
+        Accessible.role: Accessible.Grouping
+        Accessible.name: I18n.i18nc("@label", "Visualization")
+
+        Repeater {
+            model: VisualizationModes.modes(String(Qt.resolvedUrl("../assets/")))
+
+            delegate: Components.ViewerToolButton {
+                required property int index
+                required property var modelData
+                objectName: modeSwitch.buttonName + index
+                uiPalette: root.uiPalette
+                plotColors: modeSwitch.plotColors
+                text: modelData.name
+                icon.name: modelData.iconName
+                icon.source: modelData.iconSource
+                // Its owner binds `checked` to the mode and chooses on a
+                // click; choosing the chosen one again leaves it chosen.
+                checkable: true
+                autoExclusive: true
+                checked: root.visualizationMode === index
+                Accessible.role: Accessible.RadioButton
+                Accessible.checkable: true
+                Accessible.checked: checked
+                Accessible.onPressAction: root.setVisualizationMode(index)
+                onClicked: root.setVisualizationMode(index)
+            }
+        }
     }
 
     readonly property bool wholeScreenOpen: root.viewerOpen && root.useWholeScreenViewerMode
@@ -259,14 +327,18 @@ Item {
         padding: 0
         closePolicy: Popup.CloseOnEscape
         visible: root.viewerOpen && !root.useWholeScreenViewerMode
-        // The style's own transitions.
+        // The style's own transitions, of one picture: the content below.
         onClosed: {
             if (root.viewerOpen && !root.useWholeScreenViewerMode) {
                 root.closeViewer()
             }
         }
-        background: Rectangle {
-            color: root.uiPalette.plotColors(root.visualizationMode).plotBg
+        // Nothing of its own, as the album art viewer's: the view's floor is
+        // the one floor, in the content's layer (a second one here, fading
+        // apart from it, took the window down to 79 % of the darker of the
+        // two pictures the fade is between).
+        background: Item {
+            objectName: "spectrogramPopupBackground"
         }
 
         Components.ActionShortcuts {
@@ -280,6 +352,11 @@ Item {
             id: spectrogramPopupFocusScope
             anchors.fill: parent
             focus: true
+            // The floor, the plot and the plates fade as one picture on the
+            // window under them, as the plots do in the mode switch: without
+            // the layer each is at the popup's opacity alone, and the floor
+            // shows through all that is on it. Only while the popup fades.
+            layer.enabled: spectrogramViewer.opacity > 0 && spectrogramViewer.opacity < 1
 
             // Takes focus from the controls when the view is pressed.
             Item {
@@ -291,6 +368,36 @@ Item {
             Keys.onPressed: function(event) {
                 fullscreenControlsAutoHide.wake()
                 event.accepted = false
+            }
+
+            // Above the view, and before it in the Tab order: the modes
+            // come before the lanes' Mute and Solo, as in the main pane.
+            Components.ViewerCornerControls {
+                id: popupControls
+                objectName: "spectrogramPopupControls"
+                z: 20
+                anchors.top: parent.top
+                anchors.right: parent.right
+                anchors.topMargin: root.cornerInset
+                anchors.rightMargin: root.meterWidth + root.cornerRightInset
+                plotColors: root.uiPalette.plotColors(root.visualizationMode)
+                uiPalette: root.uiPalette
+                closeButtonName: "spectrogramPopupCloseButton"
+                controlsVisible: root.fullscreenControlsVisible
+                controlsLevel: root.fullscreenControlsLevel
+                pointerActivity: root.noteFullscreenPointerActivity
+                errorController: root.errorController
+                closeViewer: root.closeViewer
+                zoomLevel: root.zoomLevel
+                resetView: root.resetZoom
+                noticeShown: root.viewMoved
+                followShortcut: root.followShortcut
+
+                ModeSwitch {
+                    objectName: "spectrogramPopupModeSwitch"
+                    buttonName: "spectrogramPopupModeButton"
+                    plotColors: popupControls.plotColors
+                }
             }
 
             Rectangle {
@@ -338,33 +445,17 @@ Item {
                 MouseArea {
                     anchors.fill: parent
                     z: 1
+                    cursorShape: root.plotCursorShape
                     acceptedButtons: Qt.AllButtons
                     onPressed: function(mouse) {
                         spectrogramPopupViewFocus.forceActiveFocus(Qt.MouseFocusReason)
                         mouse.accepted = false
                     }
+
+                    DragWatch {}
                 }
             }
 
-            Components.ViewerCornerControls {
-                id: popupControls
-                objectName: "spectrogramPopupControls"
-                z: 20
-                anchors.top: parent.top
-                anchors.right: parent.right
-                anchors.topMargin: 5
-                anchors.rightMargin: root.cornerRightMargin
-                plotColors: root.uiPalette.plotColors(root.visualizationMode)
-                uiPalette: root.uiPalette
-                closeButtonName: "spectrogramPopupCloseButton"
-                // On the plot layer's corner plate.
-                bare: true
-                controlsVisible: root.fullscreenControlsVisible
-                controlsLevel: root.fullscreenControlsLevel
-                pointerActivity: root.noteFullscreenPointerActivity
-                errorController: root.errorController
-                closeViewer: root.closeViewer
-            }
         }
     }
 
@@ -379,6 +470,7 @@ Item {
                 objectName: "spectrogramFullscreenWindow"
                 readonly property Item host: spectrogramWindowHost
                 readonly property Item strip: spectrogramStrip
+                readonly property Item corner: spectrogramFullscreenCorner
                 readonly property Item focusScope: spectrogramFullscreenFocusSink
                 readonly property Item viewFocus: spectrogramFullscreenViewFocus
                 screen: root.windowRoot.screen
@@ -429,6 +521,47 @@ Item {
                         fullscreenControlsAutoHide.wake()
                     }
 
+                    // With the strip turned off, the modes, the zoom and
+                    // Close are on a plate in the corner, the strip's own
+                    // buttons, so the toolbar ends in Close as in the window
+                    // and the strip (without it, a pointer had no way out
+                    // in sight); Escape and a double-click close it too.
+                    Components.ViewerCornerControls {
+                        id: spectrogramFullscreenCorner
+                        objectName: "spectrogramFullscreenCorner"
+                        z: 1
+                        anchors.top: parent.top
+                        anchors.right: parent.right
+                        anchors.topMargin: root.cornerInset
+                        anchors.rightMargin: root.meterWidth + root.cornerRightInset
+                        available: !root.stripEnabled
+                        closeButtonName: "spectrogramFullscreenCornerCloseButton"
+                        // The strip's buttons, glyphs and readout, so the
+                        // screen has one scale with the strip turned off
+                        // too (the window's chrome, a size too small,
+                        // stood beside lane heads on the larger type).
+                        viewerIconSize: spectrogramStrip.iconSize
+                        viewerButtonSize: spectrogramStrip.buttonSize
+                        readoutPointSize: spectrogramStrip.textPointSize
+                        plotColors: root.uiPalette.plotColors(root.visualizationMode)
+                        uiPalette: root.uiPalette
+                        controlsVisible: root.fullscreenControlsVisible
+                        controlsLevel: root.fullscreenControlsLevel
+                        pointerActivity: root.noteFullscreenPointerActivity
+                        errorController: root.errorController
+                        closeViewer: root.closeViewer
+                        zoomLevel: root.zoomLevel
+                        resetView: root.resetZoom
+                        noticeShown: root.viewMoved
+                        followShortcut: root.followShortcut
+
+                        ModeSwitch {
+                            objectName: "spectrogramFullscreenCornerModeSwitch"
+                            buttonName: "spectrogramFullscreenCornerModeButton"
+                            plotColors: spectrogramFullscreenCorner.plotColors
+                        }
+                    }
+
                     // The view, over the whole window: the title strip is
                     // drawn over its top edge.
                     Rectangle {
@@ -456,11 +589,14 @@ Item {
                         MouseArea {
                             anchors.fill: parent
                             z: 1
+                            cursorShape: root.plotCursorShape
                             acceptedButtons: Qt.AllButtons
                             onPressed: function(mouse) {
                                 spectrogramFullscreenViewFocus.forceActiveFocus(Qt.MouseFocusReason)
                                 mouse.accepted = false
                             }
+
+                            DragWatch {}
                         }
                     }
 
@@ -478,53 +614,24 @@ Item {
                         closeButtonName: "spectrogramFullscreenCloseButton"
                         controlsVisible: root.fullscreenControlsVisible
                         controlsLevel: root.fullscreenControlsLevel
+                        trackLevel: PlotLanes.stripTextLevel(root.fullscreenControlsLevel)
                         available: root.stripEnabled
                         pointerActivity: root.noteFullscreenPointerActivity
                         errorController: root.errorController
                         closeViewer: root.closeViewer
                         // The plot's zoom, the mode switch and Close, each
-                        // set off by a 1 px divider, as on the windowed
-                        // viewer's corner plate.
+                        // set off by a 1 px divider, as on the corner plate.
                         zoomLevel: root.zoomLevel
                         resetView: root.resetZoom
+                        noticeShown: root.viewMoved
+                        followShortcut: root.followShortcut
                         dividers: true
                         closeDivided: true
 
-                        // The mode switch: the current mode checked, in the
-                        // strip's look for a choice that is on, as the album
-                        // art viewer's info toggle. The two are radio
-                        // buttons to assistive technology, as on the plot.
-                        Row {
+                        ModeSwitch {
                             objectName: "spectrogramStripModeSwitch"
-                            spacing: 4
-                            Accessible.role: Accessible.Grouping
-                            Accessible.name: I18n.i18nc("@label", "Visualization")
-
-                            Repeater {
-                                model: VisualizationModes.modes(String(Qt.resolvedUrl("../assets/")))
-
-                                delegate: Components.ViewerToolButton {
-                                    required property int index
-                                    required property var modelData
-                                    objectName: "spectrogramStripModeButton" + index
-                                    uiPalette: root.uiPalette
-                                    plotColors: spectrogramStrip.plotColors
-                                    text: modelData.name
-                                    icon.name: modelData.iconName
-                                    icon.source: modelData.iconSource
-                                    // Its owner binds `checked` to the mode
-                                    // and chooses on a click; choosing the
-                                    // chosen one again leaves it chosen.
-                                    checkable: true
-                                    autoExclusive: true
-                                    checked: root.visualizationMode === index
-                                    Accessible.role: Accessible.RadioButton
-                                    Accessible.checkable: true
-                                    Accessible.checked: checked
-                                    Accessible.onPressAction: root.setVisualizationMode(index)
-                                    onClicked: root.setVisualizationMode(index)
-                                }
-                            }
+                            buttonName: "spectrogramStripModeButton"
+                            plotColors: spectrogramStrip.plotColors
                         }
                     }
                 }

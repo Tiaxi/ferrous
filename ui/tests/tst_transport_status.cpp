@@ -98,7 +98,7 @@ import "panes" as Panes
 ApplicationWindow {
     id: window
     width: %8
-    height: 200
+    height: 300
     visible: true
     palette.window: "%1"
     palette.base: "%2"
@@ -131,6 +131,10 @@ ApplicationWindow {
         property var waveformPeaksPacked: ""
         property real waveformCoverageSeconds: 0
         property bool waveformComplete: false
+        property bool waveformEndsEarly: false
+        property string currentTrackPath: ""
+        property int queueLength: 0
+        property string playingQueueLengthText: ""
         property int repeatMode: 0
         property bool shuffleEnabled: false
         property string currentTrackFormatLabel: "FLAC"
@@ -170,6 +174,7 @@ ApplicationWindow {
     }
     Action { id: stopAction; text: "&Stop"; icon.name: "media-playback-stop"; shortcut: "Ctrl+Shift+Space" }
     Action { id: nextAction; text: "&Next"; icon.name: "media-skip-forward"; shortcut: "Ctrl+Right" }
+    Action { id: muteAction; text: "&Mute"; shortcut: "Ctrl+Shift+M" }
 
     Controllers.ErrorController {
         id: errors
@@ -211,6 +216,7 @@ ApplicationWindow {
                 stopAction: stopAction
                 nextAction: nextAction
                 playPauseAction: playPauseAction
+                muteAction: muteAction
                 volumeMuted: window.muted
                 mutedVolume: window.mutedVolume
                 keyboardSeekStepSeconds: 5
@@ -310,7 +316,7 @@ struct Harness {
     bool reportIssue(int category, int severity, const QString &message) const {
         const bool reported = QMetaObject::invokeMethod(errors, "report", Q_ARG(QVariant, category),
                                                         Q_ARG(QVariant, severity), Q_ARG(QVariant, QString()),
-                                                        Q_ARG(QVariant, message));
+                                                        Q_ARG(QVariant, message), Q_ARG(QVariant, QString()));
         takeCapturedMessages();
         return reported;
     }
@@ -349,12 +355,37 @@ void showToolTipsAtOnce(QQuickItem *item) {
     unitsOf(item)->setToolTipDelay(0);
 }
 
+// The status bar's tooltip of `item`, a plain-text tooltip of its own.
+QObject *statusToolTip(QQuickItem *item) {
+    const QList<QObject *> children = item->findChildren<QObject *>(Qt::FindDirectChildrenOnly);
+    for (QObject *child : children) {
+        if (child->objectName().endsWith(QStringLiteral("ToolTip")) && child->property("message").isValid()) {
+            return child;
+        }
+    }
+    return nullptr;
+}
+
 QString toolTipText(QQuickItem *item) {
-    return evaluateOn(item, QStringLiteral("ToolTip.text")).toString();
+    QObject *tip = statusToolTip(item);
+    return tip != nullptr ? tip->property("message").toString()
+                          : evaluateOn(item, QStringLiteral("ToolTip.text")).toString();
 }
 
 bool toolTipShown(QQuickItem *item) {
-    return evaluateOn(item, QStringLiteral("ToolTip.visible")).toBool();
+    QObject *tip = statusToolTip(item);
+    return tip != nullptr ? tip->property("visible").toBool()
+                          : evaluateOn(item, QStringLiteral("ToolTip.visible")).toBool();
+}
+
+// The tooltip of a transport button or Mute, and its text.
+QObject *buttonToolTip(QQuickItem *button) {
+    return button->findChild<QObject *>(QStringLiteral("transportButtonToolTip"));
+}
+
+QString buttonToolTipText(QQuickItem *button) {
+    QObject *tip = buttonToolTip(button);
+    return tip != nullptr ? tip->property("message").toString() : QString();
 }
 
 QString accessibleText(QQuickItem *item, QAccessible::Text text) {
@@ -433,10 +464,13 @@ QQuickItem *glyphOf(QQuickItem *button) {
 // it as the glyph's strongest, so that how a mask is coloured doesn't count
 // (offscreen, without the desktop's platform theme, Kirigami draws a mask
 // file uncoloured, which is dark on the dark chrome); their count and the
-// rows they span, in scene pixels. None where nothing is drawn.
+// rows they span, and the columns, from the glyph's left, in scene pixels.
+// None where nothing is drawn.
 struct Ink {
     int pixels = 0;
     int height = 0;
+    int left = -1;
+    int right = -1;
 };
 
 Ink inkOf(QQuickWindow *window, QQuickItem *glyph, const QColor &chrome) {
@@ -461,6 +495,8 @@ Ink inkOf(QQuickWindow *window, QQuickItem *glyph, const QColor &chrome) {
             ink.pixels += 1;
             top = top < 0 ? i / width : top;
             bottom = i / width;
+            ink.left = ink.left < 0 ? i % width : std::min(ink.left, i % width);
+            ink.right = std::max(ink.right, i % width);
         }
     }
     ink.height = bottom - top + 1;
@@ -479,21 +515,35 @@ private slots:
     void transportLaysOutFlatButtonsSeekTimeAndVolume();
     void volumeGrooveGrowsWithTheThumb_data();
     void volumeGrooveGrowsWithTheThumb();
+    void muteButtonIsClearOfTheVolumeGroove_data();
+    void muteButtonIsClearOfTheVolumeGroove();
     void previousGlyphStartsOnTheContentEdge_data();
     void previousGlyphStartsOnTheContentEdge();
     void playPauseIsOneButtonThatShowsTheState();
     void playPauseGlyphsCrossFadeWithoutABlink();
     void transportToolTipsNameTheShortcut();
+    void transportButtonsAreOffWhereTheyCannotAct();
+    void transportToolTipsClearTheFocusRings();
     void seekWaveformMeetsItsContrastAsDrawn_data();
     void seekWaveformMeetsItsContrastAsDrawn();
     void seekViewBandMarksTheViewBehindTheWaveform_data();
     void seekViewBandMarksTheViewBehindTheWaveform();
+    void seekViewBandStaysFindableAtDeepZoom();
     void seekViewBandIsDecorationOnly();
     void seekHoverDrawsALineAndANativeToolTip();
+    void seekReleaseHandsTheTimeBoxToTheHover_data();
+    void seekReleaseHandsTheTimeBoxToTheHover();
+    void seekReleaseOffTheBarHidesTheTimeBox();
+    void seekHoverLineLeavesThePlayheadWhole_data();
+    void seekHoverLineLeavesThePlayheadWhole();
+    void seekHoverLineStaysWithTheBoxAfterASeek_data();
+    void seekHoverLineStaysWithTheBoxAfterASeek();
     void seekFocusDrawsOneRingAroundTheBar_data();
     void seekFocusDrawsOneRingAroundTheBar();
     void volumeGlyphHasTheTransportsWeight_data();
     void volumeGlyphHasTheTransportsWeight();
+    void volumeGlyphsAreSmoothOutlines_data();
+    void volumeGlyphsAreSmoothOutlines();
     void transportGlyphsDrawOnOneScale_data();
     void transportGlyphsDrawOnOneScale();
     void transportButtonsDrawTheAppsFocusRing_data();
@@ -502,35 +552,62 @@ private slots:
     void transportPressedReadsApartFromHover();
     void seekToolTipFadesInAtTheShortDuration();
     void seekWithoutATrackIsALineAndNoTime();
+    void seekStoppedWithATrackKeepsItsLengthAndWaveform_data();
+    void seekStoppedWithATrackKeepsItsLengthAndWaveform();
+    void seekStoppedShowsNoOtherTracksWaveform();
+    void transportStaysTheTrackThroughATrackChange();
     void seekEmptyLineRunsPastAnEarlyEndingWaveform_data();
     void seekEmptyLineRunsPastAnEarlyEndingWaveform();
+    void seekMarksWhereTheFileEnds_data();
+    void seekMarksWhereTheFileEnds();
+    void seekEndsEarlyMarkIsItsIssuesWarning_data();
+    void seekEndsEarlyMarkIsItsIssuesWarning();
     void seekPlayheadMovesAcrossAShortTrack_data();
     void seekPlayheadMovesAcrossAShortTrack();
     void seekPlayheadWaitsAtTheStartWithoutALength_data();
     void seekPlayheadWaitsAtTheStartWithoutALength();
     void seekPlayheadThroughAZeroLengthFileThatFails();
     void timeReadoutShowsPositionAndLength();
+    void timeReadoutFollowsTheSeekGesture();
     void volumeDrawsGrooveHoverAndFocus_data();
     void volumeDrawsGrooveHoverAndFocus();
     void volumeMuteKeepsTheThumb_data();
     void volumeMuteKeepsTheThumb();
     void volumeToolTipFollowsTheDrag();
+    void volumeToolTipShowsAtOnceOnAPress();
     void statusBarShowsTheNeutralPlaybackState();
+    void statusBarModeGlyphsAreDrawnAtTheirSize();
     void statusBarShowsRepeatAndShuffleInWords();
     void statusBarShowsTheFormatGroupWithoutThePosition();
     void statusBarFormatShowsWhatFitsWhole();
+    void statusBarFormatKeepsItsPlace_data();
+    void statusBarFormatKeepsItsPlace();
+    void statusBarGroupsAreEvenlySpacedAfterTheBitrate_data();
+    void statusBarGroupsAreEvenlySpacedAfterTheBitrate();
     void statusBarShowsTheScanWithItsBar();
+    void statusBarScanBarReadsAsAShare_data();
+    void statusBarScanBarReadsAsAShare();
+    void statusBarScanBarGrowsWithTheFont();
     void statusBarScanBarFillsOnlyOnceTheRescanEnds();
     void statusBarScanWithoutATotalIsStill();
+    void statusBarScanCountKeepsItsPlaceWithoutATotal_data();
+    void statusBarScanCountKeepsItsPlaceWithoutATotal();
     void statusBarScanKeepsItsPlaceWhileItCounts_data();
     void statusBarScanKeepsItsPlaceWhileItCounts();
     void lastFmSlotShowsEachState();
     void lastFmSlotCountsTheTimeLeftFromTheListenedTime();
+    void lastFmSlotHidesWithTheTrackSectionsWhileTheEngineIsDown();
+    void lastFmNotScrobbledMarksTheShareOnAnEmptyTrough_data();
+    void lastFmNotScrobbledMarksTheShareOnAnEmptyTrough();
     void lastFmSlotPausedLooksStruckThrough_data();
     void lastFmSlotPausedLooksStruckThrough();
+    void lastFmPausedKeepsBothLettersAndTheStrike_data();
+    void lastFmPausedKeepsBothLettersAndTheStrike();
     void lastFmSlotBarFillsItsTrough_data();
     void lastFmSlotBarFillsItsTrough();
     void lastFmSlotToolTipShowsOnKeyboardFocus();
+    void lastFmKeyboardMenuOpensAboveTheBar_data();
+    void lastFmKeyboardMenuOpensAboveTheBar();
     void lastFmSlotSendingAndScrobbledLookApart_data();
     void lastFmSlotSendingAndScrobbledLookApart();
     void lastFmGlyphIsCentredOnItsBlock_data();
@@ -539,10 +616,19 @@ private slots:
     void lastFmSlotGlyphReadsAtOneX();
     void lastFmBarReadsApartFromTheScanBar_data();
     void lastFmBarReadsApartFromTheScanBar();
+    void lastFmListeningNeverFillsTheBar_data();
+    void lastFmListeningNeverFillsTheBar();
     void lastFmGlyphsAreOneFamily();
+    void lastFmMenuWordsShareOneColumn();
+    void warningGlyphIsTheSizeOfItsNeighbours();
     void statusBarNamesAStoppedEngineInPlainWords();
+    void statusBarEngineErrorShowsItsToolTipOverItsGlyphAndFromTheKeyboard();
     void issuesButtonShowsNewSeenAndOpen_data();
     void issuesButtonShowsNewSeenAndOpen();
+    void issuesGlyphTakesTheMostSevereNewIssue_data();
+    void issuesGlyphTakesTheMostSevereNewIssue();
+    void statusItemsShareOneToolTipLineAndTheScanIsOneUnit_data();
+    void statusItemsShareOneToolTipLineAndTheScanIsOneUnit();
     void statusBarHasNoDividers();
     void transportAndStatusBarGrowWithALargeFont();
 };
@@ -564,7 +650,9 @@ void TransportStatusTest::drawsOffscreenUnlessAPlatformIsChosen() {
     verifyOffscreenPlatformByDefault();
 }
 
-// The sizes of the design at 1×: a 48 px band; 32 px buttons 4 px apart
+// The sizes of the design at 1×: a 48 px row under the lane of the
+// transport's popups, which grows the band, and over the room that
+// balances it; 32 px buttons 4 px apart
 // from 12 px, the content's inset; the seek bar 16 px after Next; then on
 // one rhythm, between what is drawn: the time 16 px after the seek bar, as
 // wide as "0:00 / 0:00", the volume glyph 24 px after it, and the 96 px
@@ -575,8 +663,11 @@ void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
     QVERIFY2(harness.load(), qPrintable(harness.error));
     QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
     QVERIFY(transport != nullptr);
-    QCOMPARE(transport->height(), 48.0);
-    const qreal top = sceneRect(transport).top();
+    const qreal lane = transport->property("laneGrowth").toReal();
+    QVERIFY(lane > 0);
+    QCOMPARE(transport->height(), 48.0 + lane + transport->property("balanceRoom").toReal());
+    // The row's top.
+    const qreal top = sceneRect(transport).top() + lane;
 
     const QStringList names{QStringLiteral("previous"), QStringLiteral("playPause"), QStringLiteral("stop"),
                             QStringLiteral("next")};
@@ -649,7 +740,8 @@ void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
     const QRectF volumeRect = sceneRect(volume);
     QQuickItem *groove = harness.item(QStringLiteral("volumeGroove"));
     QVERIFY(groove != nullptr);
-    QCOMPARE(sceneRect(groove).left() - muteGlyphRect.right(), 8.0);
+    // 6 px from the button's frame, clear of its ring.
+    QCOMPARE(sceneRect(groove).left() - muteGlyphRect.right(), 14.0);
     QCOMPARE(volumeRect.width(), 96.0);
     // Stopped, "–:–– / –:––" leaves the box as wide, and the volume where
     // it is; it fills the box as a time does, in the secondary colour and
@@ -808,18 +900,215 @@ void TransportStatusTest::transportToolTipsNameTheShortcut() {
     QQuickItem *stop = harness.item(QStringLiteral("transportButton_stop"));
     QQuickItem *playPause = harness.item(QStringLiteral("transportButton_playPause"));
     QVERIFY(next && stop && playPause);
-    QCOMPARE(toolTipText(next), QStringLiteral("Next · Ctrl+Right"));
-    QCOMPARE(toolTipText(stop), QStringLiteral("Stop · Ctrl+Shift+Space"));
+    QQuickItem *mute = harness.item(QStringLiteral("muteButton"));
+    QVERIFY(mute != nullptr);
+    QCOMPARE(buttonToolTipText(next), QStringLiteral("Next · Ctrl+Right"));
+    QCOMPARE(buttonToolTipText(stop), QStringLiteral("Stop · Ctrl+Shift+Space"));
     // Play and Pause have no shortcut of their own: Space toggles them
     // (Previous named its shortcut and Pause none).
-    QCOMPARE(toolTipText(playPause), QStringLiteral("Pause · Space"));
+    QCOMPARE(buttonToolTipText(playPause), QStringLiteral("Pause · Space"));
     harness.bridge->setProperty("playbackState", QStringLiteral("Paused"));
-    QTRY_COMPARE(toolTipText(playPause), QStringLiteral("Play · Space"));
+    QTRY_COMPARE(buttonToolTipText(playPause), QStringLiteral("Play · Space"));
     harness.bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    // Mute names its shortcut as the others do (it said "Mute" alone).
+    QCOMPARE(buttonToolTipText(mute), QStringLiteral("Mute · Ctrl+Shift+M"));
+    QVERIFY(QMetaObject::invokeMethod(mute, "clicked"));
+    QTRY_COMPARE(buttonToolTipText(mute), QStringLiteral("Unmute · Ctrl+Shift+M"));
     // Keyboard focus shows it, as hover does.
     showToolTipsAtOnce(next);
     next->forceActiveFocus(Qt::TabFocusReason);
-    QTRY_VERIFY(toolTipShown(next));
+    QTRY_VERIFY(buttonToolTip(next)->property("visible").toBool());
+}
+
+// A button that cannot act shows Breeze's disabled state, as the Playback
+// menu's item of its action does: its glyph dimmed once, by Kirigami's
+// disabled icon, from the text colour (tinted the disabled text colour too,
+// it was dimmed twice and all but vanished), no hover, no click, no Tab
+// stop; its action stays on for the shortcuts. It
+// keeps that through a change of its action (Play to Pause) or of the
+// action's own state, which the button copies.
+void TransportStatusTest::transportButtonsAreOffWhereTheyCannotAct() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
+    QQuickItem *stop = harness.item(QStringLiteral("transportButton_stop"));
+    QQuickItem *playPause = harness.item(QStringLiteral("transportButton_playPause"));
+    QVERIFY(transport && stop && playPause);
+    QObject *stopAction = qvariant_cast<QObject *>(stop->property("action"));
+    QVERIFY(stopAction != nullptr);
+    QQuickItem *glyph = glyphOf(stop);
+    QVERIFY(glyph != nullptr);
+    QVERIFY(stop->isEnabled());
+    QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("text")));
+
+    transport->setProperty("stopCanAct", false);
+    QVERIFY(!stop->isEnabled());
+    QVERIFY(stopAction->property("enabled").toBool());
+    // Off with its button, so Kirigami draws it disabled, in the text
+    // colour: dimmed once.
+    const QColor disabled = evaluateOn(stop, QStringLiteral("Kirigami.Theme.disabledTextColor")).value<QColor>();
+    QVERIFY(!sameColor(disabled, harness.token("text")));
+    QVERIFY(!glyph->isEnabled());
+    QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("text")));
+    // No hover tint and no click.
+    QSignalSpy triggered(stopAction, SIGNAL(triggered(QObject *)));
+    QTest::mouseMove(harness.window, sceneCentre(stop));
+    QTest::mouseClick(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(stop));
+    QCoreApplication::processEvents();
+    QCOMPARE(triggered.count(), 0);
+    QQuickItem *hover = nullptr;
+    for (QQuickItem *child : stop->findChildren<QQuickItem *>()) {
+        hover = child->objectName() == QStringLiteral("transportButtonHover") ? child : hover;
+    }
+    QVERIFY(hover != nullptr);
+    QVERIFY(!hover->isVisible());
+    // The action's own state comes back: the button stays off.
+    QVERIFY(stopAction->setProperty("enabled", false));
+    QVERIFY(stopAction->setProperty("enabled", true));
+    QVERIFY(!stop->isEnabled());
+    // Back on: it acts.
+    transport->setProperty("stopCanAct", true);
+    QVERIFY(stop->isEnabled());
+    QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("text")));
+    QTest::mouseClick(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(stop));
+    QTRY_COMPARE(triggered.count(), 1);
+    // Off with its action, as before.
+    QVERIFY(stopAction->setProperty("enabled", false));
+    QVERIFY(!stop->isEnabled());
+    QVERIFY(stopAction->setProperty("enabled", true));
+    QVERIFY(stop->isEnabled());
+
+    // Play/Pause stays off as its action changes from Pause to Play, both
+    // its glyphs dimmed once.
+    transport->setProperty("playPauseCanAct", false);
+    QVERIFY(!playPause->isEnabled());
+    for (const QString &name : {QStringLiteral("transportPlayPauseGlyph_play"),
+                                QStringLiteral("transportPlayPauseGlyph_pause")}) {
+        QQuickItem *playPauseGlyph = harness.item(name);
+        QVERIFY2(playPauseGlyph != nullptr, qPrintable(name));
+        QVERIFY2(!playPauseGlyph->isEnabled(), qPrintable(name));
+        QVERIFY2(sameColor(playPauseGlyph->property("color").value<QColor>(), harness.token("text")), qPrintable(name));
+    }
+    harness.bridge->setProperty("playbackState", QStringLiteral("Paused"));
+    QTRY_COMPARE(buttonToolTipText(playPause), QStringLiteral("Play · Space"));
+    QVERIFY(!playPause->isEnabled());
+    transport->setProperty("playPauseCanAct", true);
+    QVERIFY(playPause->isEnabled());
+}
+
+// Every tooltip of the transport opens in one lane above the row, the
+// seek bar's time box's: one rail for the band, on one line, as tall as
+// the time box, in the band, each 3 px clear of its control's focus ring
+// (the buttons' opened under the band, over the cover and the queue's
+// header, while Mute's and the volume's opened above it; the time box
+// covered the bar's ring's top; 1 px clear, a box read as a tab on the
+// ring). A button held down shows none.
+void TransportStatusTest::transportToolTipsClearTheFocusRings() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    showToolTipsAtOnce(harness.item(QStringLiteral("transportBar")));
+    QList<std::pair<QString, QRectF>> buttonBoxes;
+    const auto ringOf = [](QQuickItem *button) -> QQuickItem * {
+        for (QQuickItem *child : button->findChildren<QQuickItem *>()) {
+            if (child->objectName() == QStringLiteral("transportButtonFocusRing")) {
+                return child;
+            }
+        }
+        return nullptr;
+    };
+    for (const QString &name : {QStringLiteral("transportButton_previous"), QStringLiteral("transportButton_playPause"),
+                                QStringLiteral("transportButton_stop"), QStringLiteral("transportButton_next")}) {
+        QQuickItem *button = harness.item(name);
+        QVERIFY2(button != nullptr, qPrintable(name));
+        QQuickItem *ring = ringOf(button);
+        QObject *tip = buttonToolTip(button);
+        QVERIFY2(ring && tip, qPrintable(name));
+        button->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY2(ring->isVisible(), qPrintable(name));
+        QTRY_VERIFY2(tip->property("opened").toBool(), qPrintable(name));
+        auto *box = tip->property("background").value<QQuickItem *>();
+        QVERIFY(box != nullptr);
+        const QRectF boxRect = sceneRect(box);
+        const QRectF ringRect = sceneRect(ring);
+        QVERIFY2(boxRect.bottom() <= ringRect.top() - 3 + 0.5,
+                 qPrintable(name + QLatin1Char(' ') + describeRect(boxRect) + QStringLiteral(" over ")
+                            + describeRect(ringRect)));
+        QVERIFY2(!boxRect.intersects(ringRect), qPrintable(name));
+        QVERIFY2(boxRect.top() >= sceneRect(harness.item(QStringLiteral("transportBar"))).top(), qPrintable(name));
+        buttonBoxes.append({name, boxRect});
+        harness.root->property("startButton").value<QQuickItem *>()->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY2(!tip->property("visible").toBool(), qPrintable(name));
+    }
+
+    // Held down, a button shows no tooltip; let go, it does again.
+    QQuickItem *next = harness.item(QStringLiteral("transportButton_next"));
+    QObject *tip = buttonToolTip(next);
+    // Hover as on the desktop, which the offscreen platform's hints leave off.
+    next->setProperty("hoverEnabled", true);
+    QTest::mouseMove(harness.window, sceneCentre(next));
+    QTRY_VERIFY(tip->property("opened").toBool());
+    QTest::mousePress(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(next));
+    QVERIFY(next->property("down").toBool());
+    QVERIFY(!tip->property("opened").toBool());
+    QTRY_VERIFY(!tip->property("visible").toBool());
+    QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(next));
+    QTRY_VERIFY(tip->property("opened").toBool());
+
+    // The seek bar's box, at the playhead while a key is held, clear of the
+    // bar's ring.
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QQuickItem *seekRing = harness.item(QStringLiteral("seekFocusRing"));
+    QObject *seekTip = harness.root->findChild<QObject *>(QStringLiteral("seekTimeBox"));
+    QVERIFY(seek && seekRing && seekTip);
+    seek->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(seekRing->isVisible());
+    QTest::keyPress(harness.window, Qt::Key_Right);
+    QTRY_VERIFY(seekTip->property("opened").toBool());
+    auto *seekBox = seekTip->property("background").value<QQuickItem *>();
+    QVERIFY(seekBox != nullptr);
+    const QRectF seekBoxRect = sceneRect(seekBox);
+    QVERIFY2(seekBoxRect.bottom() <= sceneRect(seekRing).top() - 3 + 0.5,
+             qPrintable(describeRect(seekBoxRect) + QStringLiteral(" over ") + describeRect(sceneRect(seekRing))));
+    QTest::keyRelease(harness.window, Qt::Key_Right);
+    // The buttons' on the time box's line, as tall as it.
+    for (const auto &[name, boxRect] : buttonBoxes) {
+        const QString where = name + QLatin1Char(' ') + describeRect(boxRect) + QStringLiteral(", the time box ")
+            + describeRect(seekBoxRect);
+        QVERIFY2(std::abs(boxRect.bottom() - seekBoxRect.bottom()) <= 0.5, qPrintable(where));
+        QVERIFY2(std::abs(boxRect.height() - seekBoxRect.height()) <= 0.5, qPrintable(where));
+    }
+
+    // Mute's and the volume's, focused, in the same lane: as tall as the
+    // time box, on the same line, in the band, and clear of their rings.
+    const QRectF band = sceneRect(harness.item(QStringLiteral("transportBar")));
+    QQuickItem *mute = harness.item(QStringLiteral("muteButton"));
+    QQuickItem *volume = harness.item(QStringLiteral("volumeSlider"));
+    QQuickItem *volumeRing = harness.item(QStringLiteral("volumeFocusRing"));
+    QObject *volumeTip = harness.root->findChild<QObject *>(QStringLiteral("volumeToolTip"));
+    QVERIFY(mute && volume && volumeRing && volumeTip);
+    struct InLane {
+        QQuickItem *control;
+        QQuickItem *ring;
+        QObject *tip;
+    };
+    for (const InLane &inLane : {InLane{mute, ringOf(mute), buttonToolTip(mute)}, InLane{volume, volumeRing, volumeTip}}) {
+        const QString name = inLane.control->objectName();
+        QVERIFY2(inLane.ring && inLane.tip, qPrintable(name));
+        inLane.control->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY2(inLane.ring->isVisible(), qPrintable(name));
+        QTRY_VERIFY2(inLane.tip->property("opened").toBool(), qPrintable(name));
+        auto *box = inLane.tip->property("background").value<QQuickItem *>();
+        QVERIFY(box != nullptr);
+        const QRectF boxRect = sceneRect(box);
+        const QString where = name + QLatin1Char(' ') + describeRect(boxRect) + QStringLiteral(", the time box ")
+            + describeRect(seekBoxRect) + QStringLiteral(", the ring ") + describeRect(sceneRect(inLane.ring));
+        QVERIFY2(std::abs(boxRect.bottom() - seekBoxRect.bottom()) <= 0.5, qPrintable(where));
+        QVERIFY2(std::abs(boxRect.height() - seekBoxRect.height()) <= 0.5, qPrintable(where));
+        QVERIFY2(boxRect.top() >= band.top() && boxRect.right() <= band.right(), qPrintable(where));
+        QVERIFY2(boxRect.bottom() <= sceneRect(inLane.ring).top() - 1 + 0.5, qPrintable(where));
+        harness.root->property("startButton").value<QQuickItem *>()->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY2(!inLane.tip->property("visible").toBool(), qPrintable(name));
+    }
 }
 
 void TransportStatusTest::seekWaveformMeetsItsContrastAsDrawn_data() {
@@ -949,9 +1238,16 @@ void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform_data() {
 
 // While the visualization is zoomed, a band behind the seek bar's
 // waveform marks the part of the track its view shows: in the view colour,
-// across the bar's height, on whole device pixels. The waveform keeps its
-// colours on it, the unplayed part at the unplayed opacity on the band as
-// on the chrome, and the band is the same on either side of the playhead.
+// on the light theme 45 % of the way to the chrome (a raised white slot,
+// louder than the dark band, H16, H17), across the bar's height, on whole
+// device pixels. The unplayed part is at the unplayed opacity on the band
+// as on the chrome, and the played part under the band's colour at 8 %,
+// so the band's edge shows in the waveform's ink on either side of the
+// playhead: under the bright played part alone, the band read as starting
+// at the playhead (H14). At 15 % the dark band left the part in view the
+// dimmest of the bar (H17). On the light theme's pale band it is 6 %: more
+// paled the played part to a tone of its own (H15, H17). Either way the
+// edge still shows through the waveform.
 void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform() {
     QFETCH(bool, dark);
     Harness harness;
@@ -966,10 +1262,12 @@ void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform() {
     QQuickItem *waveform = harness.item(QStringLiteral("seekWaveform"));
     QQuickItem *band = harness.item(QStringLiteral("seekViewBand"));
     QQuickItem *bandUnplayed = harness.item(QStringLiteral("seekViewBandUnplayed"));
+    QQuickItem *bandPlayed = harness.item(QStringLiteral("seekViewBandPlayed"));
     QQuickItem *line = harness.item(QStringLiteral("seekPlayheadLine"));
-    QVERIFY(transport && seek && waveform && band && bandUnplayed && line);
+    QVERIFY(transport && seek && waveform && band && bandUnplayed && bandPlayed && line);
     QVERIFY(!band->isVisible());
     QVERIFY(!bandUnplayed->isVisible());
+    QVERIFY(!bandPlayed->isVisible());
 
     // A view from 80 s to 120 s of the 229 s track.
     transport->setProperty("viewStartSeconds", 80.0);
@@ -993,8 +1291,13 @@ void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform() {
             < band->parentItem()->childItems().indexOf(waveform));
 
     const QColor chrome = harness.transportChrome();
-    const QColor view = harness.token("view");
-    QVERIFY(sameColor(view, QColor(breeze(dark).view)));
+    QVERIFY(sameColor(harness.token("view"), QColor(breeze(dark).view)));
+    // The band: the view colour on the dark theme, and on the light one 45 %
+    // of the way from it to the chrome, about #f0f1f2 on Breeze's #dee0e2,
+    // 1.17:1 (whiter, it read louder there than the dark band, H16, H17).
+    const QColor view = transport->property("seekViewBandColor").value<QColor>();
+    QVERIFY2(channelDistance(view, dark ? QColor(breeze(dark).view) : QColor(0xf0, 0xf1, 0xf2)) <= 1,
+             qPrintable(view.name()));
     const QColor played = transport->property("seekPlayedColor").value<QColor>();
     const qreal unplayedOpacity = transport->property("seekUnplayedOpacity").toReal();
     qreal scale = 1;
@@ -1015,10 +1318,25 @@ void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform() {
                      qPrintable(QStringLiteral("%1 at %2,%3").arg(drawn.name()).arg(x).arg(y)));
         }
     }
-    // The bars on it, played and unplayed, as on the chrome but on the band.
+    // The bars on it: the unplayed part as on the chrome but on the band,
+    // the played part under the band's colour at 8 %, 6 % in light.
     const QColor drawnPlayed = pixelAt(image, QPointF(playedX, middle), scale);
     const QColor drawnUnplayed = pixelAt(image, QPointF(unplayedX, middle), scale);
-    QVERIFY2(channelDistance(drawnPlayed, played) <= 2, qPrintable(drawnPlayed.name()));
+    const QColor expectedPlayed = mixed(played, view, dark ? 0.08 : 0.06);
+    QVERIFY2(channelDistance(drawnPlayed, expectedPlayed) <= 2,
+             qPrintable(drawnPlayed.name() + QStringLiteral(" vs ") + expectedPlayed.name()));
+    // Played and outside the band, the bars keep their colour.
+    QVERIFY(bandRect.left() > bar.left() + 20);
+    const QColor playedOutside = pixelAt(image, QPointF(bandRect.left() - 10, middle), scale);
+    QVERIFY2(channelDistance(playedOutside, played) <= 2, qPrintable(playedOutside.name()));
+    // The played part's cover runs from the band's left edge to the
+    // playhead's line, under the playhead.
+    QCOMPARE(sceneRect(bandPlayed).left(), bandRect.left());
+    QQuickItem *unplayedPart = harness.item(QStringLiteral("seekUnplayed"));
+    QVERIFY(unplayedPart != nullptr);
+    QCOMPARE(sceneRect(bandPlayed).right(), sceneRect(unplayedPart).left());
+    QCOMPARE(sceneRect(bandPlayed).top(), wave.top());
+    QCOMPARE(sceneRect(bandPlayed).height(), wave.height());
     const QColor expectedUnplayed = mixed(view, played, unplayedOpacity);
     QVERIFY2(channelDistance(drawnUnplayed, expectedUnplayed) <= 2,
              qPrintable(drawnUnplayed.name() + QStringLiteral(" vs ") + expectedUnplayed.name()));
@@ -1038,28 +1356,41 @@ void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform() {
     // Faint: a quiet step from the chrome, well under the waveform's, and
     // the waveform keeps at least its contrast on the chrome.
     const double bandContrast = contrastRatio(view, chrome);
-    QVERIFY2(bandContrast >= 1.2 && bandContrast <= 1.6,
+    QVERIFY2(dark ? bandContrast >= 1.2 && bandContrast <= 1.6 : bandContrast >= 1.1 && bandContrast <= 1.18,
              qPrintable(describeContrast(QStringLiteral("band"), view, chrome)));
     const QColor unplayedOnChrome = mixed(chrome, played, unplayedOpacity);
     QVERIFY2(contrastRatio(drawnUnplayed, view) >= contrastRatio(unplayedOnChrome, chrome),
              qPrintable(describeContrast(QStringLiteral("unplayed on the band"), drawnUnplayed, view)));
     QVERIFY2(contrastRatio(drawnPlayed, view) >= 4.5,
              qPrintable(describeContrast(QStringLiteral("played on the band"), drawnPlayed, view)));
+    // The band's edges still show through the waveform, played and
+    // unplayed: a step of the waveform's ink across them, never none, and
+    // a step, not a tone of its own (H17).
+    const double playedStep = contrastRatio(drawnPlayed, playedOutside);
+    const double unplayedStep = contrastRatio(drawnUnplayed, unplayedOutside);
+    for (const double step : {playedStep, unplayedStep}) {
+        QVERIFY2(step >= 1.05 && step <= 1.25,
+                 qPrintable(QStringLiteral("edge steps: played %1, unplayed %2").arg(playedStep).arg(unplayedStep)));
+    }
 
-    // A view past the track's end stops at the bar's end; one of less than
-    // a device pixel is a device pixel wide.
+    // A view all before the playhead: the cover is the band's, edge to
+    // edge, with nothing unplayed on it.
+    transport->setProperty("viewStartSeconds", 40.0);
+    transport->setProperty("viewEndSeconds", 60.0);
+    QVERIFY(bandPlayed->isVisible());
+    QVERIFY(!bandUnplayed->isVisible());
+    QCOMPARE(sceneRect(bandPlayed).left(), sceneRect(band).left());
+    QCOMPARE(sceneRect(bandPlayed).right(), sceneRect(band).right());
+    // And all after it: none.
+    transport->setProperty("viewStartSeconds", 140.0);
+    transport->setProperty("viewEndSeconds", 160.0);
+    QVERIFY(!bandPlayed->isVisible());
+    QVERIFY(bandUnplayed->isVisible());
+
+    // A view past the track's end stops at the bar's end.
     transport->setProperty("viewStartSeconds", 200.0);
     transport->setProperty("viewEndSeconds", 260.0);
     QCOMPARE(sceneRect(band).right(), bar.left() + barPixels / ratio);
-    transport->setProperty("viewStartSeconds", 228.99);
-    transport->setProperty("viewEndSeconds", 229.5);
-    QCOMPARE(sceneRect(band).left(), bar.left() + (barPixels - 1) / ratio);
-    QCOMPARE(sceneRect(band).right(), bar.left() + barPixels / ratio);
-    transport->setProperty("viewStartSeconds", 50.0);
-    transport->setProperty("viewEndSeconds", 50.001);
-    QVERIFY(band->isVisible());
-    QCOMPARE(sceneRect(band).left(), barX(50.0));
-    QCOMPARE(sceneRect(band).width(), 1.0 / ratio);
 
     // None without a range, a length or a track.
     transport->setProperty("viewStartSeconds", std::numeric_limits<double>::quiet_NaN());
@@ -1070,12 +1401,74 @@ void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform() {
     harness.bridge->setProperty("durationSeconds", std::numeric_limits<double>::quiet_NaN());
     QVERIFY(!band->isVisible());
     QVERIFY(!bandUnplayed->isVisible());
+    QVERIFY(!bandPlayed->isVisible());
     harness.bridge->setProperty("durationSeconds", 0.0);
     QVERIFY(!band->isVisible());
     harness.bridge->setProperty("durationSeconds", 229.0);
     QVERIFY(band->isVisible());
     harness.bridge->setProperty("playbackState", QStringLiteral("Stopped"));
     QVERIFY(!band->isVisible());
+}
+
+// However deep the zoom, the band is 6 px wide or more: centred on the
+// view's range, on whole device pixels, and within the bar at either end.
+// The unplayed part's cover has the same edges.
+void TransportStatusTest::seekViewBandStaysFindableAtDeepZoom() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    harness.bridge->setProperty("waveformPeaksPacked", QByteArray(800, static_cast<char>(128)));
+    harness.bridge->setProperty("waveformComplete", true);
+    harness.bridge->setProperty("waveformCoverageSeconds", 229.0);
+    harness.root->setProperty("positionSeconds", 0.0);
+    QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QQuickItem *band = harness.item(QStringLiteral("seekViewBand"));
+    QQuickItem *bandUnplayed = harness.item(QStringLiteral("seekViewBandUnplayed"));
+    QVERIFY(transport && seek && band && bandUnplayed);
+    const qreal ratio = harness.window->effectiveDevicePixelRatio();
+    const QRectF bar = sceneRect(seek);
+    const double barPixels = std::floor(bar.width() * ratio + 1e-6);
+    const double least = std::round(6.0 * ratio);
+    const auto showView = [&](double start, double end) {
+        transport->setProperty("viewStartSeconds", start);
+        transport->setProperty("viewEndSeconds", end);
+    };
+    // The band's left edge and width, in device pixels from the bar's left.
+    const auto drawn = [&]() {
+        const QRectF rect = sceneRect(band);
+        return QPointF((rect.left() - bar.left()) * ratio, rect.width() * ratio);
+    };
+
+    // Within the bar, centred on the range to within half a device pixel.
+    for (const double start : {20.0, 50.0, 50.07, 50.13, 100.0, 180.0}) {
+        for (const double span : {0.001, 0.2, 0.7}) {
+            showView(start, start + span);
+            QVERIFY(band->isVisible());
+            const QPointF shown = drawn();
+            QCOMPARE(shown.y(), least);
+            QVERIFY(std::abs(shown.x() - std::round(shown.x())) < 1e-6);
+            const double centre = (start + span / 2) / 229.0 * barPixels;
+            QVERIFY2(std::abs(shown.x() + least / 2 - centre) <= 0.5 + 1e-6,
+                     qPrintable(QStringLiteral("%1 at %2, not about %3").arg(least).arg(shown.x()).arg(centre)));
+        }
+    }
+    // Whole at either end, also for a view partly past it.
+    showView(0.0, 0.05);
+    QCOMPARE(drawn(), QPointF(0.0, least));
+    showView(-1.0, 0.05);
+    QCOMPARE(drawn(), QPointF(0.0, least));
+    showView(228.95, 229.0);
+    QCOMPARE(drawn(), QPointF(barPixels - least, least));
+    showView(228.99, 229.5);
+    QCOMPARE(drawn(), QPointF(barPixels - least, least));
+    // The unplayed part's cover is the band's, to both of its edges.
+    QCOMPARE(sceneRect(bandUnplayed).right(), sceneRect(band).right());
+    QCOMPARE(sceneRect(bandUnplayed).left(), sceneRect(band).left());
+
+    // One that is wide enough keeps its own edges.
+    showView(50.0, 60.0);
+    QCOMPARE(drawn().x(), std::round(50.0 / 229.0 * barPixels));
+    QCOMPARE(drawn().x() + drawn().y(), std::round(60.0 / 229.0 * barPixels));
 }
 
 // The band is decoration: it changes neither the seek bar's value nor what
@@ -1102,7 +1495,7 @@ void TransportStatusTest::seekViewBandIsDecorationOnly() {
     QCOMPARE(state(), before);
     QVERIFY(harness.root->property("seeks").value<QJSValue>().toVariant().toList().isEmpty());
     // Neither part of the band is an accessible object.
-    for (const char *name : {"seekViewBand", "seekViewBandUnplayed"}) {
+    for (const char *name : {"seekViewBand", "seekViewBandUnplayed", "seekViewBandPlayed"}) {
         QAccessibleInterface *part = QAccessible::queryAccessibleInterface(harness.item(QString::fromLatin1(name)));
         QVERIFY2(part == nullptr || part->role() == QAccessible::NoRole || part->state().invisible,
                  name);
@@ -1143,15 +1536,20 @@ void TransportStatusTest::seekHoverDrawsALineAndANativeToolTip() {
                                  .arg(static_cast<int>(seconds) % 60, 2, 10, QLatin1Char('0'));
     QCOMPARE(tip->property("text").toString(), expected);
     QVERIFY2(!expected.startsWith(QLatin1Char('0')), qPrintable(expected));
-    // Above the bar, its bottom edge on the bar's top, centred on the line:
-    // it covers none of the waveform it reads, and nothing under the bar
-    // such as the queue's header.
+    // In the transport's lane above the bar, clear of the bar's focus ring,
+    // centred on the line: it covers none of the waveform it reads,
+    // and nothing under the bar such as the queue's header.
     auto *tipBox = tip->property("background").value<QQuickItem *>();
     QQuickItem *waveform = harness.item(QStringLiteral("seekWaveform"));
-    QVERIFY(tipBox != nullptr && waveform != nullptr);
+    QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
+    QVERIFY(tipBox != nullptr && waveform != nullptr && transport != nullptr);
+    const QRectF band = sceneRect(transport);
     QTRY_VERIFY(tip->property("opened").toBool());
+    const qreal laneBottom = band.top() + transport->property("laneBottom").toReal();
+    QVERIFY(laneBottom <= bar.top() - seek->property("focusRingOutset").toReal() - 3);
     const auto expectAbove = [&](const QRectF &tipRect) {
-        QVERIFY2(std::abs(tipRect.bottom() - bar.top()) <= 0.5, qPrintable(describeRect(tipRect)));
+        QVERIFY2(std::abs(tipRect.bottom() - laneBottom) <= 0.5, qPrintable(describeRect(tipRect)));
+        QVERIFY2(tipRect.top() >= band.top(), qPrintable(describeRect(tipRect)));
         QVERIFY2(!tipRect.intersects(sceneRect(waveform)), qPrintable(describeRect(tipRect)));
         QVERIFY2(!tipRect.intersects(bar), qPrintable(describeRect(tipRect)));
     };
@@ -1218,6 +1616,249 @@ void TransportStatusTest::seekHoverDrawsALineAndANativeToolTip() {
     QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, at.toPoint());
 }
 
+void TransportStatusTest::seekReleaseHandsTheTimeBoxToTheHover_data() {
+    QTest::addColumn<bool>("hoveredFirst");
+    QTest::addColumn<bool>("frameBeforeRelease");
+    QTest::newRow("hovered, then dragged") << true << true;
+    QTest::newRow("pressed as it arrived") << false << true;
+    QTest::newRow("released within a frame") << true << false;
+}
+
+// A drag's release over the bar hands the time box to the hover as one box:
+// it is never hidden between them, stays whole in every frame drawn, and is
+// at the released point with its time from the release on (it went out for a
+// frame and faded in again at each release).
+void TransportStatusTest::seekReleaseHandsTheTimeBoxToTheHover() {
+    QFETCH(bool, hoveredFirst);
+    QFETCH(bool, frameBeforeRelease);
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("seekTimeBox"));
+    QVERIFY(seek && tip);
+    auto *tipBox = tip->property("background").value<QQuickItem *>();
+    QVERIFY(tipBox != nullptr);
+    const QRectF bar = sceneRect(seek);
+    const int y = qRound(bar.center().y());
+    const auto at = [&bar, y](double fraction) { return QPoint(qRound(bar.left() + fraction * bar.width()), y); };
+    if (hoveredFirst) {
+        QTest::mouseMove(harness.window, at(0.3));
+    }
+    QTest::mousePress(harness.window, Qt::LeftButton, Qt::NoModifier, at(0.3));
+    QTest::mouseMove(harness.window, at(0.38));
+    QTest::mouseMove(harness.window, at(0.46));
+    QTRY_VERIFY(tip->property("opened").toBool() && tip->property("opacity").toReal() >= 1.0);
+    if (frameBeforeRelease) {
+        QVERIFY(!harness.window->grabWindow().isNull());
+    }
+
+    QSignalSpy shownChanges(tip, SIGNAL(shownChanged()));
+    QSignalSpy visibleChanges(tip, SIGNAL(visibleChanged()));
+    qreal faintest = 1.0;
+    const FrameSampler sampler(harness.window, [&]() {
+        faintest = std::min(faintest, tip->property("visible").toBool() ? tip->property("opacity").toReal() : 0.0);
+    });
+    QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, at(0.46));
+    QCOMPARE(seeksOf(harness).size(), 1);
+    QCOMPARE(shownChanges.count(), 0);
+    QCOMPARE(visibleChanges.count(), 0);
+    QCOMPARE(tip->property("opacity").toReal(), 1.0);
+    // At the released point at once, with its time, before any frame.
+    QVERIFY2(std::abs(sceneRect(tipBox).center().x() - at(0.46).x()) <= 2.0,
+             qPrintable(describeRect(sceneRect(tipBox))));
+    const int second = int(std::floor(seeksOf(harness).first().toDouble()));
+    QCOMPARE(tip->property("text").toString(),
+             QStringLiteral("%1:%2").arg(second / 60).arg(second % 60, 2, 10, QLatin1Char('0')));
+    // Through the frames after it, in which the hover catches up.
+    for (int frame = 0; frame < 4; ++frame) {
+        QVERIFY(!harness.window->grabWindow().isNull());
+        QTest::qWait(20);
+    }
+    QCOMPARE(shownChanges.count(), 0);
+    QCOMPARE(visibleChanges.count(), 0);
+    QCOMPARE(faintest, 1.0);
+    QVERIFY(std::abs(sceneRect(tipBox).center().x() - at(0.46).x()) <= 2.0);
+    // The hover's from there: it follows the pointer, and leaves with it.
+    QTest::mouseMove(harness.window, at(0.6));
+    QTRY_VERIFY(std::abs(sceneRect(tipBox).center().x() - at(0.6).x()) <= 2.0);
+    QCOMPARE(shownChanges.count(), 0);
+    QTest::mouseMove(harness.window, QPoint(at(0.6).x(), qRound(bar.bottom() + 60)));
+    QTRY_VERIFY(!tip->property("visible").toBool());
+}
+
+// A drag released off the bar shows no hover's time: the box leaves where
+// the drag had it, rather than from the point the hover last had.
+void TransportStatusTest::seekReleaseOffTheBarHidesTheTimeBox() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("seekTimeBox"));
+    QVERIFY(seek && tip);
+    auto *tipBox = tip->property("background").value<QQuickItem *>();
+    QVERIFY(tipBox != nullptr);
+    const QRectF bar = sceneRect(seek);
+    const QPoint start(qRound(bar.left() + 0.3 * bar.width()), qRound(bar.center().y()));
+    const QPoint end(qRound(bar.left() + 0.5 * bar.width()), qRound(bar.bottom() + 60));
+    QTest::mouseMove(harness.window, start);
+    QTest::mousePress(harness.window, Qt::LeftButton, Qt::NoModifier, start);
+    QTest::mouseMove(harness.window, QPoint(end.x() - 20, start.y()));
+    QTest::mouseMove(harness.window, end);
+    QTRY_VERIFY(tip->property("opened").toBool());
+    const qreal draggedTo = sceneRect(tipBox).center().x();
+    QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, end);
+    QVERIFY(!tip->property("shown").toBool());
+    QVERIFY(std::abs(sceneRect(tipBox).center().x() - draggedTo) <= 1.0);
+    QTRY_VERIFY(!tip->property("visible").toBool());
+}
+
+void TransportStatusTest::seekHoverLineLeavesThePlayheadWhole_data() {
+    addThemeRows();
+}
+
+// The hover's line never paints over the playhead or stands beside it as a
+// second one: it is under it, and shows only with 4 px clear between it and
+// the playhead's line (2 or 3 px beside it, the two drew as one doubled
+// line). The time stays.
+void TransportStatusTest::seekHoverLineLeavesThePlayheadWhole() {
+    QFETCH(bool, dark);
+    Harness harness;
+    QVERIFY2(harness.load(breeze(dark)), qPrintable(harness.error));
+    harness.root->setProperty("positionSeconds", 100.0);
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QQuickItem *hoverLine = harness.item(QStringLiteral("seekHoverLine"));
+    QQuickItem *playhead = harness.item(QStringLiteral("seekPlayhead"));
+    QQuickItem *line = harness.item(QStringLiteral("seekPlayheadLine"));
+    QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("seekTimeBox"));
+    QVERIFY(seek && hoverLine && playhead && line && tip);
+    const QList<QQuickItem *> layers = playhead->parentItem()->childItems();
+    QVERIFY(layers.indexOf(hoverLine) < layers.indexOf(playhead));
+
+    const QRectF bar = sceneRect(seek);
+    const int y = qRound(bar.center().y());
+    QTest::mouseMove(harness.window, QPoint(qRound(sceneRect(playhead).right() + 30), y));
+    QTRY_VERIFY(hoverLine->isVisible());
+    QTRY_VERIFY(tip->property("opened").toBool());
+
+    const QRectF head = sceneRect(playhead);
+    const QRectF amber = sceneRect(line);
+    const qreal clearance = 4;
+    const qreal ratio = harness.window->effectiveDevicePixelRatio();
+    for (int x = qFloor(head.left()) - 8; x <= qCeil(head.right()) + 8; ++x) {
+        QTest::mouseMove(harness.window, QPoint(x, y));
+        // On the device pixel under the pointer.
+        const qreal at = bar.left() + std::floor((x - bar.left()) * ratio + 1e-6) / ratio;
+        QTRY_VERIFY(std::abs(sceneRect(hoverLine).left() - at) < 1e-6);
+        const bool clear = at + hoverLine->width() <= amber.left() - clearance + 1e-6
+            || at >= amber.right() + clearance - 1e-6;
+        QVERIFY2(hoverLine->isVisible() == clear, qPrintable(QStringLiteral("at %1").arg(x)));
+        QVERIFY(tip->property("visible").toBool());
+    }
+
+    // As drawn with the pointer on it: amber, with the bar beside it.
+    QTest::mouseMove(harness.window, sceneRect(line).center().toPoint());
+    QTRY_VERIFY(!hoverLine->isVisible());
+    qreal scale = 1;
+    const QImage image = grabbed(harness.window, &scale);
+    QVERIFY(!image.isNull());
+    QVERIFY(channelDistance(pixelAt(image, QPointF(sceneRect(line).left() + 0.5, y), scale),
+                            harness.token("now")) <= 1);
+
+    // It comes back as playback takes the playhead on from under it, and
+    // goes as the playhead reaches it, as after a click there.
+    harness.root->setProperty("positionSeconds", 110.0);
+    QTRY_VERIFY(hoverLine->isVisible());
+    harness.root->setProperty("positionSeconds", 100.0);
+    QTRY_VERIFY(!hoverLine->isVisible());
+}
+
+void TransportStatusTest::seekHoverLineStaysWithTheBoxAfterASeek_data() {
+    QTest::addColumn<bool>("dragged");
+    QTest::newRow("click") << false;
+    QTest::newRow("drag") << true;
+}
+
+// A click or a drag released on the bar hands the time box to the hover at
+// the pointer, and its line comes with it: as playback takes the playhead on
+// from under the resting pointer, the line shows at the pointer under the
+// box once 4 px clear of the playhead's line opens (it waited for the
+// pointer to move, and the box stood beside the moving playhead with no
+// line), and not before (2 or 3 px beside the playhead, the two drew as one
+// doubled line under the box). The box never goes out.
+void TransportStatusTest::seekHoverLineStaysWithTheBoxAfterASeek() {
+    QFETCH(bool, dragged);
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QQuickItem *hoverLine = harness.item(QStringLiteral("seekHoverLine"));
+    QQuickItem *playhead = harness.item(QStringLiteral("seekPlayhead"));
+    QQuickItem *line = harness.item(QStringLiteral("seekPlayheadLine"));
+    QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("seekTimeBox"));
+    QVERIFY(seek && hoverLine && playhead && line && tip);
+    auto *tipBox = tip->property("background").value<QQuickItem *>();
+    QVERIFY(tipBox != nullptr);
+    const QRectF bar = sceneRect(seek);
+    const QPoint from(qRound(bar.left() + 0.3 * bar.width()), qRound(bar.center().y()));
+    const QPoint to = dragged ? from + QPoint(qRound(0.16 * bar.width()), 0) : from;
+
+    QTest::mouseMove(harness.window, from);
+    QTest::mousePress(harness.window, Qt::LeftButton, Qt::NoModifier, from);
+    if (dragged) {
+        QTest::mouseMove(harness.window, (from + to) / 2);
+        QTest::mouseMove(harness.window, to);
+    }
+    QTRY_VERIFY(tip->property("opened").toBool());
+    QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, to);
+    QCOMPARE(seeksOf(harness).size(), 1);
+    const double landed = seeksOf(harness).first().toDouble();
+
+    // In every frame the box shows the hover's time, its line is drawn at
+    // the pointer, unless the playhead is there to mark it.
+    QString disagreed;
+    bool boxHidden = false;
+    const auto lineIsTheBoxs = [&]() {
+        if (!tip->property("visible").toBool()) {
+            boxHidden = true;
+            return;
+        }
+        const QRectF head = sceneRect(line);
+        const qreal clear = 4.0;
+        const bool nearHead = to.x() + 1 > head.left() - clear && to.x() < head.right() + clear;
+        if (!nearHead && !hoverLine->isVisible() && disagreed.isEmpty()) {
+            disagreed = QStringLiteral("no line under the box %1, the playhead %2")
+                            .arg(describeRect(sceneRect(tipBox)), describeRect(head));
+        }
+        if (nearHead && hoverLine->isVisible() && disagreed.isEmpty()) {
+            disagreed = QStringLiteral("a line at %1 beside the playhead %2")
+                            .arg(describeRect(sceneRect(hoverLine)), describeRect(head));
+        }
+    };
+    const FrameSampler sampler(harness.window, lineIsTheBoxs);
+    // Playback takes the playhead on from under the pointer, which rests.
+    for (int second = 0; second <= 8; ++second) {
+        harness.root->setProperty("positionSeconds", landed + second);
+        QVERIFY(!harness.window->grabWindow().isNull());
+        QTest::qWait(20);
+        lineIsTheBoxs();
+    }
+    QVERIFY2(disagreed.isEmpty(), qPrintable(disagreed));
+    QVERIFY(!boxHidden);
+    // Clear of the playhead by now: the line at the pointer, under the box,
+    // which names the pointer's time.
+    QVERIFY(hoverLine->isVisible());
+    QVERIFY(std::abs(sceneRect(hoverLine).left() - to.x()) <= 1.0);
+    QVERIFY(std::abs(sceneRect(tipBox).center().x() - to.x()) <= 2.0);
+    QVERIFY(sceneRect(playhead).left() > to.x() + 2);
+    const int second = seek->property("hoverSecond").toInt();
+    QCOMPARE(tip->property("text").toString(),
+             QStringLiteral("%1:%2").arg(second / 60).arg(second % 60, 2, 10, QLatin1Char('0')));
+
+    // A move takes both along.
+    QTest::mouseMove(harness.window, to - QPoint(12, 0));
+    QTRY_VERIFY(std::abs(sceneRect(hoverLine).left() - (to.x() - 12)) <= 1.0);
+    QVERIFY(hoverLine->isVisible());
+    QTRY_VERIFY(std::abs(sceneRect(tipBox).center().x() - (to.x() - 12)) <= 2.0);
+}
+
 void TransportStatusTest::seekFocusDrawsOneRingAroundTheBar_data() {
     addThemeRows();
 }
@@ -1279,6 +1920,90 @@ void TransportStatusTest::volumeGlyphHasTheTransportsWeight() {
     QVERIFY2(volumeInk * 10 >= nextInk * 7, qPrintable(QStringLiteral("%1 / %2").arg(volumeInk).arg(nextInk)));
 }
 
+void TransportStatusTest::volumeGlyphsAreSmoothOutlines_data() {
+    QTest::addColumn<QString>("name");
+    QTest::addColumn<double>("ink");
+    // The ink of each, in pixels of its 16 px drawing, as heavy as Next.
+    QTest::newRow("volume") << QStringLiteral("volume.svg") << 96.0;
+    QTest::newRow("muted") << QStringLiteral("volume-muted.svg") << 80.0;
+}
+
+// The speaker and the muted speaker are outlines: at 16 px their straight
+// strokes are whole pixels and as heavy as before, and at any larger size,
+// a 24 pt font's 38 px or 2x, their diagonals and curves are smooth (a grid
+// of squares was a staircase of 2 to 4 px steps beside the other glyphs).
+void TransportStatusTest::volumeGlyphsAreSmoothOutlines() {
+    QFETCH(QString, name);
+    QFETCH(double, ink);
+    const auto coverage = [&name](int size) {
+        QImageReader reader(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/") + name);
+        reader.setScaledSize(QSize(size, size));
+        return reader.read().convertToFormat(QImage::Format_ARGB32);
+    };
+    const QImage one = coverage(16);
+    QCOMPARE(one.size(), QSize(16, 16));
+    const auto covered = [&one](int x, int y) { return qAlpha(one.pixel(x, y)) / 255.0; };
+    double total = 0;
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            total += covered(x, y);
+        }
+    }
+    QVERIFY2(std::abs(total - ink) <= 0.1 * ink, qPrintable(QStringLiteral("%1 px of ink").arg(total)));
+    // Whole pixels: the cone's back and the middle of each wave, with a
+    // clear column between the parts.
+    for (int y = 3; y <= 12; ++y) {
+        QVERIFY2(covered(7, y) >= 0.95 && covered(8, y) <= 0.05, qPrintable(QStringLiteral("back at %1").arg(y)));
+    }
+    if (name == QStringLiteral("volume.svg")) {
+        for (const int y : {7, 8}) {
+            for (const int x : {10, 11, 14, 15}) {
+                QVERIFY2(covered(x, y) >= 0.85, qPrintable(QStringLiteral("wave at %1,%2").arg(x).arg(y)));
+            }
+            QVERIFY2(covered(9, y) <= 0.1 && covered(12, y) <= 0.1, qPrintable(QStringLiteral("gap at %1").arg(y)));
+        }
+    }
+
+    for (const int size : {32, 38, 64}) {
+        const QImage large = coverage(size);
+        QCOMPARE(large.size(), QSize(size, size));
+        const double scale = size / 16.0;
+        // Along a diagonal, the cone's and the cross's, each row of pixels
+        // holds its own ink; a staircase repeats a row for each step.
+        const auto rowInk = [&](int y, int left, int right) {
+            double sum = 0;
+            for (int x = left; x < right; ++x) {
+                sum += qAlpha(large.pixel(x, y)) / 255.0;
+            }
+            return sum;
+        };
+        for (int y = int(std::ceil(2.4 * scale)); y + 1 < int(std::floor(4.6 * scale)); ++y) {
+            QVERIFY2(rowInk(y + 1, 0, size / 2) - rowInk(y, 0, size / 2) >= 0.5,
+                     qPrintable(QStringLiteral("the cone steps at row %1 of %2 px").arg(y).arg(size)));
+        }
+        // The wave's arc, or the cross's stroke, from its upper end toward
+        // the middle: its ink's middle moves in every row.
+        const bool waves = name == QStringLiteral("volume.svg");
+        const int left = int(std::ceil((waves ? 10.9 : 13.3) * scale));
+        const auto middle = [&](int y) {
+            double sum = 0;
+            double moment = 0;
+            for (int x = left; x < size; ++x) {
+                const double alpha = qAlpha(large.pixel(x, y)) / 255.0;
+                sum += alpha;
+                moment += alpha * x;
+            }
+            return sum > 0 ? moment / sum : 0.0;
+        };
+        const double from = (waves ? 3.4 : 6.2) * scale;
+        const double to = (waves ? 4.8 : 7.2) * scale;
+        for (int y = int(std::ceil(from)); y + 1 < int(std::floor(to)); ++y) {
+            QVERIFY2(std::abs(middle(y + 1) - middle(y)) >= 0.1,
+                     qPrintable(QStringLiteral("the stroke steps at row %1 of %2 px").arg(y).arg(size)));
+        }
+    }
+}
+
 void TransportStatusTest::transportGlyphsDrawOnOneScale_data() {
     QTest::addColumn<qreal>("pointSize");
     QTest::addColumn<int>("small");
@@ -1289,8 +2014,12 @@ void TransportStatusTest::transportGlyphsDrawOnOneScale_data() {
 
 // The transport's glyphs on one scale (Play/Pause 22, Previous and Next 16
 // and Stop 14 read as three weights): Previous, Stop, Next and the volume
-// 16 px, their ink 12 px tall, and Play/Pause a step above at 20 px, its ink
-// 14 px tall; Stop's and Pause's ink at most 1.4 times Next's. They grow
+// 16 px, their ink 12 px tall, Stop's 10 px, and Play/Pause a step above at
+// 20 px, Pause's ink 14 px tall; Stop's and Pause's ink at most 1.4 times
+// Next's, and Stop's no more than Play's. Play weighs as much as Pause,
+// within a tenth, its tips a pixel past Pause's rows, and sits about a
+// pixel right of Pause's centre, as a triangle needs to look centred and
+// as heavy as two bars. They grow
 // with the font on whole pixels, to at least 0.9 of its pixel size at 24 pt,
 // and are drawn at that size (Kirigami rounded a 24 pt font's 38 px glyphs
 // down to 32 px theme icons, and would draw a 20 px one at 16).
@@ -1318,7 +2047,7 @@ void TransportStatusTest::transportGlyphsDrawOnOneScale() {
     const QList<Glyph> glyphs{
         {"previous", glyphOfButton("previous"), small, small * 12 / 16},
         {"pause", pause, large, large * 14 / 20},
-        {"stop", glyphOfButton("stop"), small, small * 12 / 16},
+        {"stop", glyphOfButton("stop"), small, small * 10 / 16},
         {"next", glyphOfButton("next"), small, small * 12 / 16},
         {"volume", harness.item(QStringLiteral("muteButtonGlyph")), small, small * 12 / 16},
     };
@@ -1356,10 +2085,32 @@ void TransportStatusTest::transportGlyphsDrawOnOneScale() {
     QVERIFY(stepUntil(animations, [&] { return play->opacity() == 1.0 && !pause->isVisible(); }));
     Ink playInk;
     QTRY_VERIFY((playInk = inkOf(harness.window, play, chrome)).pixels > 0);
-    // Give or take the triangle's thin tips, at most a pixel at each end.
-    QVERIFY2(std::abs(playInk.height - inks.value(QStringLiteral("pause")).height) <= 2,
-             qPrintable(QStringLiteral("Play %1 px, Pause %2 px").arg(playInk.height)
-                            .arg(inks.value(QStringLiteral("pause")).height)));
+    const Ink pauseInk = inks.value(QStringLiteral("pause"));
+    const QString both = QStringLiteral("Play %1 px of ink in rows %2 high, columns %3 to %4; Pause %5, %6, %7 to %8")
+                             .arg(playInk.pixels).arg(playInk.height).arg(playInk.left).arg(playInk.right)
+                             .arg(pauseInk.pixels).arg(pauseInk.height).arg(pauseInk.left).arg(pauseInk.right);
+    // As heavy as Pause, within a tenth: as tall as Pause, Play had a third
+    // less ink and read lighter and narrower, so the anchor glyph changed
+    // weight with the state.
+    QVERIFY2(std::abs(playInk.pixels - pauseInk.pixels) * 10 <= pauseInk.pixels, qPrintable(both));
+    // Its tips a pixel past Pause's rows at each end, at 1x, as a point
+    // needs to look as tall as a flat edge, and no more.
+    const qreal pixel = large / 20.0;
+    QVERIFY2(playInk.height >= pauseInk.height && playInk.height <= pauseInk.height + 2 * pixel + 1, qPrintable(both));
+    // Optically centred: its ink starts where Pause's does, so it reaches
+    // further right, and its box sits right of Pause's centre by about a
+    // pixel (centred on the glyph's box, the triangle's weight, at its flat
+    // side, sat left of it, nearer Previous than Stop).
+    QCOMPARE(playInk.left, pauseInk.left);
+    const qreal offset = (playInk.left + playInk.right) / 2.0 - (pauseInk.left + pauseInk.right) / 2.0;
+    QVERIFY2(offset >= 0.25 * pixel && offset <= 1.5 * pixel, qPrintable(both));
+    // Stop, a 10 px square, has no more ink than Play beside it, give or
+    // take the triangle's soft edges, and less than Pause (as a 12 px square
+    // it matched Pause and outweighed Play by half).
+    const int stop = inks.value(QStringLiteral("stop")).pixels;
+    QVERIFY2(stop * 100 <= playInk.pixels * 105 && stop < inks.value(QStringLiteral("pause")).pixels,
+             qPrintable(QStringLiteral("Stop %1 px of ink, Play %2, Pause %3")
+                            .arg(stop).arg(playInk.pixels).arg(inks.value(QStringLiteral("pause")).pixels)));
 }
 
 void TransportStatusTest::transportButtonsDrawTheAppsFocusRing_data() {
@@ -1556,6 +2307,138 @@ void TransportStatusTest::seekWithoutATrackIsALineAndNoTime() {
     QVERIFY(!seek->isEnabled());
 }
 
+void TransportStatusTest::seekStoppedWithATrackKeepsItsLengthAndWaveform_data() {
+    addThemeRows();
+}
+
+// Stopped with a track loaded is not the empty transport (it was drawn as
+// one): the track's length stays, in the secondary colour, and its waveform
+// in the unplayed tone, with no playhead and no amber. It does not seek, as
+// before.
+void TransportStatusTest::seekStoppedWithATrackKeepsItsLengthAndWaveform() {
+    QFETCH(bool, dark);
+    Harness harness;
+    QVERIFY2(harness.load(breeze(dark)), qPrintable(harness.error));
+    QObject *bridge = harness.bridge;
+    bridge->setProperty("currentTrackPath", QStringLiteral("/music/track.flac"));
+    bridge->setProperty("queueLength", 1);
+    bridge->setProperty("waveformPeaksPacked", fullScalePeaks());
+    bridge->setProperty("waveformCoverageSeconds", 229.0);
+    bridge->setProperty("waveformComplete", true);
+    QQuickItem *time = harness.item(QStringLiteral("transportTime"));
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QQuickItem *waveform = harness.item(QStringLiteral("seekWaveform"));
+    QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
+    QVERIFY(time && seek && waveform && transport);
+    QTRY_VERIFY(waveform->isVisible());
+    const QRectF timeRect = sceneRect(time);
+
+    bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    QCOMPARE(time->property("text").toString(), QStringLiteral("–:–– / 3:49"));
+    for (const char *part : {"transportTimePosition", "transportTimeLength"}) {
+        QVERIFY(sameColor(harness.item(QString::fromLatin1(part))->property("color").value<QColor>(),
+                          harness.token("textSecondary")));
+    }
+    QCOMPARE(sceneRect(time), timeRect);
+    QVERIFY(waveform->isVisible());
+    QVERIFY(!harness.item(QStringLiteral("seekPlayhead"))->isVisible());
+    QVERIFY(!harness.item(QStringLiteral("seekEmptyLine"))->isVisible());
+    QVERIFY(!seek->isEnabled());
+
+    // As drawn: the unplayed tone from the bar's first pixel to its last,
+    // and nowhere the amber.
+    const QColor chrome = harness.transportChrome();
+    const QColor unplayed = mixed(chrome, transport->property("seekPlayedColor").value<QColor>(),
+                                  transport->property("seekUnplayedOpacity").toDouble());
+    const QRectF bar = sceneRect(seek);
+    qreal scale = 1;
+    const auto allUnplayed = [&]() {
+        const QImage image = grabbed(harness.window, &scale);
+        for (qreal x = bar.left() + 0.5; x < std::floor(bar.right()); x += 1.0) {
+            const QColor pixel = pixelAt(image, QPointF(x, std::floor(bar.center().y()) + 0.5), scale);
+            if (channelDistance(pixel, unplayed) > 3) {
+                return false;
+            }
+        }
+        return true;
+    };
+    QTRY_VERIFY(allUnplayed());
+
+    // Stopped with no length of its own yet, as after a start: the queue's
+    // length for it, and dashes when that has none either.
+    bridge->setProperty("durationSeconds", 0.0);
+    bridge->setProperty("durationText", QStringLiteral("00:00"));
+    bridge->setProperty("playingQueueLengthText", QStringLiteral("4:05"));
+    QCOMPARE(time->property("text").toString(), QStringLiteral("–:–– / 4:05"));
+    bridge->setProperty("playingQueueLengthText", QString());
+    QCOMPARE(time->property("text").toString(), QStringLiteral("–:–– / –:––"));
+
+    // No track, or an empty queue: the hairline and dashes.
+    bridge->setProperty("durationSeconds", 229.0);
+    bridge->setProperty("durationText", QStringLiteral("03:49"));
+    bridge->setProperty("playingQueueLengthText", QStringLiteral("3:49"));
+    for (const bool noPath : {false, true}) {
+        bridge->setProperty("queueLength", noPath ? 1 : 0);
+        bridge->setProperty("currentTrackPath", noPath ? QString() : QStringLiteral("/music/track.flac"));
+        QCOMPARE(time->property("text").toString(), QStringLiteral("–:–– / –:––"));
+        QVERIFY(!waveform->isVisible());
+        QVERIFY(harness.item(QStringLiteral("seekEmptyLine"))->isVisible());
+        QVERIFY(!harness.item(QStringLiteral("seekUnplayed"))->isVisible());
+    }
+}
+
+// A track made current while stopped has no waveform held: the bridge keeps
+// the peaks of the track before until the new one's come, with no coverage.
+void TransportStatusTest::seekStoppedShowsNoOtherTracksWaveform() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QObject *bridge = harness.bridge;
+    bridge->setProperty("currentTrackPath", QStringLiteral("/music/first.flac"));
+    bridge->setProperty("queueLength", 2);
+    bridge->setProperty("waveformPeaksPacked", fullScalePeaks());
+    bridge->setProperty("waveformCoverageSeconds", 137.0);
+    bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    QQuickItem *waveform = harness.item(QStringLiteral("seekWaveform"));
+    QQuickItem *emptyLine = harness.item(QStringLiteral("seekEmptyLine"));
+    QVERIFY(waveform && emptyLine);
+    // What was decoded of a track stopped early is held.
+    QVERIFY(waveform->isVisible());
+    bridge->setProperty("currentTrackPath", QStringLiteral("/music/second.flac"));
+    bridge->setProperty("waveformCoverageSeconds", 0.0);
+    bridge->setProperty("durationSeconds", 0.0);
+    QVERIFY(!waveform->isVisible());
+    QVERIFY(emptyLine->isVisible());
+}
+
+// Gapless and Repeat One never stop, so they never take the stopped look:
+// the playhead and the position stay, also for the moment without a length
+// and peaks.
+void TransportStatusTest::transportStaysTheTrackThroughATrackChange() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QObject *bridge = harness.bridge;
+    bridge->setProperty("currentTrackPath", QStringLiteral("/music/first.flac"));
+    bridge->setProperty("queueLength", 2);
+    QQuickItem *time = harness.item(QStringLiteral("transportTime"));
+    QQuickItem *playhead = harness.item(QStringLiteral("seekPlayhead"));
+    QVERIFY(time && playhead);
+    // The next track, then the same again as Repeat One plays it.
+    for (int change = 0; change < 2; ++change) {
+        bridge->setProperty("currentTrackPath", QStringLiteral("/music/second.flac"));
+        bridge->setProperty("durationSeconds", 0.0);
+        bridge->setProperty("waveformCoverageSeconds", 0.0);
+        bridge->setProperty("playingQueueLengthText", QStringLiteral("4:05"));
+        harness.root->setProperty("positionText", QStringLiteral("00:00"));
+        QVERIFY(playhead->isVisible());
+        QCOMPARE(time->property("text").toString(), QStringLiteral("0:00 / –:––"));
+        QVERIFY(sameColor(harness.item(QStringLiteral("transportTimePosition"))->property("color").value<QColor>(),
+                          harness.token("text")));
+        bridge->setProperty("durationSeconds", 245.0);
+        bridge->setProperty("durationText", QStringLiteral("04:05"));
+        QCOMPARE(time->property("text").toString(), QStringLiteral("0:00 / 4:05"));
+    }
+}
+
 void TransportStatusTest::seekEmptyLineRunsPastAnEarlyEndingWaveform_data() {
     addThemeRows();
 }
@@ -1632,6 +2515,124 @@ void TransportStatusTest::seekEmptyLineRunsPastAnEarlyEndingWaveform() {
     QColor wholeLine;
     QTRY_VERIFY2(lineRunsTo(bar.left() + 4, &wholeLine, &why), qPrintable(why));
     QVERIFY2(channelDistance(wholeLine, line) <= 2, qPrintable(wholeLine.name() + QLatin1Char(' ') + line.name()));
+}
+
+void TransportStatusTest::seekMarksWhereTheFileEnds_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("breeze dark") << true << 10.0;
+    QTest::newRow("breeze light") << false << 10.0;
+    QTest::newRow("breeze dark, 24 pt") << true << 24.0;
+}
+
+// A file known to end early has the status bar's warning sign on its
+// waveform at the cut, under the playhead, and the seek bar's description
+// says where it ends (the waveform only stopped, with nothing to tell why).
+void TransportStatusTest::seekMarksWhereTheFileEnds() {
+    QFETCH(bool, dark);
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    Harness harness;
+    QVERIFY2(harness.load(breeze(dark)), qPrintable(harness.error));
+    QObject *bridge = harness.bridge;
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QQuickItem *mark = harness.item(QStringLiteral("seekEndsEarlyMark"));
+    QVERIFY(seek && mark);
+    bridge->setProperty("waveformPeaksPacked", fullScalePeaks());
+    bridge->setProperty("waveformCoverageSeconds", 137.0);
+    // A waveform still being analysed is no cut.
+    QVERIFY(!mark->isVisible());
+    bridge->setProperty("waveformEndsEarly", true);
+    QTRY_VERIFY(mark->isVisible());
+    const QRectF bar = sceneRect(seek);
+    const QRectF markRect = sceneRect(mark);
+    QVERIFY2(std::abs(markRect.center().x() - (bar.left() + 137.0 / 229.0 * std::floor(bar.width()))) <= 1.0,
+             qPrintable(describeRect(markRect)));
+    QVERIFY2(within(markRect, bar), qPrintable(describeRect(markRect)));
+    QCOMPARE(markRect.width(), std::round(16.0 * pointSize / 10.0));
+    // The gap is the waveform's height, with no slivers of it by the sign.
+    const QRectF wave = sceneRect(harness.item(QStringLiteral("seekWaveform")));
+    QCOMPARE(markRect.top(), wave.top());
+    QCOMPARE(markRect.height(), wave.height());
+    QCOMPARE(markRect.topLeft(), QPointF(std::round(markRect.left()), std::round(markRect.top())));
+    QQuickItem *glyph = harness.item(QStringLiteral("seekEndsEarlyGlyph"));
+    QVERIFY(glyph != nullptr);
+    QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("status-warning.svg")));
+    QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
+    QVERIFY2(contrastRatio(harness.token("textSecondary"), harness.transportChrome()) >= 3.0, "the mark on the chrome");
+    // Under the playhead, over the waveform and its unplayed cover.
+    QQuickItem *playhead = harness.item(QStringLiteral("seekPlayhead"));
+    const QList<QQuickItem *> layers = playhead->parentItem()->childItems();
+    QVERIFY(layers.indexOf(harness.item(QStringLiteral("seekUnplayed"))) < layers.indexOf(mark));
+    QVERIFY(layers.indexOf(mark) < layers.indexOf(playhead));
+    QCOMPARE(accessibleText(seek, QAccessible::Description), QStringLiteral("1:17 of 3:49. The file ends at 2:17."));
+
+    // At the bar's very end it stays on the bar.
+    bridge->setProperty("waveformCoverageSeconds", 228.9);
+    QVERIFY(within(sceneRect(mark), bar));
+    // Paused keeps it. The next track's, without a cut, has neither.
+    bridge->setProperty("playbackState", QStringLiteral("Paused"));
+    QVERIFY(mark->isVisible());
+    bridge->setProperty("waveformEndsEarly", false);
+    QVERIFY(!mark->isVisible());
+    QTRY_COMPARE(accessibleText(seek, QAccessible::Description), QStringLiteral("1:17 of 3:49"));
+    // Without a length or peaks the cut has no place on the bar.
+    bridge->setProperty("waveformEndsEarly", true);
+    bridge->setProperty("durationSeconds", 0.0);
+    QVERIFY(!mark->isVisible());
+    bridge->setProperty("durationSeconds", 229.0);
+    bridge->setProperty("waveformPeaksPacked", QByteArray());
+    QVERIFY(!mark->isVisible());
+}
+
+void TransportStatusTest::seekEndsEarlyMarkIsItsIssuesWarning_data() {
+    seekMarksWhereTheFileEnds_data();
+    QTest::newRow("breeze light, 24 pt") << false << 24.0;
+}
+
+// One issue has one severity wherever it shows. A file that ends early is
+// a playback warning (file_ends_early in src/frontend_bridge/events.rs):
+// the seek bar's mark at the cut is the warning's triangle in the
+// secondary colour, as the status bar shows that issue while it is new.
+// The mark was red, an error's colour, beside the status bar's grey
+// triangle for the same issue. A new error elsewhere turns the status bar
+// red but leaves the mark a warning: it follows its own issue.
+void TransportStatusTest::seekEndsEarlyMarkIsItsIssuesWarning() {
+    QFETCH(bool, dark);
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    Harness harness;
+    QVERIFY2(harness.load(breeze(dark)), qPrintable(harness.error));
+    QObject *bridge = harness.bridge;
+    QQuickItem *mark = harness.item(QStringLiteral("seekEndsEarlyMark"));
+    QQuickItem *markGlyph = harness.item(QStringLiteral("seekEndsEarlyGlyph"));
+    QQuickItem *statusGlyph = harness.item(QStringLiteral("statusBarErrorsGlyph"));
+    QVERIFY(mark && markGlyph && statusGlyph);
+    bridge->setProperty("waveformPeaksPacked", fullScalePeaks());
+    bridge->setProperty("waveformCoverageSeconds", 137.0);
+    bridge->setProperty("waveformEndsEarly", true);
+    // The issue the bridge reports with it: a playback warning.
+    QVERIFY(harness.reportIssue(1, 0, QStringLiteral("The file ends early.")));
+    QTRY_VERIFY(mark->isVisible() && statusGlyph->isVisible());
+    const QString markSource = markGlyph->property("source").toString();
+    const QColor markColor = markGlyph->property("color").value<QColor>();
+    QVERIFY2(markSource.endsWith(QStringLiteral("status-warning.svg")), qPrintable(markSource));
+    QCOMPARE(markSource, statusGlyph->property("source").toString());
+    QVERIFY2(sameColor(markColor, statusGlyph->property("color").value<QColor>()), qPrintable(markColor.name()));
+    QVERIFY2(sameColor(markColor, harness.token("textSecondary")), qPrintable(markColor.name()));
+    QVERIFY(!sameColor(markColor, harness.token("negative")));
+    // 3:1 on the gap it stands in, which is the transport's chrome.
+    QVERIFY(sameColor(mark->property("color").value<QColor>(), harness.transportChrome()));
+    QVERIFY2(contrastRatio(markColor, harness.transportChrome()) >= 3.0,
+             qPrintable(describeContrast(QStringLiteral("ends-early mark"), markColor, harness.transportChrome())));
+
+    // A new error: the status bar's ring with a cross in red; the mark is
+    // still its own issue's warning.
+    QVERIFY(harness.reportIssue(1, 1, QStringLiteral("Playback stopped.")));
+    QTRY_VERIFY(statusGlyph->property("source").toString().endsWith(QStringLiteral("status-error.svg")));
+    QVERIFY(sameColor(statusGlyph->property("color").value<QColor>(), harness.token("negative")));
+    QCOMPARE(markGlyph->property("source").toString(), markSource);
+    QVERIFY(sameColor(markGlyph->property("color").value<QColor>(), markColor));
 }
 
 // #541: a clip of a second or less has a length, so the playhead is drawn
@@ -1823,6 +2824,59 @@ void TransportStatusTest::timeReadoutShowsPositionAndLength() {
     QTRY_VERIFY(time->width() >= time->childItems().first()->implicitWidth());
 }
 
+// While a drag or held keys move the playhead, the readout shows the
+// gesture's second, as the playhead and its time box do (it kept playback's,
+// 0:09 beside a box and a playhead at 1:43); at the release playback's
+// takes over at once, with no frame of the gesture's left.
+void TransportStatusTest::timeReadoutFollowsTheSeekGesture() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QQuickItem *position = harness.item(QStringLiteral("transportTimePosition"));
+    QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("seekTimeBox"));
+    QVERIFY(seek && position && tip);
+    QCOMPARE(position->property("text").toString(), QStringLiteral("1:17"));
+    const auto clock = [](double seconds) {
+        const int second = int(std::floor(seconds));
+        return QStringLiteral("%1:%2").arg(second / 60).arg(second % 60, 2, 10, QLatin1Char('0'));
+    };
+
+    // A drag: the readout is the box's time, in the text colour, at every
+    // move.
+    const QRectF bar = sceneRect(seek);
+    const int y = qRound(bar.center().y());
+    const auto at = [&bar, y](double fraction) { return QPoint(qRound(bar.left() + fraction * bar.width()), y); };
+    QTest::mouseMove(harness.window, at(0.1));
+    QTest::mousePress(harness.window, Qt::LeftButton, Qt::NoModifier, at(0.1));
+    for (const double fraction : {0.2, 0.35, 0.46}) {
+        QTest::mouseMove(harness.window, at(fraction));
+        const double gesture = seek->property("gestureValue").toDouble();
+        QVERIFY(std::isfinite(gesture));
+        QCOMPARE(position->property("text").toString(), clock(gesture));
+        QTRY_COMPARE(tip->property("text").toString(), clock(gesture));
+    }
+    QVERIFY(position->property("text").toString() != QStringLiteral("1:17"));
+    QVERIFY(sameColor(position->property("color").value<QColor>(), harness.token("text")));
+    // The release seeks, and playback's position is the readout's at once.
+    QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, at(0.46));
+    QCOMPARE(seeksOf(harness).size(), 1);
+    QCOMPARE(position->property("text").toString(), QStringLiteral("1:17"));
+
+    // Held keys: each step's time while held, playback's at the release.
+    seek->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyPress(harness.window, Qt::Key_Right);
+    QVERIFY(seek->property("adjusting").toBool());
+    QCOMPARE(position->property("text").toString(), QStringLiteral("1:22"));
+    QTest::keyPress(harness.window, Qt::Key_Right, Qt::NoModifier);
+    QCOMPARE(position->property("text").toString(), QStringLiteral("1:27"));
+    QTest::keyRelease(harness.window, Qt::Key_Right);
+    QVERIFY(!seek->property("adjusting").toBool());
+    QCOMPARE(seeksOf(harness).size(), 2);
+    QCOMPARE(seeksOf(harness).last().toDouble(), 87.0);
+    harness.root->setProperty("positionText", QStringLiteral("01:27"));
+    QCOMPARE(position->property("text").toString(), QStringLiteral("1:27"));
+}
+
 void TransportStatusTest::volumeDrawsGrooveHoverAndFocus_data() {
     addThemeRows();
 }
@@ -1830,8 +2884,11 @@ void TransportStatusTest::volumeDrawsGrooveHoverAndFocus_data() {
 // The volume slider in the seek bar's language: a 3 px groove, filled up to
 // the thumb in the seek bar's played colour and the rest in its unplayed
 // one, opaque, and a solid 12 px thumb in the played colour, centred on the
-// groove. Hover brightens the thumb to the text colour and shows
-// "Volume 80%"; keyboard focus draws a 2 px ring around the thumb.
+// groove. Hover and a drag show the thumb in its active colour, a clear
+// step from it at rest in either theme: the text colour on dark, and on
+// light, where the text was all but the played colour (1.2:1), the accent
+// as the focus ring draws it. Hover shows "Volume 80%"; keyboard focus
+// draws a 2 px ring around the thumb.
 void TransportStatusTest::volumeDrawsGrooveHoverAndFocus() {
     QFETCH(bool, dark);
     Harness harness;
@@ -1876,15 +2933,36 @@ void TransportStatusTest::volumeDrawsGrooveHoverAndFocus() {
     QVERIFY(channelDistance(pixelAt(image, QPointF(sceneRect(groove).left() + 2, sceneRect(groove).center().y()), scale),
                             played) <= 2);
 
-    // Hover brightens the thumb and shows "Volume 80%".
+    // The active colour: a clear step from the thumb at rest, and at
+    // least 3:1 on the chrome.
+    const QColor active = transport->property("volumeThumbActiveColor").value<QColor>();
+    QVERIFY(sameColor(active, harness.token(dark ? "text" : "focusRing")));
+    const QString step = describeContrast(QStringLiteral("active"), active, restFill)
+        + describeContrast(QStringLiteral(", on the chrome"), active, chrome);
+    // Apart by at least 60 in a channel: on light the text colour was 47
+    // from the played colour, which a hover then barely changed.
+    QVERIFY2(channelDistance(active, restFill) >= 60, qPrintable(step));
+    QVERIFY2(contrastRatio(active, chrome) >= 3.0, qPrintable(step));
+
+    // Hover shows the thumb in it and shows "Volume 80%".
     showToolTipsAtOnce(volume);
     SteppedAnimationDriver animations;
     QTest::mouseMove(harness.window, sceneCentre(volume));
     QVERIFY(volume->property("hovered").toBool());
-    QVERIFY(stepUntil(animations, [&] { return sameColor(thumb->property("color").value<QColor>(), harness.token("text")); }));
+    QVERIFY(stepUntil(animations, [&] { return sameColor(thumb->property("color").value<QColor>(), active); }));
     QCOMPARE(tip->property("text").toString(), QStringLiteral("Volume 80%"));
     QVERIFY(stepUntil(animations, [&] { return tip->property("visible").toBool(); }));
     QVERIFY(!ring->isVisible());
+    // As drawn, and through a drag.
+    QVERIFY(channelDistance(pixelAt(grabbed(harness.window, &scale), sceneRect(thumb).center(), scale), active) <= 2);
+    QTest::mousePress(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(thumb));
+    QVERIFY(volume->property("pressed").toBool());
+    QTest::mouseMove(harness.window, sceneCentre(thumb) - QPoint(6, 0));
+    QVERIFY(sameColor(thumb->property("color").value<QColor>(), active));
+    QVERIFY(channelDistance(pixelAt(grabbed(harness.window, &scale), sceneRect(thumb).center(), scale), active) <= 2);
+    QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(thumb));
+    harness.bridge->setProperty("volume", 0.8);
+    QTRY_COMPARE(volume->property("value").toDouble(), 80.0);
 
     // Away, the thumb is at rest again; keyboard focus draws a 2 px ring
     // around it and shows the tooltip too.
@@ -1944,6 +3022,40 @@ void TransportStatusTest::volumeGrooveGrowsWithTheThumb() {
     auto *background = volume->property("background").value<QQuickItem *>();
     QVERIFY(background != nullptr);
     QCOMPARE(background->width(), expectedWidth);
+}
+
+void TransportStatusTest::muteButtonIsClearOfTheVolumeGroove_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The mute button's hover fill and its focus ring are clear of the volume's
+// groove, also of the thumb's ring at no volume (the fill butted against the
+// groove, which was drawn through the ring).
+void TransportStatusTest::muteButtonIsClearOfTheVolumeGroove() {
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *mute = harness.item(QStringLiteral("muteButton"));
+    QQuickItem *volume = harness.item(QStringLiteral("volumeSlider"));
+    QQuickItem *groove = harness.item(QStringLiteral("volumeGroove"));
+    QQuickItem *thumb = harness.item(QStringLiteral("volumeThumb"));
+    QVERIFY(mute && volume && groove && thumb);
+    QQuickItem *ring = itemNamed(mute, QStringLiteral("transportButtonFocusRing"));
+    QQuickItem *fill = itemNamed(mute, QStringLiteral("transportButtonHover"));
+    QVERIFY(ring && fill);
+    mute->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(ring->isVisible());
+    QVERIFY2(sceneRect(groove).left() - sceneRect(ring).right() >= 3.0,
+             qPrintable(describeRect(sceneRect(ring)) + QLatin1Char(' ') + describeRect(sceneRect(groove))));
+    QVERIFY(sceneRect(groove).left() - sceneRect(fill).right() >= 6.0);
+    harness.bridge->setProperty("volume", 0.0);
+    volume->forceActiveFocus(Qt::TabFocusReason);
+    QQuickItem *thumbRing = harness.item(QStringLiteral("volumeFocusRing"));
+    QTRY_VERIFY(thumbRing->isVisible());
+    QVERIFY(sceneRect(thumbRing).left() >= sceneRect(fill).right());
 }
 
 void TransportStatusTest::previousGlyphStartsOnTheContentEdge_data() {
@@ -2043,7 +3155,7 @@ void TransportStatusTest::volumeMuteKeepsTheThumb_data() {
 // to 0), dims the filled groove and the thumb at rest to the unfilled
 // colour together, over the same fade (the thumb stayed bright), and shows
 // the muted glyph; the tooltip says so. A hover still shows the thumb in
-// the text colour. Unmuting brings both back.
+// its active colour. Unmuting brings both back.
 void TransportStatusTest::volumeMuteKeepsTheThumb() {
     QFETCH(bool, dark);
     Harness harness;
@@ -2102,10 +3214,11 @@ void TransportStatusTest::volumeMuteKeepsTheThumb() {
     QCOMPARE(tip->property("text").toString(), QStringLiteral("Volume 80%, muted"));
     QCOMPARE(accessibleText(volume, QAccessible::Description), QStringLiteral("80%"));
 
-    // A hover shows the thumb in the text colour while muted too, and the
-    // fill stays dim.
+    // A hover shows the thumb in its active colour while muted too, and
+    // the fill stays dim.
     QTest::mouseMove(harness.window, sceneCentre(thumb));
-    QVERIFY(stepUntil(animations, [&] { return sameColor(colorOf(thumb), harness.token("text")); }));
+    const QColor active = transport->property("volumeThumbActiveColor").value<QColor>();
+    QVERIFY(stepUntil(animations, [&] { return sameColor(colorOf(thumb), active); }));
     QVERIFY(sameColor(colorOf(fill), unfilled));
     QTest::mouseMove(harness.window, sceneCentre(mute));
     QVERIFY(stepUntil(animations, [&] { return sameColor(colorOf(thumb), unfilled); }));
@@ -2163,6 +3276,38 @@ void TransportStatusTest::volumeToolTipFollowsTheDrag() {
     QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, end);
 }
 
+// A press on the volume shows its tooltip at once, also while a hover's
+// delay is still waiting (it waited the delay out, so a quick drag showed
+// no volume).
+void TransportStatusTest::volumeToolTipShowsAtOnceOnAPress() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *volume = harness.item(QStringLiteral("volumeSlider"));
+    QQuickItem *thumb = harness.item(QStringLiteral("volumeThumb"));
+    QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("volumeToolTip"));
+    QVERIFY(volume && thumb && tip);
+    Kirigami::Platform::Units *units = unitsOf(volume);
+    QVERIFY(units != nullptr);
+    // A delay that the press comes well within.
+    units->setToolTipDelay(5000);
+    const QPoint at = sceneCentre(thumb);
+    QTest::mouseMove(harness.window, at);
+    QTRY_VERIFY(volume->property("hovered").toBool());
+    QTest::qWait(30);
+    QVERIFY(!tip->property("opened").toBool());
+    QTest::mousePress(harness.window, Qt::LeftButton, Qt::NoModifier, at);
+    QVERIFY(volume->property("pressed").toBool());
+    QTRY_VERIFY_WITH_TIMEOUT(tip->property("opened").toBool(), 2000);
+    QCOMPARE(tip->property("text").toString(),
+             QStringLiteral("Volume %1%").arg(std::lround(volume->property("value").toDouble())));
+    QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, at);
+    // Let go and still over the slider, it stays, as a hover's.
+    QVERIFY(tip->property("visible").toBool());
+    // Off the slider, it goes.
+    QTest::mouseMove(harness.window, QPoint(at.x(), at.y() + 80));
+    QTRY_VERIFY(!tip->property("visible").toBool());
+}
+
 void TransportStatusTest::statusBarShowsTheNeutralPlaybackState() {
     Harness harness;
     QVERIFY2(harness.load(), qPrintable(harness.error));
@@ -2200,6 +3345,31 @@ void TransportStatusTest::statusBarShowsTheNeutralPlaybackState() {
     QVERIFY(sameColor(label->property("color").value<QColor>(), harness.token("textSecondary")));
 }
 
+// Breeze draws Repeat and Shuffle for 16 px: they are drawn at that, on
+// whole pixels (at 14 px their lines were soft and half as bright as the
+// words beside them).
+void TransportStatusTest::statusBarModeGlyphsAreDrawnAtTheirSize() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *repeat = harness.item(QStringLiteral("statusBarRepeatGlyph"));
+    QQuickItem *shuffle = harness.item(QStringLiteral("statusBarShuffleGlyph"));
+    QVERIFY(shuffle != nullptr);
+    QCOMPARE(shuffle->size(), QSizeF(16, 16));
+    QVERIFY(repeat != nullptr);
+    QCOMPARE(repeat->size(), QSizeF(16, 16));
+    harness.bridge->setProperty("shuffleEnabled", true);
+    for (const int mode : {1, 2}) {
+        harness.bridge->setProperty("repeatMode", mode);
+        qreal scale = 1;
+        grabbed(harness.window, &scale);
+        for (QQuickItem *glyph : {repeat, shuffle}) {
+            const QPointF at = sceneRect(glyph).topLeft();
+            QVERIFY2(std::abs(at.x() - std::round(at.x())) < 0.01 && std::abs(at.y() - std::round(at.y())) < 0.01,
+                     qPrintable(QStringLiteral("%1 at %2,%3").arg(glyph->objectName()).arg(at.x()).arg(at.y())));
+        }
+    }
+}
+
 void TransportStatusTest::statusBarShowsRepeatAndShuffleInWords() {
     Harness harness;
     QVERIFY2(harness.load(), qPrintable(harness.error));
@@ -2209,16 +3379,21 @@ void TransportStatusTest::statusBarShowsRepeatAndShuffleInWords() {
     QQuickItem *shuffleGlyph = harness.item(QStringLiteral("statusBarShuffleGlyph"));
     QQuickItem *shuffleLabel = harness.item(QStringLiteral("statusBarShuffleLabel"));
     QQuickItem *repeatGlyph = nullptr;
+    QQuickItem *format = harness.item(QStringLiteral("statusBarFormat"));
     QQuickItem *state = harness.item(QStringLiteral("statusBarPlaybackState"));
-    QVERIFY(group && repeat && shuffle && shuffleGlyph && shuffleLabel && state);
+    QVERIFY(group && repeat && shuffle && shuffleGlyph && shuffleLabel && state && format);
     // Off: nothing.
     QVERIFY(!group->isVisible());
     harness.bridge->setProperty("repeatMode", 1);
     QTRY_VERIFY(repeat->isVisible());
     QCOMPARE(repeat->property("text").toString(), QStringLiteral("Repeat One Track"));
     QVERIFY(!shuffle->isVisible());
-    // 16 px after the playback state.
+    // 16 px after the format, or after the playback state without one.
+    QTRY_COMPARE(sceneRect(group).left(), sceneRect(format).right() + 16.0);
+    harness.bridge->setProperty("playbackState", QStringLiteral("Stopped"));
     QTRY_COMPARE(sceneRect(group).left(), sceneRect(state).right() + 16.0);
+    harness.bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QTRY_COMPARE(sceneRect(group).left(), sceneRect(format).right() + 16.0);
     harness.bridge->setProperty("repeatMode", 2);
     QCOMPARE(repeat->property("text").toString(), QStringLiteral("Repeat Whole Queue"));
     // Shuffle as repeat is (it was a glyph alone, named only in its
@@ -2247,7 +3422,7 @@ void TransportStatusTest::statusBarShowsRepeatAndShuffleInWords() {
     harness.bridge->setProperty("repeatMode", 0);
     QTRY_VERIFY(!repeat->isVisible());
     QVERIFY(group->isVisible() && shuffle->isVisible());
-    QTRY_COMPARE(sceneRect(group).left(), sceneRect(state).right() + 16.0);
+    QTRY_COMPARE(sceneRect(group).left(), sceneRect(format).right() + 16.0);
     QTRY_COMPARE(sceneRect(shuffle).left(), sceneRect(group).left());
 }
 
@@ -2350,6 +3525,234 @@ void TransportStatusTest::statusBarFormatShowsWhatFitsWhole() {
     QTRY_COMPARE(format->property("text").toString(), parts.join(separator));
 }
 
+void TransportStatusTest::statusBarFormatKeepsItsPlace_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The format keeps one x as Repeat and Shuffle toggle, after the playback
+// state, and the modes follow it at an x a changing bitrate moves only
+// when it has more digits than it has had in the track, and never back
+// while the track plays (the format jumped some 210 px with the modes).
+// Where there is too little room, the format gives its parts up and the
+// modes stay whole.
+void TransportStatusTest::statusBarFormatKeepsItsPlace() {
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    Harness harness;
+    QVERIFY2(harness.load(kBreezeDark, 2400), qPrintable(harness.error));
+    QQuickItem *format = harness.item(QStringLiteral("statusBarFormat"));
+    QQuickItem *row = harness.item(QStringLiteral("statusBarFormatRow"));
+    QQuickItem *modes = harness.item(QStringLiteral("statusBarRepeatShuffle"));
+    QQuickItem *state = harness.item(QStringLiteral("statusBarPlaybackState"));
+    QQuickItem *status = harness.item(QStringLiteral("statusBar"));
+    QVERIFY(format && row && modes && state && status);
+    QObject *bridge = harness.bridge;
+    qreal scale = 1;
+    const auto laidOut = [&]() { grabbed(harness.window, &scale); };
+    laidOut();
+    const qreal formatLeft = sceneRect(row).left();
+    QCOMPARE(formatLeft, sceneRect(state).right() + 16.0);
+    for (const auto &[repeat, shuffle] :
+         {std::pair{1, false}, std::pair{2, true}, std::pair{0, true}, std::pair{1, true}, std::pair{0, false}}) {
+        bridge->setProperty("repeatMode", repeat);
+        bridge->setProperty("shuffleEnabled", shuffle);
+        laidOut();
+        QCOMPARE(sceneRect(row).left(), formatLeft);
+        if (modes->isVisible()) {
+            QVERIFY2(sceneRect(modes).left() >= sceneRect(row).right() + 15.5,
+                     qPrintable(describeRect(sceneRect(modes))));
+        }
+    }
+    bridge->setProperty("repeatMode", 2);
+    laidOut();
+    const qreal modesLeft = sceneRect(modes).left();
+    // It follows the format, and is not at the bar's other end.
+    QVERIFY(modesLeft - sceneRect(row).right() < 16.0 + 2 * pointSize * 2);
+    for (const int kbps : {64, 320, 999}) {
+        bridge->setProperty("currentTrackCurrentBitrateKbps", kbps);
+        laidOut();
+        QCOMPARE(sceneRect(modes).left(), modesLeft);
+        QCOMPARE(sceneRect(row).left(), formatLeft);
+    }
+    // Four digits: the modes step once, by about a figure's width, and
+    // hold there for the rest of the track, back under 1,000 too.
+    bridge->setProperty("currentTrackCurrentBitrateKbps", 1411);
+    laidOut();
+    const qreal fourDigitModesLeft = sceneRect(modes).left();
+    QVERIFY2(fourDigitModesLeft > modesLeft && fourDigitModesLeft - modesLeft < 1.5 * pointSize,
+             qPrintable(QStringLiteral("%1 to %2").arg(modesLeft).arg(fourDigitModesLeft)));
+    for (const int kbps : {9216, 987, 64, 1000}) {
+        bridge->setProperty("currentTrackCurrentBitrateKbps", kbps);
+        laidOut();
+        QCOMPARE(sceneRect(modes).left(), fourDigitModesLeft);
+        QCOMPARE(sceneRect(row).left(), formatLeft);
+    }
+    // A new track starts from its own bitrate's digits.
+    bridge->setProperty("currentTrackCurrentBitrateKbps", 557);
+    bridge->setProperty("currentTrackPath", QStringLiteral("/music/next.flac"));
+    laidOut();
+    QCOMPARE(sceneRect(modes).left(), modesLeft);
+    bridge->setProperty("currentTrackCurrentBitrateKbps", 1000);
+
+    // With less room than both take, the modes stay whole and in the bar.
+    const int narrow = int(std::ceil(sceneRect(state).right() + 16 + modes->width() + 40));
+    harness.window->setWidth(narrow);
+    QTRY_COMPARE(status->width(), qreal(narrow));
+    laidOut();
+    QVERIFY2(sceneRect(modes).right() <= sceneRect(status).right() + 0.5, qPrintable(describeRect(sceneRect(modes))));
+    QVERIFY(row->implicitWidth() <= format->width() + 0.5);
+    QVERIFY(format->property("text").toString() != QStringLiteral("FLAC · 16-bit / 44.1 kHz · Stereo · 1000 kbps"));
+
+    // Where only some of the format fits, the modes follow what is shown,
+    // with no hole where the parts that were dropped would be.
+    QSet<qsizetype> shown;
+    for (int width = 2400; width >= narrow; width -= 23) {
+        harness.window->setWidth(width);
+        QTRY_COMPARE(status->width(), qreal(width));
+        laidOut();
+        QVERIFY2(sceneRect(modes).right() <= sceneRect(status).right() + 0.5, qPrintable(QString::number(width)));
+        const QString text = format->property("text").toString();
+        if (text.isEmpty() || text.contains(QStringLiteral("kbps"))) {
+            continue;
+        }
+        shown.insert(text.size());
+        QVERIFY2(sceneRect(modes).left() - sceneRect(row).right() >= 12.0
+                     && sceneRect(modes).left() - sceneRect(row).right() <= 20.0,
+                 qPrintable(QStringLiteral("%1 px after \"%2\" at %3")
+                                .arg(sceneRect(modes).left() - sceneRect(row).right()).arg(text).arg(width)));
+    }
+    QVERIFY(!shown.isEmpty());
+
+    // With room for the modes alone, they take the format's place, with no
+    // gap kept for it to push the bar's right end out of the window.
+    const int tight = int(std::ceil(formatLeft + modes->width())) + 8;
+    harness.window->setWidth(tight);
+    QTRY_COMPARE(status->width(), qreal(tight));
+    laidOut();
+    QCOMPARE(format->property("text").toString(), QString());
+    QCOMPARE(sceneRect(modes).left(), formatLeft);
+    auto *content = status->property("contentItem").value<QQuickItem *>();
+    QVERIFY(content != nullptr);
+    QVERIFY2(content->implicitWidth() > 0 && sceneRect(modes).right() <= sceneRect(content).right() + 0.5,
+             qPrintable(describeRect(sceneRect(modes))));
+    QVERIFY2(modes->parentItem()->width() >= modes->width()
+                 && modes->parentItem()->width() < modes->width() + 16,
+             qPrintable(QString::number(modes->parentItem()->width())));
+}
+
+void TransportStatusTest::statusBarGroupsAreEvenlySpacedAfterTheBitrate_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("10 pt, dark") << 10.0 << true;
+    QTest::newRow("10 pt, light") << 10.0 << false;
+    QTest::newRow("24 pt, dark") << 24.0 << true;
+    QTest::newRow("24 pt, light") << 24.0 << false;
+}
+
+// The bitrate keeps the room of its own digits, and the format is
+// measured whole, so the groups after it stand as far from it as the
+// format from the playback state, 16 px: with the room of four digits for
+// every bitrate and each part in whole pixels, "514 kbps" had some 15 px
+// of empty room after it, and the groups stood 20, 33 and 20 px apart.
+void TransportStatusTest::statusBarGroupsAreEvenlySpacedAfterTheBitrate() {
+    QFETCH(qreal, pointSize);
+    QFETCH(bool, dark);
+    const ScopedApplicationFont font(pointSize);
+    Harness harness;
+    QVERIFY2(harness.load(breeze(dark), 2400), qPrintable(harness.error));
+    QQuickItem *row = harness.item(QStringLiteral("statusBarFormatRow"));
+    QQuickItem *modes = harness.item(QStringLiteral("statusBarRepeatShuffle"));
+    QQuickItem *state = harness.item(QStringLiteral("statusBarPlaybackState"));
+    QVERIFY(row && modes && state);
+    QObject *bridge = harness.bridge;
+    bridge->setProperty("repeatMode", 2);
+    bridge->setProperty("shuffleEnabled", true);
+    qreal scale = 1;
+    for (const int kbps : {514, 128, 999}) {
+        bridge->setProperty("currentTrackPath", QStringLiteral("/music/%1.flac").arg(kbps));
+        bridge->setProperty("currentTrackCurrentBitrateKbps", kbps);
+        grabbed(harness.window, &scale);
+        QVERIFY(modes->isVisible());
+        QVERIFY(row->property("implicitWidth").toReal() > 0);
+        const qreal leading = sceneRect(row).left() - sceneRect(state).right();
+        const qreal afterFormat = sceneRect(modes).left() - sceneRect(row).left() - row->implicitWidth();
+        const QString gaps = QStringLiteral("%1 kbps: %2 px after the state, %3 px after the format")
+                                 .arg(kbps).arg(leading).arg(afterFormat);
+        QCOMPARE(leading, 16.0);
+        // The format in whole pixels: less than one more.
+        QVERIFY2(afterFormat >= 16.0 && afterFormat < 17.0, qPrintable(gaps));
+    }
+}
+
+void TransportStatusTest::statusBarScanBarReadsAsAShare_data() {
+    addThemeRows();
+}
+
+// The scan bar's trough reads as the whole the scan is a share of, and its
+// fill against it, as drawn: the status bar's progress trough and fill, the
+// Last.fm bar's. The trough is framed: a 1 px frame at least 3:1 on the
+// status bar, and the view inside it (a solid trough midway between the
+// status bar and the fill was 2.7:1 / 2.5:1 to each, and washed out in a
+// light theme). The fill is the secondary text, the words' ink beside it,
+// never louder than they are (lightened to 3.1:1 on its trough, the
+// Last.fm bar outshone its glyph), inset in the frame, at least 4.5:1 on
+// the view inside it. The frame stays well under the fill. The percent
+// stays beside it.
+void TransportStatusTest::statusBarScanBarReadsAsAShare() {
+    QFETCH(bool, dark);
+    Harness harness;
+    QVERIFY2(harness.load(breeze(dark)), qPrintable(harness.error));
+    QQuickItem *bar = harness.item(QStringLiteral("statusBarScanBar"));
+    QQuickItem *fill = harness.item(QStringLiteral("statusBarScanBarFill"));
+    QQuickItem *count = harness.item(QStringLiteral("statusBarScanCount"));
+    QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
+    QVERIFY(bar && fill && count && slot);
+    harness.bridge->setProperty("libraryScanProcessed", 31);
+    harness.bridge->setProperty("libraryScanTotal", 100);
+    harness.bridge->setProperty("libraryScanInProgress", true);
+    QTRY_VERIFY(bar->isVisible() && fill->isVisible());
+    QCOMPARE(count->property("text").toString(), QStringLiteral("31%"));
+    QVERIFY(count->isVisible());
+    const QColor chrome = harness.token("chrome");
+    const QColor trough = bar->property("color").value<QColor>();
+    const QColor frame = evaluateOn(bar, QStringLiteral("border.color")).value<QColor>();
+    const QColor done = fill->property("color").value<QColor>();
+    QCOMPARE(trough.alphaF(), 1.0F);
+    QCOMPARE(frame.alphaF(), 1.0F);
+    QCOMPARE(evaluateOn(bar, QStringLiteral("border.width")).toInt(), 1);
+    QVERIFY(sameColor(trough, harness.token("statusBarTrough")));
+    QVERIFY(sameColor(trough, harness.token("view")));
+    QVERIFY(sameColor(trough, slot->property("troughColor").value<QColor>()));
+    QVERIFY(sameColor(frame, harness.token("statusBarTroughFrame")));
+    QVERIFY(sameColor(frame, slot->property("troughFrameColor").value<QColor>()));
+    QVERIFY(sameColor(done, harness.token("statusBarFill")));
+    QVERIFY(sameColor(done, harness.token("textSecondary")));
+    QVERIFY2(contrastRatio(frame, chrome) >= 3.0, qPrintable(describeContrast(QStringLiteral("frame"), frame, chrome)));
+    QVERIFY2(contrastRatio(done, trough) >= 4.5, qPrintable(describeContrast(QStringLiteral("fill"), done, trough)));
+    QVERIFY2(contrastRatio(done, chrome) > contrastRatio(frame, chrome) + 2,
+             qPrintable(describeContrast(QStringLiteral("fill"), done, chrome)
+                        + describeContrast(QStringLiteral(", frame"), frame, chrome)));
+
+    // As drawn: the frame along the top, the fill on the left inside it,
+    // then the view, along the bar's middle row.
+    qreal scale = 1;
+    const QImage image = grabbed(harness.window, &scale);
+    const QRectF rect = sceneRect(bar);
+    const qreal middle = rect.center().y();
+    QCOMPARE(fill->position(), QPointF(1, 1));
+    const QPointF top(rect.center().x(), rect.top() + 0.5);
+    QVERIFY2(channelDistance(pixelAt(image, top, scale), frame) <= 2, qPrintable(pixelAt(image, top, scale).name()));
+    const QPointF inFill(rect.left() + 1 + fill->width() / 2, middle);
+    QVERIFY2(channelDistance(pixelAt(image, inFill, scale), done) <= 2, qPrintable(pixelAt(image, inFill, scale).name()));
+    const QPointF rest(rect.left() + (1 + fill->width() + rect.width()) / 2, middle);
+    QVERIFY2(channelDistance(pixelAt(image, rest, scale), trough) <= 2, qPrintable(pixelAt(image, rest, scale).name()));
+    const QPointF bottom(rect.center().x(), rect.bottom() - 0.5);
+    QVERIFY2(channelDistance(pixelAt(image, bottom, scale), frame) <= 2,
+             qPrintable(pixelAt(image, bottom, scale).name()));
+}
+
 void TransportStatusTest::statusBarShowsTheScanWithItsBar() {
     for (const int width : {1600, 1000}) {
         Harness harness;
@@ -2381,16 +3784,19 @@ void TransportStatusTest::statusBarShowsTheScanWithItsBar() {
         }
         QCOMPARE(label->property("text").toString(), QStringLiteral("Scanning “Music”…"));
         QVERIFY(bar->isVisible());
-        QCOMPARE(bar->size(), QSizeF(72, 4));
-        // The percent beside the bar, and the bar after it.
-        QTRY_VERIFY2(sceneRect(label).right() <= sceneRect(count).left(),
-                     qPrintable(describeRect(sceneRect(label)) + QStringLiteral(" / ") + describeRect(sceneRect(count))));
-        QVERIFY2(sceneRect(count).right() <= sceneRect(bar).left(),
-                 qPrintable(describeRect(sceneRect(count)) + QStringLiteral(" / ") + describeRect(sceneRect(bar))));
+        QCOMPARE(bar->size(), QSizeF(72, 6));
+        QCOMPARE(fill->position(), QPointF(1, 1));
+        QCOMPARE(fill->height(), 4.0);
+        // The bar after the words, and the percent after the bar.
+        QTRY_VERIFY2(sceneRect(label).right() <= sceneRect(bar).left(),
+                     qPrintable(describeRect(sceneRect(label)) + QStringLiteral(" / ") + describeRect(sceneRect(bar))));
+        QVERIFY2(sceneRect(bar).right() <= sceneRect(count).left(),
+                 qPrintable(describeRect(sceneRect(bar)) + QStringLiteral(" / ") + describeRect(sceneRect(count))));
         // The bar moves with the batches, by whole pixels.
-        QCOMPARE(fill->width(), std::floor(bar->width() * 412 / 1204));
+        // Of the 70 px inside its frame.
+        QCOMPARE(fill->width(), std::floor(70.0 * 412 / 1204));
         harness.bridge->setProperty("libraryScanProcessed", 602);
-        QCOMPARE(fill->width(), bar->width() / 2);
+        QCOMPARE(fill->width(), 35.0);
         QCOMPARE(count->property("text").toString(), QStringLiteral("50%"));
         // Two folders: no name.
         harness.bridge->setProperty(
@@ -2401,6 +3807,34 @@ void TransportStatusTest::statusBarShowsTheScanWithItsBar() {
         harness.bridge->setProperty("libraryScanInProgress", false);
         QTRY_VERIFY(!scan->isVisible());
     }
+}
+
+// The scan's bar grows with a larger font, as the Last.fm slot's does (at
+// 24 pt it stayed 72 by 4 px beside 32 px text), and stays within the bar.
+void TransportStatusTest::statusBarScanBarGrowsWithTheFont() {
+    const ScopedApplicationFont font(24);
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *status = harness.item(QStringLiteral("statusBar"));
+    QQuickItem *bar = harness.item(QStringLiteral("statusBarScanBar"));
+    QQuickItem *fill = harness.item(QStringLiteral("statusBarScanBarFill"));
+    QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
+    QVERIFY(status && bar && fill && slot);
+    harness.bridge->setProperty("libraryScanProcessed", 50);
+    harness.bridge->setProperty("libraryScanTotal", 100);
+    harness.bridge->setProperty("libraryScanInProgress", true);
+    QTRY_VERIFY(bar->isVisible());
+    QCOMPARE(bar->width(), 173.0);
+    const int lastFm = slot->property("troughHeight").toInt();
+    const int frame = slot->property("troughFrame").toInt();
+    QVERIFY(lastFm > 5 && frame >= 1);
+    QVERIFY2(bar->height() > lastFm && bar->height() <= 2 * lastFm, qPrintable(QString::number(bar->height())));
+    QCOMPARE(evaluateOn(bar, QStringLiteral("border.width")).toInt(), frame);
+    QCOMPARE(bar->property("radius").toReal(), bar->height() / 2);
+    QCOMPARE(fill->height(), bar->height() - 2 * frame);
+    QCOMPARE(fill->property("radius").toReal(), fill->height() / 2);
+    QCOMPARE(fill->width(), std::floor((bar->width() - 2 * frame) / 2));
+    QTRY_VERIFY(within(sceneRect(bar), sceneRect(status)));
 }
 
 // A rescan, whose files are processed as soon as they are found: the bar
@@ -2420,7 +3854,8 @@ void TransportStatusTest::statusBarScanBarFillsOnlyOnceTheRescanEnds() {
     QTRY_VERIFY(fill->isVisible());
     QCOMPARE(fill->width(), 0.0);
     QCOMPARE(count->property("text").toString(), QStringLiteral("0%"));
-    const qreal full = bar->width();
+    // The inside of its 1 px frame.
+    const qreal full = bar->width() - 2;
     QVERIFY(full > 0);
 
     double previous = 0.0;
@@ -2487,6 +3922,103 @@ void TransportStatusTest::statusBarScanKeepsItsPlaceWhileItCounts() {
         QCOMPARE(sceneRect(label), labelRect);
         QCOMPARE(sceneRect(count), countRect);
     }
+}
+
+// The first scan of a folder counts the files it has scanned, which keep
+// the room of the widest count of their digits after the words, from
+// "999 files", in tabular figures: the words stay where they are as the
+// count passes 10 and 100, and step once each at 1,000 and 10,000, never
+// back while the scan goes on, and the status bar's groups after them
+// stay put throughout (the count's own width moved them at every power
+// of ten; the room of "99,999 files" from the first file left a hole of
+// some 30 px after a short count), at 10 and 24 pt, wide and narrow.
+void TransportStatusTest::statusBarScanCountKeepsItsPlaceWithoutATotal_data() {
+    statusBarScanKeepsItsPlaceWhileItCounts_data();
+}
+
+void TransportStatusTest::statusBarScanCountKeepsItsPlaceWithoutATotal() {
+    QFETCH(int, width);
+    QFETCH(int, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    Harness harness;
+    QVERIFY2(harness.load(kBreezeDark, width), qPrintable(harness.error));
+    QQuickItem *scan = harness.item(QStringLiteral("statusBarScan"));
+    QQuickItem *label = harness.item(QStringLiteral("statusBarScanLabel"));
+    QQuickItem *count = harness.item(QStringLiteral("statusBarScanCount"));
+    QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
+    QVERIFY(scan && label && count && slot);
+    harness.bridge->setProperty("libraryRootEntries",
+                                QVariantList{QVariantMap{{QStringLiteral("name"), QStringLiteral("Music")}}});
+    harness.bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
+    harness.bridge->setProperty("lastFmScrobbleState", 3);
+    harness.bridge->setProperty("libraryScanTotal", -1);
+    harness.bridge->setProperty("libraryScanProcessed", 1);
+    harness.bridge->setProperty("libraryScanInProgress", true);
+    QTRY_VERIFY(scan->isVisible() && slot->isVisible());
+    QTRY_COMPARE(count->property("text").toString(), QStringLiteral("1 file"));
+    QVERIFY(count->property("font").value<QFont>().featureValue(QFont::Tag("tnum")) == 1);
+    QTRY_VERIFY(scan->width() > 0);
+    // The status bar laid out as drawn: a grab polishes it.
+    const auto laidOut = [&] { QVERIFY(!harness.window->grabWindow().isNull()); };
+    laidOut();
+    const QRectF scanRect = sceneRect(scan);
+    const QRectF labelRect = sceneRect(label);
+    const QRectF countRect = sceneRect(count);
+    const QRectF slotRect = sceneRect(slot);
+    // The room of the widest count of its digits it keeps, and no more: a
+    // count's words are left-aligned in it.
+    QCOMPARE(count->property("horizontalAlignment").toInt(), int(Qt::AlignLeft));
+    const QFontMetricsF metrics(count->property("font").value<QFont>());
+    const auto room = [&](const QString &widest) { return std::ceil(metrics.horizontalAdvance(widest)); };
+    QCOMPARE(count->width(), room(QStringLiteral("999 files")));
+    struct Tier {
+        QList<int> counts;
+        QString widest;
+    };
+    const QList<Tier> tiers{{{9, 10, 57, 99, 100, 999}, QStringLiteral("999 files")},
+                            {{1000, 1204, 9999}, QStringLiteral("9,999 files")},
+                            {{10000, 99999}, QStringLiteral("99,999 files")}};
+    qreal previousWidth = 0;
+    for (const Tier &tier : tiers) {
+        harness.bridge->setProperty("libraryScanProcessed", tier.counts.first());
+        QTRY_VERIFY(count->property("text").toString().endsWith(QStringLiteral(" files")));
+        laidOut();
+        QCOMPARE(count->width(), room(tier.widest));
+        QVERIFY(count->width() > previousWidth);
+        previousWidth = count->width();
+        // Within a tier, nothing moves; across one, the scan grows by the
+        // count's new room to the left, its words stepping with it, and
+        // the status bar's groups after it stay where they are.
+        const qreal grown = count->width() - countRect.width();
+        QCOMPARE(sceneRect(scan).width() - scanRect.width(), grown);
+        QCOMPARE(sceneRect(scan).right(), scanRect.right());
+        QCOMPARE(sceneRect(label), labelRect.translated(-grown, 0));
+        QCOMPARE(sceneRect(slot), slotRect);
+        const QRectF tierScan = sceneRect(scan);
+        const QRectF tierLabel = sceneRect(label);
+        const QRectF tierCount = sceneRect(count);
+        for (const int processed : tier.counts) {
+            harness.bridge->setProperty("libraryScanProcessed", processed);
+            QTRY_VERIFY(count->property("text").toString().endsWith(QStringLiteral(" files")));
+            laidOut();
+            QVERIFY2(count->property("implicitWidth").toReal() <= count->width() + 0.01,
+                     qPrintable(count->property("text").toString()));
+            QCOMPARE(sceneRect(scan), tierScan);
+            QCOMPARE(sceneRect(label), tierLabel);
+            QCOMPARE(sceneRect(count), tierCount);
+            QCOMPARE(sceneRect(slot), slotRect);
+        }
+        QCOMPARE(count->property("text").toString(), tier.widest);
+    }
+    // A new scan starts from the least room again.
+    harness.bridge->setProperty("libraryScanInProgress", false);
+    harness.bridge->setProperty("libraryScanProcessed", 0);
+    QTRY_VERIFY(!scan->isVisible());
+    harness.bridge->setProperty("libraryScanProcessed", 57);
+    harness.bridge->setProperty("libraryScanInProgress", true);
+    QTRY_VERIFY(scan->isVisible());
+    QTRY_COMPARE(count->property("text").toString(), QStringLiteral("57 files"));
+    QCOMPARE(count->width(), room(QStringLiteral("999 files")));
 }
 
 // The first scan of a folder cannot tell its total: the files scanned so
@@ -2557,7 +4089,8 @@ void TransportStatusTest::statusBarScanWithoutATotalIsStill() {
         QVERIFY(bar->isVisible());
         QVERIFY(fill->isVisible());
         QCOMPARE(count->property("text").toString(), QStringLiteral("80%"));
-        QCOMPARE(fill->width(), std::floor(bar->width() * 1204 / 1500));
+        // Of the inside of its 1 px frame.
+        QCOMPARE(fill->width(), std::floor((bar->width() - 2) * 1204 / 1500));
     }
 }
 
@@ -2575,39 +4108,45 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     QVERIFY(!slot->isVisible());
     const auto progress = [slot]() { return slot->property("barProgress").toDouble(); };
 
-    // Listening: the glyph in the secondary colour, and under it the bar in
-    // the same colour, the listening done of its trough, which is opaque and
-    // 3:1 on the status bar (the text at 20% was 1.9:1); the time left in
-    // the tooltip.
+    // Listening: the glyph in the secondary colour, and beside it the bar
+    // in the status bar's progress fill, the glyph's ink, the listening done
+    // of its trough, which is opaque and apart from the status bar (the text
+    // at 20% was 1.9:1); the time left in the tooltip.
     bridge->setProperty("lastFmScrobbleThresholdMs", 115000);
     bridge->setProperty("lastFmScrobbleListenedMs", 77000);
     bridge->setProperty("lastFmScrobbleState", 1);
     QTRY_VERIFY(slot->isVisible());
     QVERIFY(!label->isVisible());
-    // A 16 px glyph (10 px inside a ring was a smudge at 1x), and a 16 by
-    // 3 px trough 2 px under its ink (the bar under the glyph's cell pushed
-    // the glyph 2.5 px above the middle; at 2 px its proportions did not
-    // read at 1x), which the bar fills from the left by whole pixels.
+    // A 16 px glyph (10 px inside a ring was a smudge at 1x), and a 28 by
+    // 5 px trough 6 px before it, centred on its ink (16 px under the ink,
+    // it read as the glyph's underline), which the bar fills from the left
+    // inside its 1 px frame by whole pixels.
     QCOMPARE(box->size(), QSizeF(16, 16));
     QCOMPARE(glyph->size(), QSizeF(16, 16));
     QCOMPARE(glyph->position(), QPointF(0, 0));
     QVERIFY(trough->isVisible());
-    QCOMPARE(trough->position(), QPointF(0, 15));
-    QCOMPARE(trough->size(), QSizeF(16, 3));
+    QCOMPARE(trough->size(), QSizeF(28, 5));
+    QTRY_COMPARE(sceneRect(box).left() - sceneRect(trough).right(), 6.0);
+    // The ink's rows 3 to 12, the trough's 6 to 10 and the bar's 7 to 9.
+    QCOMPARE(sceneRect(trough).top() - sceneRect(box).top(), 6.0);
     const QColor troughColor = trough->property("color").value<QColor>();
+    const QColor frameColor = evaluateOn(trough, QStringLiteral("border.color")).value<QColor>();
     QCOMPARE(troughColor.alphaF(), 1.0F);
-    QVERIFY2(contrastRatio(troughColor, harness.token("chrome")) >= 3.0,
-             qPrintable(describeContrast(QStringLiteral("trough"), troughColor, harness.token("chrome"))));
+    QCOMPARE(evaluateOn(trough, QStringLiteral("border.width")).toInt(), 1);
+    QVERIFY2(contrastRatio(frameColor, harness.token("chrome")) >= 3.0,
+             qPrintable(describeContrast(QStringLiteral("frame"), frameColor, harness.token("chrome"))));
     QVERIFY(bar->isVisible());
-    QCOMPARE(bar->position(), QPointF(0, 0));
+    QCOMPARE(bar->position(), QPointF(1, 1));
     QCOMPARE(bar->height(), 3.0);
     QCOMPARE(bar->opacity(), 1.0);
-    QCOMPARE(slot->property("barWidth").toInt(), 16);
-    QCOMPARE(progress(), std::floor(77.0 / 115.0 * 16) / 16);
-    QCOMPARE(bar->width(), std::floor(77.0 / 115.0 * 16));
+    QCOMPARE(slot->property("barWidth").toInt(), 26);
+    QCOMPARE(progress(), std::floor(77.0 / 115.0 * 26) / 26);
+    QCOMPARE(bar->width(), std::floor(77.0 / 115.0 * 26));
     QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("/lastfm.svg")));
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
-    QVERIFY(sameColor(bar->property("color").value<QColor>(), harness.token("textSecondary")));
+    // The bar in the glyph's own ink, never louder than it.
+    QVERIFY(sameColor(bar->property("color").value<QColor>(), harness.token("statusBarFill")));
+    QVERIFY(sameColor(bar->property("color").value<QColor>(), glyph->property("color").value<QColor>()));
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: 0:38 to scrobble"));
     QCOMPARE(accessibleText(slot, QAccessible::Name), QStringLiteral("Last.fm: 0:38 to scrobble"));
     QCOMPARE(accessibleText(slot, QAccessible::Description), QStringLiteral("Press to pause scrobbling."));
@@ -2622,16 +4161,21 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     bridge->setProperty("lastFmScrobbleThresholdMs", 115000);
 
     // Once playback has stopped after a play that ended before its
-    // scrobble point: the slot says so, the glyph is quieter, there is no
-    // bar, and the tooltip says how far the play got.
+    // scrobble point: the glyph, quieter, without words, the trough empty
+    // with the end mark at the share the play reached, and the tooltip
+    // says it was not scrobbled and how far the play got.
     bridge->setProperty("lastFmScrobbleState", 6);
     bridge->setProperty("lastFmScrobbleIneligibility", 3);
-    QTRY_COMPARE(label->property("text").toString(), QStringLiteral("Not scrobbled"));
-    QVERIFY(label->isVisible());
-    QVERIFY(!bar->isVisible() && !trough->isVisible());
+    QTRY_COMPARE(slot->property("look").toString(), QStringLiteral("notScrobbled"));
+    QVERIFY(slot->isVisible());
+    QVERIFY(!label->isVisible());
+    QVERIFY(trough->isVisible() && !bar->isVisible());
+    QCOMPARE(trough->size(), QSizeF(28, 5));
+    QQuickItem *endMark = harness.item(QStringLiteral("scrobbleIndicatorEndMark"));
+    QVERIFY(endMark && endMark->isVisible());
+    QCOMPARE(endMark->x(), 1 + std::floor(77.0 / 115.0 * 26) - 1);
     QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("/lastfm.svg")));
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textTertiary")));
-    QVERIFY(sameColor(label->property("color").value<QColor>(), harness.token("textSecondary")));
     QCOMPARE(toolTipText(slot),
              QStringLiteral("Last.fm: not scrobbled. The play ended after 1:17 of the 1:55 of listening it "
                             "needed."));
@@ -2653,10 +4197,10 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     QTRY_VERIFY(slot->isVisible());
     QVERIFY(bar->isVisible());
     QCOMPARE(progress(), 1.0);
-    QCOMPARE(bar->width(), 16.0);
+    QCOMPARE(bar->width(), 26.0);
     QCOMPARE(bar->height(), 3.0);
     QCOMPARE(bar->opacity(), 1.0);
-    QVERIFY(sameColor(bar->property("color").value<QColor>(), harness.token("textSecondary")));
+    QVERIFY(sameColor(bar->property("color").value<QColor>(), harness.token("statusBarFill")));
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
     QCOMPARE(glyph->opacity(), 1.0);
     QVERIFY(!label->isVisible());
@@ -2674,21 +4218,22 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     bridge->setProperty("lastFmScrobbleState", 2);
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: sending the scrobble"));
 
-    // Queued: the words and the offline glyph, of the Last.fm glyph's
-    // family and size, where it is (it was a 14 px one), without the bar.
+    // Queued: the words, with why they wait, and the Last.fm glyph in the
+    // secondary colour, where it is, without the bar (a generic offline
+    // glyph in its place lost what was waiting).
     bridge->setProperty("lastFmScrobbleState", 5);
     bridge->setProperty("lastFmPendingScrobbleCount", 3);
     QTRY_VERIFY(slot->isVisible());
-    QCOMPARE(label->property("text").toString(), QStringLiteral("3 scrobbles waiting"));
+    QCOMPARE(label->property("text").toString(), QStringLiteral("3 scrobbles waiting (offline)"));
     QVERIFY(label->isVisible());
     QVERIFY(!bar->isVisible() && !trough->isVisible());
-    QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("status-offline.svg")));
+    QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("/lastfm.svg")));
     QCOMPARE(glyph->size(), QSizeF(16, 16));
     QCOMPARE(glyph->position(), QPointF(0, 0));
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
     QVERIFY(toolTipText(slot).startsWith(QStringLiteral("Last.fm can't be reached.")));
     bridge->setProperty("lastFmPendingScrobbleCount", 1);
-    QCOMPARE(label->property("text").toString(), QStringLiteral("1 scrobble waiting"));
+    QCOMPARE(label->property("text").toString(), QStringLiteral("1 scrobble waiting (offline)"));
 
     // Failed: the status bar's one treatment of an error: the words in the
     // text colour and the 16 px glyph in the negative colour, the slot's
@@ -2731,6 +4276,199 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
 // either way and a pause leave it, and only a new play, whose count starts
 // from zero, starts it over. The bar and the tooltip move by whole seconds
 // of listening, and not at all while the count holds.
+void TransportStatusTest::lastFmNotScrobbledMarksTheShareOnAnEmptyTrough_data() {
+    addThemeRows();
+}
+
+// A play that ended short, routine, is the slot's quietest state: the
+// glyph in the tertiary text with no words ("Not scrobbled" beside it read
+// as a problem with Last.fm, and looked like "3 scrobbles waiting
+// (offline)"), and beside it the trough, empty, in a frame quieter than
+// listening's, with an upright end mark in the glyph's tertiary ink at the
+// share of the scrobble point the play reached. So it differs from
+// scrobbled, the glyph alone, by shape (the glyph alone in either tint,
+// the two looked alike at 1x), and from listening by shape as well: held
+// as a quieter fill, it read as listening going on. Words in the slot mean
+// scrobbles waiting, in the secondary text, or a failure, a step louder in
+// the text colour. The glyph and the mark stay readable.
+void TransportStatusTest::lastFmNotScrobbledMarksTheShareOnAnEmptyTrough() {
+    QFETCH(bool, dark);
+    Harness harness;
+    QVERIFY2(harness.load(breeze(dark)), qPrintable(harness.error));
+    QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
+    QQuickItem *glyph = harness.item(QStringLiteral("scrobbleIndicatorGlyph"));
+    QQuickItem *label = harness.item(QStringLiteral("scrobbleIndicatorLabel"));
+    QQuickItem *bar = harness.item(QStringLiteral("scrobbleIndicatorBar"));
+    QQuickItem *trough = harness.item(QStringLiteral("scrobbleIndicatorTrough"));
+    QQuickItem *endMark = harness.item(QStringLiteral("scrobbleIndicatorEndMark"));
+    QVERIFY(slot && glyph && label && bar && trough && endMark);
+    QObject *bridge = harness.bridge;
+    const QColor chrome = harness.token("chrome");
+    const auto colours = [&]() {
+        return std::pair{label->property("color").value<QColor>(), glyph->property("color").value<QColor>()};
+    };
+
+    // Listening at a quarter, for the frame it has.
+    bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
+    bridge->setProperty("lastFmScrobbleListenedMs", 30000);
+    bridge->setProperty("lastFmScrobbleState", 1);
+    QTRY_COMPARE(slot->property("look").toString(), QStringLiteral("listening"));
+    QTRY_VERIFY(slot->isVisible());
+    QVERIFY(bar->isVisible() && !endMark->isVisible());
+    const QColor listeningFrame = evaluateOn(trough, QStringLiteral("border.color")).value<QColor>();
+    QVERIFY(sameColor(listeningFrame, harness.token("statusBarTroughFrame")));
+
+    bridge->setProperty("lastFmScrobbleState", 3);
+    QTRY_COMPARE(slot->property("look").toString(), QStringLiteral("scrobbled"));
+    QVERIFY(!trough->isVisible());
+    const qreal scrobbledWidth = slot->width();
+
+    bridge->setProperty("lastFmScrobbleIneligibility", 3);
+    bridge->setProperty("lastFmScrobbleState", 6);
+    QTRY_COMPARE(slot->property("look").toString(), QStringLiteral("notScrobbled"));
+    QVERIFY(slot->isVisible());
+    QVERIFY(!label->isVisible());
+    QCOMPARE(label->property("text").toString(), QString());
+    // The trough and its 6 px gap beside the glyph that a scrobble lacks,
+    // with nothing filling it.
+    QVERIFY(trough->isVisible());
+    QCOMPARE(trough->size(), QSizeF(28, 5));
+    QTRY_COMPARE(slot->width(), scrobbledWidth + 28 + 6);
+    QVERIFY(!bar->isVisible());
+    // The mark: 2 px wide and 1 px past the trough at the top and the
+    // bottom, centred on a quarter of the 26 px inside the frame, by whole
+    // pixels (6 of them).
+    QVERIFY(endMark->isVisible());
+    QCOMPARE(endMark->size(), QSizeF(2, 7));
+    QCOMPARE(endMark->position(), QPointF(1 + 6 - 1, -1));
+    const QColor shortGlyph = colours().second;
+    const QColor markColor = endMark->property("color").value<QColor>();
+    const QColor troughColor = trough->property("color").value<QColor>();
+    const QColor quietFrame = evaluateOn(trough, QStringLiteral("border.color")).value<QColor>();
+    QVERIFY(sameColor(shortGlyph, harness.token("textTertiary")));
+    QVERIFY(sameColor(markColor, shortGlyph));
+    QVERIFY(sameColor(quietFrame, harness.token("statusBarTroughFrameQuiet")));
+    QVERIFY2(contrastRatio(shortGlyph, chrome) >= 4.5,
+             qPrintable(describeContrast(QStringLiteral("not scrobbled"), shortGlyph, chrome)));
+    QVERIFY2(contrastRatio(markColor, troughColor) >= 4.5 && contrastRatio(markColor, chrome) >= 4.5,
+             qPrintable(describeContrast(QStringLiteral("not scrobbled mark"), markColor, troughColor)));
+    // The frame a step quieter than listening's, still a shape of its own
+    // on the status bar, and the mark well over it.
+    const QString frames = describeContrast(QStringLiteral("quiet frame"), quietFrame, chrome)
+        + describeContrast(QStringLiteral(", listening's"), listeningFrame, chrome);
+    QVERIFY2(contrastRatio(quietFrame, chrome) >= 2.0, qPrintable(frames));
+    QVERIFY2(contrastRatio(quietFrame, chrome) * 1.3 < contrastRatio(listeningFrame, chrome), qPrintable(frames));
+    QVERIFY2(contrastRatio(markColor, chrome) > 2 * contrastRatio(quietFrame, chrome), qPrintable(frames));
+    QCOMPARE(toolTipText(slot),
+             QStringLiteral("Last.fm: not scrobbled. The play ended after 0:30 of the 2:00 of listening it "
+                            "needed."));
+
+    // As drawn: the trough's inside is the view on either side of the
+    // mark, and the mark crosses the frame.
+    qreal scale = 1.0;
+    const QImage image = grabbed(harness.window, &scale);
+    const QRectF troughRect = sceneRect(trough);
+    const QRectF markRect = sceneRect(endMark);
+    const qreal middle = troughRect.center().y();
+    for (const qreal x : {troughRect.left() + 2.5, markRect.left() - 1.5, markRect.right() + 1.5,
+                          troughRect.right() - 2.5}) {
+        QVERIFY2(channelDistance(pixelAt(image, QPointF(x, middle), scale), troughColor) <= 2,
+                 qPrintable(QStringLiteral("empty at %1").arg(x)));
+    }
+    for (const qreal y : {markRect.top() + 0.5, middle, markRect.bottom() - 0.5}) {
+        QVERIFY2(channelDistance(pixelAt(image, QPointF(markRect.center().x(), y), scale), markColor) <= 2,
+                 qPrintable(QStringLiteral("mark at %1").arg(y)));
+    }
+
+    // At the trough's ends the mark stays inside it: 0 s over its left
+    // frame, 119 s on the last whole pixel inside, short of the right
+    // frame.
+    bridge->setProperty("lastFmScrobbleListenedMs", 0);
+    QTRY_COMPARE(endMark->x(), 0.0);
+    QVERIFY(!bar->isVisible());
+    bridge->setProperty("lastFmScrobbleListenedMs", 119000);
+    QTRY_COMPARE(endMark->x(), 1 + std::floor(119.0 / 120.0 * 26) - 1);
+    QVERIFY(!bar->isVisible());
+    bridge->setProperty("lastFmScrobbleListenedMs", 30000);
+
+    bridge->setProperty("lastFmScrobbleIneligibility", 0);
+    bridge->setProperty("lastFmScrobbleState", 5);
+    bridge->setProperty("lastFmPendingScrobbleCount", 3);
+    QTRY_COMPARE(label->property("text").toString(), QStringLiteral("3 scrobbles waiting (offline)"));
+    QVERIFY(label->isVisible());
+    const auto [waitingLabel, waitingGlyph] = colours();
+    QVERIFY(sameColor(waitingLabel, harness.token("textSecondary")));
+    QVERIFY(sameColor(waitingLabel, waitingGlyph));
+
+    bridge->setProperty("lastFmPendingScrobbleCount", 0);
+    bridge->setProperty("lastFmScrobbleState", 4);
+    QTRY_COMPARE(label->property("text").toString(), QStringLiteral("Scrobble failed"));
+    const QColor failedLabel = colours().first;
+    QVERIFY(sameColor(failedLabel, harness.token("text")));
+
+    const QString ladder = describeContrast(QStringLiteral("not scrobbled"), shortGlyph, chrome)
+        + describeContrast(QStringLiteral(", waiting"), waitingLabel, chrome)
+        + describeContrast(QStringLiteral(", failed"), failedLabel, chrome);
+    // Each a step apart, the palette's: 5.4:1 to 6.3:1 in Breeze Light.
+    QVERIFY2(contrastRatio(shortGlyph, chrome) * 1.1 < contrastRatio(waitingLabel, chrome), qPrintable(ladder));
+    QVERIFY2(contrastRatio(waitingLabel, chrome) * 1.1 < contrastRatio(failedLabel, chrome), qPrintable(ladder));
+    QVERIFY(slot->isVisible());
+}
+
+// The Last.fm slot follows the status bar's other track sections: while
+// the playback engine has stopped, or before it runs, it is hidden, in any
+// of its states, the scrobbler being in the engine (paused or with
+// scrobbles waiting, it stayed beside the engine's error, stale, and a
+// click or its menu could not reach the scrobbler). It comes back as it
+// was once the engine runs.
+void TransportStatusTest::lastFmSlotHidesWithTheTrackSectionsWhileTheEngineIsDown() {
+    struct Down {
+        const char *name;
+        const char *property;
+        QVariant down;
+        QVariant up;
+    };
+    const QList<Down> downs{
+        {"stopped", "backendFailure", QStringLiteral("stopped for testing"), QString()},
+        {"not running", "connected", false, true},
+    };
+    struct State {
+        const char *name;
+        bool paused;
+        int pending;
+        int state;
+    };
+    const QList<State> states{
+        {"listening", false, 0, 1}, {"paused", true, 0, 1}, {"waiting", false, 3, 5}, {"failed", false, 0, 4}};
+    for (const Down &down : downs) {
+        for (const State &state : states) {
+            const QString row = QStringLiteral("%1, %2").arg(QLatin1String(down.name), QLatin1String(state.name));
+            Harness harness;
+            QVERIFY2(harness.load(), qPrintable(harness.error));
+            QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
+            QQuickItem *playback = harness.item(QStringLiteral("statusBarPlaybackState"));
+            QVERIFY(slot && playback);
+            QObject *bridge = harness.bridge;
+            bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
+            bridge->setProperty("lastFmScrobbleListenedMs", 30000);
+            bridge->setProperty("lastFmScrobblingPaused", state.paused);
+            bridge->setProperty("lastFmPendingScrobbleCount", state.pending);
+            bridge->setProperty("lastFmScrobbleState", state.state);
+            QTRY_VERIFY2(slot->isVisible() && playback->isVisible(), qPrintable(row));
+            const QString look = slot->property("look").toString();
+            bridge->setProperty(down.property, down.down);
+            QTRY_VERIFY2(!playback->isVisible(), qPrintable(row));
+            QVERIFY2(!slot->isVisible(), qPrintable(row));
+            QCOMPARE(slot->property("look").toString(), QStringLiteral("hidden"));
+            if (qstrcmp(down.property, "connected") == 0) {
+                bridge->setProperty(down.property, down.up);
+                QTRY_VERIFY2(slot->isVisible() && playback->isVisible(), qPrintable(row));
+                QCOMPARE(slot->property("look").toString(), look);
+            }
+        }
+    }
+}
+
 void TransportStatusTest::lastFmSlotCountsTheTimeLeftFromTheListenedTime() {
     Harness harness;
     QVERIFY2(harness.load(), qPrintable(harness.error));
@@ -2790,7 +4528,8 @@ void TransportStatusTest::lastFmSlotPausedLooksStruckThrough_data() {
 }
 
 // Paused differs from listening in its shape, not only its colour: what is
-// drawn, ink against the chrome, differs in many pixels.
+// drawn in the glyph's box, ink against the chrome, differs in many pixels
+// (the strike and its clear space; the bar beside the box goes too).
 void TransportStatusTest::lastFmSlotPausedLooksStruckThrough() {
     QFETCH(bool, dark);
     Harness harness;
@@ -2830,7 +4569,7 @@ void TransportStatusTest::lastFmSlotPausedLooksStruckThrough() {
         differing += paused[i] != listening[i] ? 1 : 0;
         pausedInk += paused[i] ? 1 : 0;
     }
-    QVERIFY2(differing >= 30, qPrintable(QString::number(differing)));
+    QVERIFY2(differing >= 16, qPrintable(QString::number(differing)));
     // The stroke crosses the box's middle, from corner to corner.
     const int side = int(sceneRect(box).width());
     QVERIFY(pausedInk > 0);
@@ -2839,19 +4578,89 @@ void TransportStatusTest::lastFmSlotPausedLooksStruckThrough() {
     QVERIFY(paused[(side - 6) * side + side - 6]);
 }
 
+void TransportStatusTest::lastFmPausedKeepsBothLettersAndTheStrike_data() {
+    addThemeRows();
+}
+
+// Paused at 1x, with its strike (#470): both letters read under the strike,
+// which is a layer of its own in the text colour over the tertiary letters,
+// in a clear casing (in one colour, the strike and its clear space left
+// neither letter whole).
+void TransportStatusTest::lastFmPausedKeepsBothLettersAndTheStrike() {
+    QFETCH(bool, dark);
+    const auto coverage = [](const QString &name) {
+        QImageReader reader(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/") + name);
+        reader.setScaledSize(QSize(16, 16));
+        const QImage image = reader.read().convertToFormat(QImage::Format_ARGB32);
+        QList<double> covered(16 * 16, 0.0);
+        for (int y = 0; y < image.height(); ++y) {
+            for (int x = 0; x < image.width(); ++x) {
+                covered[y * 16 + x] = qAlpha(image.pixel(x, y)) / 255.0;
+            }
+        }
+        return covered;
+    };
+    const QList<double> whole = coverage(QStringLiteral("lastfm.svg"));
+    const QList<double> paused = coverage(QStringLiteral("lastfm-paused.svg"));
+    // Each letter keeps its ink but for the strike's casing: nearly all of
+    // it, and the pixels two from the strike's middle half or more.
+    for (const auto &[left, right] : {std::pair{1, 8}, std::pair{9, 15}}) {
+        double ink = 0;
+        double kept = 0;
+        for (int y = 0; y < 16; ++y) {
+            for (int x = left; x < right; ++x) {
+                const double before = whole[y * 16 + x];
+                const double after = paused[y * 16 + x];
+                if (std::abs(x - y) >= 2) {
+                    ink += before;
+                    kept += std::min(before, after);
+                }
+                if (std::abs(x - y) == 2 && before >= 0.9) {
+                    QVERIFY2(after >= 0.5, qPrintable(QStringLiteral("%1,%2 keeps %3").arg(x).arg(y).arg(after)));
+                }
+                if (x == y) {
+                    QVERIFY2(after <= 0.1, qPrintable(QStringLiteral("no casing at %1").arg(x)));
+                }
+            }
+        }
+        QVERIFY2(kept >= 0.9 * ink, qPrintable(QStringLiteral("%1 of %2 from column %3").arg(kept).arg(ink).arg(left)));
+    }
+
+    Harness harness;
+    QVERIFY2(harness.load(breeze(dark)), qPrintable(harness.error));
+    QQuickItem *strike = harness.item(QStringLiteral("scrobbleIndicatorStrike"));
+    QQuickItem *glyph = harness.item(QStringLiteral("scrobbleIndicatorGlyph"));
+    QVERIFY(strike && glyph);
+    harness.bridge->setProperty("lastFmScrobbleState", 1);
+    QVERIFY(!strike->isVisible());
+    harness.bridge->setProperty("lastFmScrobblingPaused", true);
+    QTRY_VERIFY(strike->isVisible());
+    QCOMPARE(sceneRect(strike), sceneRect(glyph));
+    const QColor chrome = harness.token("chrome");
+    const QColor strikeColor = strike->property("color").value<QColor>();
+    const QColor letters = glyph->property("color").value<QColor>();
+    QVERIFY(sameColor(strikeColor, harness.token("text")));
+    QVERIFY(sameColor(letters, harness.token("textTertiary")));
+    QVERIFY2(contrastRatio(strikeColor, chrome) >= 1.5 * contrastRatio(letters, chrome),
+             qPrintable(describeContrast(QStringLiteral("strike"), strikeColor, chrome)));
+}
+
 void TransportStatusTest::lastFmSlotBarFillsItsTrough_data() {
     addThemeRows();
 }
 
-// The bar under the glyph, as drawn at 1x: a trough 16 by 3 px, the glyph's
-// width, 2 px under its ink, the text at 35% in the chrome, or nearer the
-// text where that is under 3:1 on the chrome (the text at 20% was 1.9:1
-// dark and 1.5:1 light), and in it from the left the listening done, in the
-// secondary text colour: 3:1 or more on the chrome and well apart from its
-// trough, so that it reads as a share of a whole (a bar with no trough,
-// that started 6 px long and was brighter than its glyph, did not read as
-// progress). Nothing between the glyph and the trough. At 0% a 3 px mark in
-// the trough, so that listening that has just started never looks like
+// The bar beside the glyph, as drawn at 1x: a trough 28 by 5 px, 6 px
+// before the glyph's box and centred on its ink, framed by 1 px at least
+// 3:1 on the chrome with the view inside, and in it from the left the
+// listening done, in the glyph's own ink, the secondary text: so that it
+// reads as a share of a whole (a bar with no trough, that started 6 px long
+// and was brighter than its glyph, did not read as progress; 16 px under
+// the glyph, it read as an underline; on a solid trough midway between the
+// chrome and the fill, neither edge reached 3:1 and listening almost done
+// looked like being sent), and is never louder than the glyph (lightened to
+// 3.1:1 on the trough, being sent was the slot's loudest mark). Nothing
+// between the bar and the glyph, nor around the trough. At 0% a 3 px mark
+// in the trough, so that listening that has just started never looks like
 // scrobbled (the bare glyph, or the trough alone, did). Being sent fills
 // it; scrobbled and failed have neither bar nor trough.
 void TransportStatusTest::lastFmSlotBarFillsItsTrough() {
@@ -2861,53 +4670,54 @@ void TransportStatusTest::lastFmSlotBarFillsItsTrough() {
     QCOMPARE(harness.window->effectiveDevicePixelRatio(), 1.0);
     QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
     QQuickItem *box = harness.item(QStringLiteral("scrobbleIndicatorBox"));
-    QVERIFY(slot && box);
+    QQuickItem *troughItem = harness.item(QStringLiteral("scrobbleIndicatorTrough"));
+    QVERIFY(slot && box && troughItem);
     QObject *bridge = harness.bridge;
     const QColor chrome = harness.token("chrome");
     bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
     bridge->setProperty("lastFmScrobbleListenedMs", 0);
     bridge->setProperty("lastFmScrobbleState", 1);
-    QTRY_VERIFY(slot->isVisible());
+    QTRY_VERIFY(slot->isVisible() && troughItem->isVisible());
 
-    const QColor fill = harness.token("textSecondary");
+    const QColor fill = harness.token("statusBarFill");
     const QColor trough = slot->property("troughColor").value<QColor>();
+    const QColor frame = slot->property("troughFrameColor").value<QColor>();
+    QVERIFY(sameColor(fill, harness.token("textSecondary")));
+    QVERIFY(sameColor(trough, harness.token("view")));
     QCOMPARE(trough.alphaF(), 1.0F);
-    QVERIFY2(contrastRatio(fill, chrome) >= 3.0, qPrintable(describeContrast(QStringLiteral("bar"), fill, chrome)));
-    QVERIFY2(contrastRatio(trough, chrome) >= 3.0, qPrintable(describeContrast(QStringLiteral("trough"), trough, chrome)));
-    const QColor thirtyFive = mixed(chrome, harness.token("text"), 0.35);
-    if (contrastRatio(thirtyFive, chrome) >= 3.1) {
-        QVERIFY2(channelDistance(trough, thirtyFive) <= 1, qPrintable(trough.name() + QStringLiteral(" vs ") + thirtyFive.name()));
-    } else {
-        // Only as much nearer the text as 3:1 takes.
-        QVERIFY2(contrastRatio(trough, chrome) < 3.3, qPrintable(describeContrast(QStringLiteral("trough"), trough, chrome)));
-    }
-    // The bar stands out from the trough as clearly as the trough from the
-    // chrome, and is further from the chrome.
-    QVERIFY2(contrastRatio(fill, trough) >= 1.9, qPrintable(describeContrast(QStringLiteral("bar on trough"), fill, trough)));
-    QVERIFY(contrastRatio(fill, chrome) > contrastRatio(trough, chrome) * 1.9);
+    QCOMPARE(frame.alphaF(), 1.0F);
+    QVERIFY2(contrastRatio(fill, chrome) >= 4.5, qPrintable(describeContrast(QStringLiteral("bar"), fill, chrome)));
+    QVERIFY2(contrastRatio(frame, chrome) >= 3.0, qPrintable(describeContrast(QStringLiteral("frame"), frame, chrome)));
+    QVERIFY2(contrastRatio(fill, trough) >= 4.5, qPrintable(describeContrast(QStringLiteral("bar on trough"), fill, trough)));
 
-    // The 2 px gap under the glyph's ink, the trough's 3 px rows across the
-    // glyph's width and the row under them: the pixels drawn as the bar,
-    // which must start at the left and run on, those drawn as the trough,
-    // after them, and those drawn as neither where one of them belongs, or
-    // as anything but the chrome in the gap and under the trough.
+    // The trough's 5 rows and the rows over and under them, from 1 px
+    // before the trough to the glyph's box: the pixels drawn as the frame,
+    // around the 26 by 3 px inside; inside it those drawn as the bar, which
+    // must start at the left and run on, those drawn as the trough's
+    // inside, after them, and those drawn as neither where one of them
+    // belongs, or as anything but the chrome around the trough and up to
+    // the glyph.
     struct Drawn {
         int bar = 0;
         int trough = 0;
+        int frame = 0;
         int stray = 0;
         bool fromTheLeft = true;
     };
     qreal scale = 1;
-    const auto drawn = [&](bool shown) {
+    const auto drawn = [&](bool shown, const QRectF &where) {
         const QImage image = grabbed(harness.window, &scale);
-        const QPointF topLeft = sceneRect(box).topLeft();
+        const QRectF glyphBox = sceneRect(box);
         Drawn result;
-        for (int y = 13; y < 19; ++y) {
+        for (int y = -1; y < 6; ++y) {
             bool ended = false;
-            for (int x = 0; x < 16; ++x) {
-                const QColor pixel = pixelAt(image, topLeft + QPointF(x + 0.5, y + 0.5), scale);
-                if (y < 15 || y > 17 || !shown) {
+            for (int x = -1; where.left() + x < glyphBox.left(); ++x) {
+                const QColor pixel = pixelAt(image, where.topLeft() + QPointF(x + 0.5, y + 0.5), scale);
+                if (y < 0 || y > 4 || x < 0 || x >= 28 || !shown) {
                     result.stray += channelDistance(pixel, chrome) <= 2 ? 0 : 1;
+                } else if (y == 0 || y == 4 || x == 0 || x == 27) {
+                    result.frame += channelDistance(pixel, frame) <= 2 ? 1 : 0;
+                    result.stray += channelDistance(pixel, frame) <= 2 ? 0 : 1;
                 } else if (channelDistance(pixel, fill) <= 2) {
                     result.bar += 1;
                     result.fromTheLeft = result.fromTheLeft && !ended;
@@ -2920,32 +4730,44 @@ void TransportStatusTest::lastFmSlotBarFillsItsTrough() {
         }
         return result;
     };
+    QTRY_COMPARE(sceneRect(box).left() - sceneRect(troughItem).right(), 6.0);
+    const QRectF place = sceneRect(troughItem);
+    QCOMPARE(place.size(), QSizeF(28, 5));
+    // The frame: 2 rows of 28 and 2 columns of 3.
+    const int framePixels = 2 * 28 + 2 * 3;
     for (const auto &[done, columns] :
-         {std::pair{0.0, 0}, std::pair{0.1, 1}, std::pair{0.25, 4}, std::pair{0.5, 8}, std::pair{0.9, 14}}) {
+         {std::pair{0.0, 0}, std::pair{0.05, 1}, std::pair{0.25, 6}, std::pair{0.5, 13}, std::pair{0.95, 24}}) {
         bridge->setProperty("lastFmScrobbleListenedMs", int(done * 120000));
-        QTRY_COMPARE(slot->property("barProgress").toDouble(), columns / 16.0);
-        // Never less than the 3 px mark.
-        const int drawnColumns = std::max(3, columns);
+        QTRY_COMPARE(slot->property("barProgress").toDouble(), columns / 26.0);
+        // Never less than the 3 px mark, nor within one of the end.
+        const int drawnColumns = std::clamp(columns, 3, 23);
         Drawn now;
-        QTRY_VERIFY2((now = drawn(true), now.bar == 3 * drawnColumns),
+        QTRY_VERIFY2((now = drawn(true, place), now.bar == 3 * drawnColumns),
                      qPrintable(QStringLiteral("%1 done drew %2 px of the bar").arg(done).arg(now.bar)));
-        QVERIFY2(now.trough == 3 * (16 - drawnColumns),
+        QVERIFY2(now.trough == 3 * (26 - drawnColumns),
                  qPrintable(QStringLiteral("%1 done drew %2 px of the trough").arg(done).arg(now.trough)));
+        QVERIFY2(now.frame == framePixels,
+                 qPrintable(QStringLiteral("%1 done drew %2 px of the frame").arg(done).arg(now.frame)));
         QVERIFY2(now.stray == 0, qPrintable(QStringLiteral("%1 done: %2 px of something else").arg(done).arg(now.stray)));
         QVERIFY(now.fromTheLeft);
     }
 
-    // Being sent: full. Scrobbled and failed: the chrome alone.
+    // Being sent: full. Scrobbled: the chrome alone where the bar was, the
+    // glyph where it was. Failed: no bar either (its words take the room).
+    const QRectF glyphPlace = sceneRect(box);
     bridge->setProperty("lastFmScrobbleState", 2);
     Drawn sending;
-    QTRY_VERIFY2((sending = drawn(true), sending.bar == 48 && sending.trough == 0 && sending.stray == 0),
+    QTRY_VERIFY2((sending = drawn(true, place),
+                  sending.bar == 78 && sending.trough == 0 && sending.frame == framePixels && sending.stray == 0),
                  qPrintable(QStringLiteral("%1 px, %2 stray").arg(sending.bar).arg(sending.stray)));
-    for (const int state : {3, 4}) {
-        bridge->setProperty("lastFmScrobbleState", state);
-        Drawn now;
-        QTRY_VERIFY2((now = drawn(false), now.stray == 0),
-                     qPrintable(QStringLiteral("%1: %2 px drawn").arg(state).arg(now.stray)));
-    }
+    bridge->setProperty("lastFmScrobbleState", 3);
+    QTRY_VERIFY(!troughItem->isVisible());
+    QCOMPARE(sceneRect(box), glyphPlace);
+    Drawn scrobbled;
+    QTRY_VERIFY2((scrobbled = drawn(false, place), scrobbled.stray == 0),
+                 qPrintable(QStringLiteral("%1 px drawn").arg(scrobbled.stray)));
+    bridge->setProperty("lastFmScrobbleState", 4);
+    QTRY_VERIFY(!troughItem->isVisible());
 }
 
 void TransportStatusTest::lastFmSlotSendingAndScrobbledLookApart_data() {
@@ -2954,8 +4776,8 @@ void TransportStatusTest::lastFmSlotSendingAndScrobbledLookApart_data() {
 
 // Listening, being sent and scrobbled look apart as drawn, by shape and not
 // by shade (they drew alike, and then differed mainly in shade). Listening:
-// the bar short of its trough's end (a play at its scrobble point is being
-// sent). Being sent: the bar over the whole trough. Scrobbled: neither, the
+// the bar short of its trough's end, with the trough's inside after it (a
+// play at its scrobble point is being sent). Being sent: the bar over the whole trough. Scrobbled: neither, the
 // glyph in the secondary colour. The glyph is drawn alike in all three.
 void TransportStatusTest::lastFmSlotSendingAndScrobbledLookApart() {
     QFETCH(bool, dark);
@@ -2964,16 +4786,20 @@ void TransportStatusTest::lastFmSlotSendingAndScrobbledLookApart() {
     QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
     QQuickItem *box = harness.item(QStringLiteral("scrobbleIndicatorBox"));
     QQuickItem *bar = harness.item(QStringLiteral("scrobbleIndicatorBar"));
+    QQuickItem *troughItem = harness.item(QStringLiteral("scrobbleIndicatorTrough"));
     QQuickItem *glyph = harness.item(QStringLiteral("scrobbleIndicatorGlyph"));
-    QVERIFY(slot && box && bar && glyph);
+    QVERIFY(slot && box && bar && troughItem && glyph);
     const QColor chrome = harness.token("chrome");
-    const QColor fill = harness.token("textSecondary");
+    const QColor fill = harness.token("statusBarFill");
     const QColor trough = slot->property("troughColor").value<QColor>();
+    const QColor frame = slot->property("troughFrameColor").value<QColor>();
     harness.bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
 
     qreal scale = 1;
-    // The bar's row through its middle, from the left of the glyph, and
-    // the glyph's strongest pixel.
+    // Where the trough is while listening.
+    QRectF place;
+    // The bar's row through its middle, from its left, and the glyph's
+    // strongest pixel.
     struct Drawn {
         QList<QColor> bar;
         QColor glyph;
@@ -2981,13 +4807,11 @@ void TransportStatusTest::lastFmSlotSendingAndScrobbledLookApart() {
     const auto drawn = [&]() {
         const QImage image = grabbed(harness.window, &scale);
         Drawn result;
-        const QPointF boxTopLeft = sceneRect(box).topLeft();
-        for (int x = 0; x < 16; ++x) {
-            result.bar.append(pixelAt(image, boxTopLeft + QPointF(x + 0.5, 15.5), scale));
+        for (int x = 0; x < 28; ++x) {
+            result.bar.append(pixelAt(image, place.topLeft() + QPointF(x + 0.5, 2.5), scale));
         }
         result.glyph = chrome;
-        // The glyph's rows above the bar, which hangs in its cell.
-        for (int y = 0; y < slot->property("barY").toInt(); ++y) {
+        for (int y = 0; y < int(glyph->height()); ++y) {
             for (int x = 0; x < int(glyph->width()); ++x) {
                 const QColor pixel = pixelAt(image, glyph->mapToScene(QPointF(x + 0.5, y + 0.5)), scale);
                 if (channelDistance(pixel, chrome) > channelDistance(result.glyph, chrome)) {
@@ -3003,28 +4827,33 @@ void TransportStatusTest::lastFmSlotSendingAndScrobbledLookApart() {
     };
 
     // Listening, 15 s short of the scrobble point: the bar short of full,
-    // by whole pixels at 1x and 2x, and the trough after it.
+    // by whole pixels at 1x and 2x, and the trough's inside after it, in
+    // its frame.
     harness.bridge->setProperty("lastFmScrobbleListenedMs", 105000);
     harness.bridge->setProperty("lastFmScrobbleState", 1);
     QTRY_VERIFY(slot->isVisible() && bar->isVisible());
+    QTRY_COMPARE(sceneRect(box).left() - sceneRect(troughItem).right(), 6.0);
+    place = sceneRect(troughItem);
     Drawn listening;
-    QTRY_VERIFY((listening = drawn(), count(listening.bar, fill) == 14));
-    QCOMPARE(count(listening.bar, trough), 2);
-    QVERIFY2(channelDistance(fill, trough) >= 48 && channelDistance(trough, chrome) >= 24,
-             qPrintable(fill.name() + QStringLiteral(" on ") + trough.name() + QStringLiteral(" on ")
-                        + chrome.name()));
+    QTRY_VERIFY((listening = drawn(), count(listening.bar, fill) == 22));
+    QCOMPARE(count(listening.bar, trough), 4);
+    QCOMPARE(count(listening.bar, frame), 2);
+    QVERIFY2(channelDistance(fill, trough) >= 96 && channelDistance(frame, chrome) >= 48,
+             qPrintable(fill.name() + QStringLiteral(" on ") + trough.name() + QStringLiteral(", frame ")
+                        + frame.name() + QStringLiteral(" on ") + chrome.name()));
 
     // Being sent: the bar over the whole trough.
     harness.bridge->setProperty("lastFmScrobbleListenedMs", 120000);
     harness.bridge->setProperty("lastFmScrobbleState", 2);
     Drawn sending;
-    QTRY_VERIFY((sending = drawn(), count(sending.bar, fill) == 16));
+    QTRY_VERIFY((sending = drawn(), count(sending.bar, fill) == 26));
     QCOMPARE(count(sending.bar, trough), 0);
+    QCOMPARE(count(sending.bar, frame), 2);
 
-    // Scrobbled: no bar, only the chrome under the glyph.
+    // Scrobbled: no bar, only the chrome beside the glyph.
     harness.bridge->setProperty("lastFmScrobbleState", 3);
     Drawn scrobbled;
-    QTRY_VERIFY((scrobbled = drawn(), count(scrobbled.bar, chrome) == 16));
+    QTRY_VERIFY((scrobbled = drawn(), count(scrobbled.bar, chrome) == 28));
     QVERIFY(!bar->isVisible());
 
     // The glyph: the secondary colour at full strength in all three.
@@ -3048,10 +4877,13 @@ void TransportStatusTest::lastFmGlyphIsCentredOnItsBlock_data() {
 }
 
 // The Last.fm glyph's ink, as drawn, is centred on its block, the slot,
-// both ways and on whole pixels, and the slot on the status bar under its
-// seam (the glyph sat 2.5 px above the middle, over the bar's place). The
-// trough under it is 3 px thick at the default font, a little more at a
-// larger one, and as wide as the glyph.
+// on whole pixels, and the slot on the status bar under its seam, at any
+// font; the bar beside it is centred on the ink. The ink and the bar are
+// 2 px clear of the slot's 2 px focus ring on every side. The trough is 3 px
+// thick and 28 px long at the default font, more at a larger one, 6 px
+// before the glyph's box (16 px under the ink, the bar read as an
+// underline). Once scrobbled, the glyph alone, where it was: the bar's
+// room goes from the left.
 void TransportStatusTest::lastFmGlyphIsCentredOnItsBlock() {
     QFETCH(bool, dark);
     QFETCH(qreal, pointSize);
@@ -3063,85 +4895,109 @@ void TransportStatusTest::lastFmGlyphIsCentredOnItsBlock() {
     QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
     QQuickItem *glyph = harness.item(QStringLiteral("scrobbleIndicatorGlyph"));
     QQuickItem *bar = harness.item(QStringLiteral("scrobbleIndicatorTrough"));
-    QVERIFY(status && slot && glyph && bar);
+    QQuickItem *background = harness.item(QStringLiteral("scrobbleIndicatorBackground"));
+    QVERIFY(status && slot && glyph && bar && background);
     harness.bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
     harness.bridge->setProperty("lastFmScrobbleListenedMs", 60000);
     harness.bridge->setProperty("lastFmScrobbleState", 1);
     QTRY_VERIFY(slot->isVisible() && bar->isVisible());
     const QRectF statusBar = sceneRect(status).adjusted(0, 1, 0, 0);
     QTRY_VERIFY(std::abs(sceneRect(slot).center().y() - statusBar.center().y()) <= 0.5);
-    qreal scale = 1;
-    const QImage image = grabbed(harness.window, &scale);
     const QColor chrome = harness.token("chrome");
+
+    // What the slot draws, without focus or hover: the pixels that differ
+    // from the chrome, in the glyph's box (the ink) and before it (the
+    // bar). Offscreen, Kirigami draws a mask file uncoloured, so the
+    // glyph's ink shows, not its colour.
+    struct Drawn {
+        QRectF ink;
+        QRectF bar;
+    };
+    const auto drawn = [&]() {
+        qreal scale = 1;
+        const QImage image = grabbed(harness.window, &scale);
+        const QRectF slotRect = sceneRect(slot);
+        const qreal glyphLeft = sceneRect(glyph).left();
+        Drawn result;
+        for (int y = 0; y < int(slotRect.height()); ++y) {
+            for (int x = 0; x < int(slotRect.width()); ++x) {
+                const QPointF at = slotRect.topLeft() + QPointF(x + 0.5, y + 0.5);
+                if (channelDistance(pixelAt(image, at, scale), chrome) > 8) {
+                    QRectF &part = at.x() < glyphLeft ? result.bar : result.ink;
+                    part = part.united(QRectF(std::floor(at.x()), std::floor(at.y()), 1, 1));
+                }
+            }
+        }
+        return result;
+    };
     const QRectF slotRect = sceneRect(slot);
+    QCOMPARE(slotRect.topLeft(), QPointF(std::round(slotRect.left()), std::round(slotRect.top())));
+    const Drawn listening = drawn();
+    const QString where = describeRect(listening.ink) + QStringLiteral(" + ") + describeRect(listening.bar)
+        + QStringLiteral(" in ") + describeRect(slotRect) + QStringLiteral(" in ") + describeRect(statusBar);
+    QVERIFY2(!listening.ink.isEmpty() && !listening.bar.isEmpty(), qPrintable(where));
+    // The ink centred on the slot and the status bar, the bar on the ink.
+    QVERIFY2(std::abs(listening.ink.center().y() - slotRect.center().y()) <= 0.5, qPrintable(where));
+    QVERIFY2(std::abs(listening.ink.center().y() - statusBar.center().y()) <= 0.5, qPrintable(where));
+    QVERIFY2(std::abs(listening.bar.center().y() - listening.ink.center().y()) <= 0.5, qPrintable(where));
+    // Clear of the focus ring, which is the slot's background's 2 px border.
+    const int ring = slot->property("focusRingWidth").toInt();
+    QCOMPARE(ring, 2);
+    const QRectF all = listening.ink.united(listening.bar);
+    QVERIFY2(all.top() - slotRect.top() >= ring + 2, qPrintable(where));
+    QVERIFY2(slotRect.bottom() - all.bottom() >= ring + 2, qPrintable(where));
+    QVERIFY2(all.left() - slotRect.left() >= ring + 2, qPrintable(where));
+    QVERIFY2(slotRect.right() - all.right() >= ring + 2, qPrintable(where));
+    QVERIFY2(statusBar.bottom() - all.bottom() >= ring + 3, qPrintable(where));
+    if (pointSize == 10.0) {
+        // At the default font, exactly: 10 px of ink in the 22 px slot of a
+        // 24 px status bar, 6 px above and below it.
+        QCOMPARE(statusBar.height(), 24.0);
+        QCOMPARE(slotRect.height(), 22.0);
+        QCOMPARE(listening.ink.height(), 10.0);
+        QCOMPARE(listening.ink.top() - slotRect.top(), 6.0);
+        QCOMPARE(all.left() - slotRect.left(), 4.0);
+    }
+    // Focused, the ring is where the slot is.
+    slot->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(slot->property("visualFocus").toBool());
+    QCOMPARE(evaluateOn(background, QStringLiteral("border.width")).toInt(), ring);
+    QCOMPARE(sceneRect(background), slotRect);
+
+    // The trough and its bar: before the glyph's box, on whole pixels.
     const QRectF glyphRect = sceneRect(glyph);
     QCOMPARE(glyphRect.topLeft(), QPointF(std::round(glyphRect.left()), std::round(glyphRect.top())));
-    QCOMPARE(slotRect.topLeft(), QPointF(std::round(slotRect.left()), std::round(slotRect.top())));
-
-    // The glyph's ink: the pixels of its cell above the bar at least half
-    // as far from the chrome as its strongest. Offscreen, Kirigami draws a
-    // mask file uncoloured, so this is its ink, not its colour.
-    const int side = int(glyphRect.width());
-    const int barY = int(sceneRect(bar).top() - glyphRect.top());
-    QList<int> distance(side * barY);
-    int strongest = 0;
-    for (int y = 0; y < barY; ++y) {
-        for (int x = 0; x < side; ++x) {
-            distance[y * side + x] =
-                channelDistance(pixelAt(image, glyphRect.topLeft() + QPointF(x + 0.5, y + 0.5), scale), chrome);
-            strongest = std::max(strongest, distance[y * side + x]);
-        }
-    }
-    QVERIFY2(strongest > 24, qPrintable(QString::number(strongest)));
-    QRect ink;
-    for (int y = 0; y < barY; ++y) {
-        for (int x = 0; x < side; ++x) {
-            if (distance[y * side + x] * 2 >= strongest) {
-                ink = ink.united(QRect(x, y, 1, 1));
-            }
-        }
-    }
-    const QRectF inkRect = QRectF(ink).translated(glyphRect.topLeft());
-    const QString where = describeRect(inkRect) + QStringLiteral(" in ") + describeRect(slotRect)
-        + QStringLiteral(" in ") + describeRect(statusBar);
-    QVERIFY2(std::abs(inkRect.center().y() - slotRect.center().y()) <= 0.5, qPrintable(where));
-    QVERIFY2(std::abs(inkRect.center().x() - slotRect.center().x()) <= 0.5, qPrintable(where));
-    QVERIFY2(std::abs(inkRect.center().y() - statusBar.center().y()) <= 0.5, qPrintable(where));
+    const int thickness = slot->property("troughHeight").toInt();
+    const int length = slot->property("troughWidth").toInt();
+    const int frame = slot->property("troughFrame").toInt();
     if (pointSize == 10.0) {
-        // At the default font, exactly: 6 px above and below 10 px of ink.
-        QCOMPARE(inkRect.top() - slotRect.top(), 6.0);
-        QCOMPARE(slotRect.bottom() - inkRect.bottom(), 6.0);
+        QCOMPARE(thickness, 5);
+        QCOMPARE(length, 28);
+        QCOMPARE(frame, 1);
+        QCOMPARE(glyphRect.left() - listening.bar.right(), 6.0);
+    } else {
+        QVERIFY(thickness > 5 && length > 28 && frame >= 1);
+        QVERIFY(glyphRect.left() - listening.bar.right() > 6.0);
     }
-
-    // The trough and its bar as drawn: their rows and columns under the
-    // ink, a gap of chrome between.
-    const QRectF barArea(glyphRect.left(), inkRect.bottom(), glyphRect.width(), slotRect.bottom() - inkRect.bottom());
-    QRect drawnBar;
-    for (int y = 0; y < int(barArea.height()); ++y) {
-        for (int x = 0; x < int(barArea.width()); ++x) {
-            if (channelDistance(pixelAt(image, barArea.topLeft() + QPointF(x + 0.5, y + 0.5), scale), chrome) > 8) {
-                drawnBar = drawnBar.united(QRect(x, y, 1, 1));
-            }
-        }
-    }
-    QVERIFY2(!drawnBar.isEmpty(), qPrintable(where));
-    const QRectF barRect = QRectF(drawnBar).translated(barArea.topLeft());
-    const int thickness = slot->property("barHeight").toInt();
-    if (pointSize == 10.0) {
-        QCOMPARE(thickness, 3);
-    }
-    QVERIFY(thickness >= 3);
-    QCOMPARE(barRect.height(), qreal(thickness));
-    QVERIFY2(barRect.top() - inkRect.bottom() >= 2.0, qPrintable(describeRect(barRect) + QLatin1Char(' ') + where));
-    QVERIFY2(barRect.bottom() <= slotRect.bottom(), qPrintable(describeRect(barRect) + QLatin1Char(' ') + where));
-    // As wide as the glyph, on whole pixels.
-    QCOMPARE(barRect.left(), glyphRect.left());
-    QCOMPARE(barRect.width(), glyphRect.width());
+    QCOMPARE(listening.bar.height(), qreal(thickness));
+    QCOMPARE(listening.bar.width(), qreal(length));
     // Half the listening done: the bar over half of it.
     QQuickItem *fill = harness.item(QStringLiteral("scrobbleIndicatorBar"));
     QVERIFY(fill != nullptr);
-    QCOMPARE(fill->width(), glyphRect.width() / 2);
-    QCOMPARE(sceneRect(fill).topLeft(), sceneRect(bar).topLeft());
+    QCOMPARE(fill->width(), std::floor((length - 2 * frame) / 2.0));
+    QCOMPARE(sceneRect(fill).topLeft(), sceneRect(bar).topLeft() + QPointF(frame, frame));
+
+    // Scrobbled: the glyph alone, centred, where it was.
+    slot->setFocus(false);
+    harness.bridge->setProperty("lastFmScrobbleState", 3);
+    QTRY_VERIFY(!bar->isVisible());
+    Drawn scrobbled;
+    QTRY_VERIFY((scrobbled = drawn(), scrobbled.bar.isEmpty() && !scrobbled.ink.isEmpty()));
+    const QRectF aloneSlot = sceneRect(slot);
+    const QString alone = describeRect(scrobbled.ink) + QStringLiteral(" in ") + describeRect(aloneSlot);
+    QVERIFY2(std::abs(scrobbled.ink.center().y() - aloneSlot.center().y()) <= 0.5, qPrintable(alone));
+    QVERIFY2(std::abs(scrobbled.ink.center().x() - aloneSlot.center().x()) <= 0.5, qPrintable(alone));
+    QCOMPARE(scrobbled.ink, listening.ink);
 }
 
 void TransportStatusTest::lastFmSlotGlyphReadsAtOneX_data() {
@@ -3293,10 +5149,10 @@ void TransportStatusTest::lastFmBarReadsApartFromTheScanBar_data() {
 }
 
 // The Last.fm bar is the glyph's, not a second scan or a download, with a
-// scan running beside it: as wide as the glyph and under it, less than a
-// quarter of the scan bar's length and half its height, with square ends
-// where the scan bar's are round. It has a trough, as the scan bar has
-// (without one it did not read as progress).
+// scan running beside it: right against the glyph, centred on its ink,
+// under half the scan bar's length and thinner, with square ends where the
+// scan bar's are round. It has a trough, as the scan bar has (without one
+// it did not read as progress).
 void TransportStatusTest::lastFmBarReadsApartFromTheScanBar() {
     QFETCH(bool, dark);
     Harness harness;
@@ -3319,27 +5175,28 @@ void TransportStatusTest::lastFmBarReadsApartFromTheScanBar() {
     qreal scale = 1;
     grabbed(harness.window, &scale);
 
-    // Its place and size: under the glyph's ink (rows 3 to 12 of the 16 px
-    // glyph), 2 px below it, in a trough of the glyph's width.
+    // Its place and size: 6 px before the glyph's box, centred on its ink
+    // (rows 3 to 12 of the 16 px glyph), 28 px long.
     const QRectF glyphRect = sceneRect(glyph);
     const QRectF barRect = sceneRect(bar);
     const QRectF troughRect = sceneRect(trough);
-    QCOMPARE(troughRect.left(), glyphRect.left());
-    QCOMPARE(troughRect.width(), glyphRect.width());
-    QCOMPARE(troughRect.top() - (glyphRect.top() + 13), 2.0);
-    QCOMPARE(barRect.topLeft(), troughRect.topLeft());
-    QCOMPARE(slot->property("barWidth").toReal(), glyphRect.width());
-    QCOMPARE(barRect.width(), glyphRect.width() / 2);
-    QVERIFY2(glyphRect.width() * 4 < scanBar->width(), qPrintable(QString::number(scanBar->width())));
-    // 3 px to the scan bar's 4 (at 2 px its proportions did not read at
-    // 1x), with square ends to the scan bar's round ones, and the scan bar
-    // has its percent beside it.
+    QCOMPARE(glyphRect.left() - troughRect.right(), 6.0);
+    QCOMPARE(troughRect.width(), 28.0);
+    QVERIFY(std::abs(troughRect.center().y() - (glyphRect.top() + 8)) <= 0.5);
+    QCOMPARE(barRect.topLeft(), troughRect.topLeft() + QPointF(1, 1));
+    QCOMPARE(barRect.width(), 13.0);
+    QVERIFY2(troughRect.width() * 2 < scanBar->width(), qPrintable(QString::number(scanBar->width())));
+    // 3 px of fill in a 5 px trough to the scan bar's 4 in 6 (at 2 px its
+    // proportions did not read at 1x), with square ends to the scan bar's
+    // round ones, and the scan bar has its percent beside it.
     QCOMPARE(bar->height(), 3.0);
-    QCOMPARE(trough->height(), 3.0);
+    QCOMPARE(trough->height(), 5.0);
+    QCOMPARE(scanBar->height(), 6.0);
+    QCOMPARE(scanFill->height(), 4.0);
     QQuickItem *scanCount = harness.item(QStringLiteral("statusBarScanCount"));
     QVERIFY(scanCount != nullptr && scanCount->isVisible());
     QCOMPARE(scanCount->property("text").toString(), QStringLiteral("34%"));
-    QVERIFY2(bar->height() < scanBar->height(), qPrintable(QString::number(scanBar->height())));
+    QVERIFY2(trough->height() < scanBar->height(), qPrintable(QString::number(scanBar->height())));
     QCOMPARE(bar->property("radius").toReal(), 0.0);
     QCOMPARE(trough->property("radius").toReal(), 0.0);
     QVERIFY(scanBar->property("radius").toReal() > 0.0);
@@ -3349,7 +5206,7 @@ void TransportStatusTest::lastFmBarReadsApartFromTheScanBar() {
     const QImage image = grabbed(harness.window, &scale);
     const QPointF scanTrough(sceneRect(scanBar).right() - 2, sceneRect(scanBar).center().y());
     QVERIFY(!sameColor(pixelAt(image, scanTrough, scale), chrome));
-    const QPointF barToCome(glyphRect.right() - 1.5, troughRect.center().y());
+    const QPointF barToCome(troughRect.right() - 1.5, troughRect.center().y());
     const QColor troughColor = drawnOver(trough->property("color").value<QColor>(), chrome);
     QVERIFY2(channelDistance(pixelAt(image, barToCome, scale), troughColor) <= 2,
              qPrintable(pixelAt(image, barToCome, scale).name() + QStringLiteral(" for ") + troughColor.name()));
@@ -3363,6 +5220,79 @@ void TransportStatusTest::lastFmBarReadsApartFromTheScanBar() {
         }
         QTRY_VERIFY(bar->isVisible() && trough->isVisible());
     }
+}
+
+void TransportStatusTest::lastFmListeningNeverFillsTheBar_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Only a decided scrobble fills the bar: listening stops a mark short of
+// its end, however close the scrobble point (a second short looked the same
+// as being sent). The bar fills with the decision, as before (#540).
+void TransportStatusTest::lastFmListeningNeverFillsTheBar() {
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
+    QQuickItem *bar = harness.item(QStringLiteral("scrobbleIndicatorBar"));
+    QQuickItem *trough = harness.item(QStringLiteral("scrobbleIndicatorTrough"));
+    QVERIFY(slot && bar && trough);
+    const int mark = slot->property("minimumBarLength").toInt();
+    harness.bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
+    harness.bridge->setProperty("lastFmScrobbleState", 1);
+    // The inside of the trough's frame.
+    const qreal inside = trough->width() - 2 * slot->property("troughFrame").toInt();
+    QCOMPARE(inside, slot->property("barWidth").toReal());
+    for (const int listened : {114000, 119000, 119999, 120000, 130000}) {
+        harness.bridge->setProperty("lastFmScrobbleListenedMs", listened);
+        QVERIFY2(bar->width() <= inside - mark, qPrintable(QString::number(bar->width())));
+    }
+    harness.bridge->setProperty("lastFmScrobbleState", 2);
+    QCOMPARE(bar->width(), inside);
+}
+
+// The warning triangle is at its neighbours' optical size: 12 px across, as
+// dialog-error's square and the info glyph's circle, and about 11 px high,
+// centred across its box, its base's lower edge on a whole pixel at 16 px.
+// Filling its box, about 14 by 12 px, it was the largest glyph in the row
+// beside a 12 px info glyph and a 10 px close.
+void TransportStatusTest::warningGlyphIsTheSizeOfItsNeighbours() {
+    // The pixels of `name` at `size` with at least half their area covered.
+    const auto inkOf = [](const QString &name, int size) {
+        QImageReader reader(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/") + name);
+        reader.setScaledSize(QSize(size, size));
+        const QImage image = reader.read().convertToFormat(QImage::Format_ARGB32);
+        QRect ink;
+        for (int y = 0; y < image.height(); ++y) {
+            for (int x = 0; x < image.width(); ++x) {
+                if (qAlpha(image.pixel(x, y)) >= 128) {
+                    ink = ink.united(QRect(x, y, 1, 1));
+                }
+            }
+        }
+        return ink;
+    };
+    // At 64 px, a 16 px drawing's quarter pixels.
+    const QRect warning = inkOf(QStringLiteral("status-warning.svg"), 64);
+    const QRect error = inkOf(QStringLiteral("status-error.svg"), 64);
+    const QString sizes = QStringLiteral("warning %1x%2 at %3,%4, error %5x%6")
+                              .arg(warning.width()).arg(warning.height()).arg(warning.x()).arg(warning.y())
+                              .arg(error.width()).arg(error.height());
+    QVERIFY2(std::abs(warning.width() - error.width()) <= 2, qPrintable(sizes));
+    QVERIFY2(std::abs(warning.height() - 42) <= 2, qPrintable(sizes));
+    QVERIFY2(std::abs(warning.left() - (64 - 1 - warning.right())) <= 1, qPrintable(sizes));
+    QVERIFY2(std::abs((warning.top() + warning.bottom() + 1) / 2.0 - 32) <= 2, qPrintable(sizes));
+
+    // At 16 px, the base is a whole row of pixels, with none under it.
+    QImageReader reader(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/status-warning.svg"));
+    reader.setScaledSize(QSize(16, 16));
+    const QImage one = reader.read().convertToFormat(QImage::Format_ARGB32);
+    QCOMPARE(one.size(), QSize(16, 16));
+    QVERIFY2(qAlpha(one.pixel(8, 12)) >= 230, qPrintable(QString::number(qAlpha(one.pixel(8, 12)))));
+    QVERIFY2(qAlpha(one.pixel(8, 13)) <= 25, qPrintable(QString::number(qAlpha(one.pixel(8, 13)))));
 }
 
 // The Last.fm slot's three glyphs are one family (the "as" was a grid of
@@ -3386,11 +5316,22 @@ void TransportStatusTest::lastFmGlyphsAreOneFamily() {
         }
         return covered;
     };
+    // Paused is two files, one glyph: its letters and the strike over them.
     const QStringList names{QStringLiteral("lastfm.svg"), QStringLiteral("lastfm-paused.svg"),
                             QStringLiteral("status-offline.svg")};
+    const auto glyphCoverage = [&coverage](const QString &name, int size) {
+        QList<double> covered = coverage(name, size);
+        if (name == QStringLiteral("lastfm-paused.svg")) {
+            const QList<double> strike = coverage(QStringLiteral("lastfm-strike.svg"), size);
+            for (qsizetype i = 0; i < std::min(covered.size(), strike.size()); ++i) {
+                covered[i] = std::max(covered[i], strike[i]);
+            }
+        }
+        return covered;
+    };
     QHash<QString, QList<double>> atOne;
     for (const QString &name : names) {
-        const QList<double> one = coverage(name, 16);
+        const QList<double> one = glyphCoverage(name, 16);
         QCOMPARE(one.size(), 16 * 16);
         atOne.insert(name, one);
         int whole = 0;
@@ -3418,7 +5359,7 @@ void TransportStatusTest::lastFmGlyphsAreOneFamily() {
                                 .arg(ink.top()).arg(ink.bottom())));
         // Sharp at 2x: the outline's edges still on whole pixels, so most
         // of its ink is whole.
-        const QList<double> two = coverage(name, 32);
+        const QList<double> two = glyphCoverage(name, 32);
         int wholeAtTwo = 0;
         int betweenAtTwo = 0;
         for (const double covered : two) {
@@ -3436,8 +5377,10 @@ void TransportStatusTest::lastFmGlyphsAreOneFamily() {
         }
     }
     // The strike of the other two: a whole pixel in each row along the
-    // diagonal, half a pixel on either side of it, then clear space, the
-    // same in both.
+    // diagonal, half a pixel on either side of it, the same in both; then
+    // clear space in offline's, while paused's is apart by its colour, and
+    // clear of the letters only under it and in a narrow casing.
+    atOne.insert(names[1], coverage(QStringLiteral("lastfm-strike.svg"), 16));
     for (const QString &name : {names[1], names[2]}) {
         const QList<double> struck = atOne.value(name);
         for (int i = 2; i <= 13; ++i) {
@@ -3466,8 +5409,9 @@ void TransportStatusTest::lastFmGlyphsAreOneFamily() {
 // says the playback engine isn't running, and its tooltip what to do. It is
 // an error, in the status bar's one treatment of them (a stopped engine was
 // red semibold words, one not running plain words with no glyph): the words
-// in the text colour, at the status bar's weight, after a 16 px warning
-// glyph in the negative colour.
+// in the text colour, at the status bar's weight, after a 16 px error
+// glyph (a ring with a cross, not the warning's triangle) in the negative
+// colour.
 void TransportStatusTest::statusBarNamesAStoppedEngineInPlainWords() {
     Harness harness;
     QVERIFY2(harness.load(), qPrintable(harness.error));
@@ -3475,7 +5419,10 @@ void TransportStatusTest::statusBarNamesAStoppedEngineInPlainWords() {
     QQuickItem *state = harness.item(QStringLiteral("statusBarPlaybackState"));
     QQuickItem *glyph = harness.item(QStringLiteral("statusBarEngineErrorGlyph"));
     QQuickItem *stateLabel = harness.item(QStringLiteral("statusBarPlaybackStateLabel"));
-    QVERIFY(label && state && glyph && stateLabel);
+    QQuickItem *engineError = harness.item(QStringLiteral("statusBarEngineError"));
+    QObject *toolTip = harness.root->findChild<QObject *>(QStringLiteral("statusBarEngineErrorToolTip"));
+    QVERIFY(label && state && glyph && stateLabel && engineError && toolTip);
+    QVERIFY(!toolTip->property("visible").toBool());
     QVERIFY(!label->isVisible());
     QVERIFY(!glyph->isVisible());
     const qreal stateLeft = sceneRect(state).left();
@@ -3484,7 +5431,7 @@ void TransportStatusTest::statusBarNamesAStoppedEngineInPlainWords() {
     QVERIFY(!state->isVisible());
     const auto treatedAsAnError = [&](QQuickItem *words) {
         return glyph->isVisible() && glyph->size() == QSizeF(16, 16)
-            && glyph->property("source").toString().endsWith(QStringLiteral("status-warning.svg"))
+            && glyph->property("source").toString().endsWith(QStringLiteral("status-error.svg"))
             && sameColor(glyph->property("color").value<QColor>(), harness.token("negative"))
             && sameColor(words->property("color").value<QColor>(), harness.token("text"))
             && words->property("font").value<QFont>().weight() == QFont::Normal
@@ -3498,11 +5445,13 @@ void TransportStatusTest::statusBarNamesAStoppedEngineInPlainWords() {
     QCOMPARE(label->property("text").toString(), QStringLiteral("Playback engine not running"));
     const QString tip = QStringLiteral(
         "Ferrous can't play music until its playback engine runs. Restart Ferrous to try again.");
-    QCOMPARE(toolTipText(label), tip);
-    QCOMPARE(accessibleText(label, QAccessible::Description), tip);
+    QCOMPARE(engineError->property("toolTipText").toString(), tip);
+    QCOMPARE(accessibleText(engineError, QAccessible::Name), QStringLiteral("Playback engine not running"));
+    QCOMPARE(accessibleText(engineError, QAccessible::Description), tip);
     showToolTipsAtOnce(label);
     QTest::mouseMove(harness.window, sceneCentre(label));
-    QTRY_VERIFY(toolTipShown(label));
+    QTRY_VERIFY(toolTip->property("visible").toBool());
+    QCOMPARE(toolTip->property("text").toString(), tip);
     // A failure the backend reported says so instead, in the same words
     // (it said "Backend stopped").
     QQuickItem *stopped = harness.item(QStringLiteral("statusBarBackendStoppedLabel"));
@@ -3514,13 +5463,64 @@ void TransportStatusTest::statusBarNamesAStoppedEngineInPlainWords() {
     QCOMPARE(stopped->property("text").toString(), QStringLiteral("Playback engine stopped"));
     QTRY_VERIFY(treatedAsAnError(stopped));
     // Its tooltip says why, in the backend's words.
-    QCOMPARE(toolTipText(stopped), QStringLiteral("stopped for testing"));
-    QCOMPARE(accessibleText(stopped, QAccessible::Description), QStringLiteral("stopped for testing"));
-    showToolTipsAtOnce(stopped);
+    QCOMPARE(engineError->property("toolTipText").toString(), QStringLiteral("stopped for testing"));
+    QCOMPARE(accessibleText(engineError, QAccessible::Name), QStringLiteral("Playback engine stopped"));
+    QCOMPARE(accessibleText(engineError, QAccessible::Description), QStringLiteral("stopped for testing"));
     QTest::mouseMove(harness.window, sceneCentre(stopped));
-    QTRY_VERIFY(toolTipShown(stopped));
+    QTRY_COMPARE(toolTip->property("text").toString(), QStringLiteral("stopped for testing"));
+    QTRY_VERIFY(toolTip->property("visible").toBool());
     QVERIFY2(contrastRatio(harness.token("negative"), harness.token("chrome")) >= 3.0,
              qPrintable(describeContrast(QStringLiteral("glyph"), harness.token("negative"), harness.token("chrome"))));
+}
+
+// The stopped engine's glyph and words are one: the pointer over the
+// glyph shows the tooltip with the reason, as over the words (it showed
+// none over the glyph), and the error takes keyboard focus, in the status
+// bar's 2 px focus ring around both, 6 px outside them, and shows the
+// tooltip then too (from the keyboard it could not be read at all).
+void TransportStatusTest::statusBarEngineErrorShowsItsToolTipOverItsGlyphAndFromTheKeyboard() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *engineError = harness.item(QStringLiteral("statusBarEngineError"));
+    QQuickItem *glyph = harness.item(QStringLiteral("statusBarEngineErrorGlyph"));
+    QQuickItem *words = harness.item(QStringLiteral("statusBarBackendStoppedLabel"));
+    QQuickItem *background = harness.item(QStringLiteral("statusBarEngineErrorBackground"));
+    QQuickItem *status = harness.item(QStringLiteral("statusBar"));
+    QVERIFY(engineError && glyph && words && background && status);
+    const QString reason = QStringLiteral("The playback engine stopped (exit code 101).");
+    harness.bridge->setProperty("backendFailure", reason);
+    QTRY_VERIFY(engineError->isVisible() && words->isVisible());
+    showToolTipsAtOnce(engineError);
+    QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("statusBarEngineErrorToolTip"));
+    QVERIFY(tip != nullptr);
+    const auto toolTip = [tip, &reason]() {
+        return tip->property("visible").toBool() && tip->property("text").toString() == reason;
+    };
+
+    // The pointer over the glyph.
+    QTest::mouseMove(harness.window, sceneCentre(glyph));
+    QTRY_VERIFY(toolTip());
+    QTest::mouseMove(harness.window, QPoint(harness.window->width() / 2, 10));
+    QTRY_VERIFY(!tip->property("visible").toBool());
+
+    // From the keyboard: Tab reaches it, and its ring is around the glyph
+    // and the words, inside the status bar.
+    QVERIFY(engineError->activeFocusOnTab());
+    QCOMPARE(evaluateOn(background, QStringLiteral("border.width")).toInt(), 0);
+    engineError->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(engineError->property("visualFocus").toBool());
+    QTRY_VERIFY(toolTip());
+    QCOMPARE(evaluateOn(background, QStringLiteral("border.width")).toInt(), 2);
+    QVERIFY(sameColor(evaluateOn(background, QStringLiteral("border.color")).value<QColor>(), harness.token("focusRing")));
+    const QRectF ring = sceneRect(background);
+    const QRectF inside = sceneRect(glyph).united(sceneRect(words));
+    QCOMPARE(inside.left() - ring.left(), 6.0);
+    QVERIFY2(ring.right() - inside.right() >= 6.0, qPrintable(describeRect(ring) + QLatin1Char(' ') + describeRect(inside)));
+    QVERIFY2(inside.top() - ring.top() >= 2.0 && ring.bottom() - inside.bottom() >= 2.0,
+             qPrintable(describeRect(ring) + QLatin1Char(' ') + describeRect(inside)));
+    QVERIFY(within(ring, sceneRect(status).adjusted(0, 1, 0, 0)));
+    QCOMPARE(ring.height(), sceneRect(harness.item(QStringLiteral("statusBarErrorsBackground"))).height());
+    QCOMPARE(accessibleText(engineError, QAccessible::Description), reason);
 }
 
 void TransportStatusTest::lastFmSlotToolTipShowsOnKeyboardFocus() {
@@ -3544,6 +5544,117 @@ void TransportStatusTest::lastFmSlotToolTipShowsOnKeyboardFocus() {
     QTest::keyClick(harness.window, Qt::Key_Space);
     QTRY_VERIFY(harness.bridge->property("lastFmScrobblingPaused").toBool());
     QCOMPARE(harness.root->property("playPauseCount").toInt(), 0);
+}
+
+// The menu's items have no glyphs, so their words start on one column
+// after Pause Scrobbling's check box: Breeze gives a glyph a column of its
+// own beside the check box's, and with the configure glyph on Last.fm
+// Settings… the two items' marks and words were staggered.
+void TransportStatusTest::lastFmMenuWordsShareOneColumn() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
+    QObject *menu = harness.root->findChild<QObject *>(QStringLiteral("scrobbleIndicatorMenu"));
+    QVERIFY(slot && menu);
+    harness.bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
+    harness.bridge->setProperty("lastFmScrobbleState", 1);
+    QTRY_VERIFY(slot->isVisible());
+    slot->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyClick(harness.window, Qt::Key_F10, Qt::ShiftModifier);
+    QTRY_VERIFY(menu->property("opened").toBool());
+    QQuickItem *pause = harness.item(QStringLiteral("scrobbleIndicatorPauseItem"));
+    QQuickItem *settings = harness.item(QStringLiteral("scrobbleIndicatorSettingsItem"));
+    QVERIFY(pause != nullptr && pause->isVisible());
+    QVERIFY(settings != nullptr && settings->isVisible());
+    for (QQuickItem *item : {pause, settings}) {
+        QVERIFY2(evaluateOn(item, QStringLiteral("icon.name")).toString().isEmpty(), qPrintable(item->objectName()));
+        QVERIFY2(evaluateOn(item, QStringLiteral("icon.source")).toUrl().isEmpty(), qPrintable(item->objectName()));
+    }
+    // Where each item's words start, in the menu.
+    const auto wordsLeft = [](QQuickItem *item) {
+        const QString text = item->property("text").toString();
+        const QList<QQuickItem *> descendants = item->findChildren<QQuickItem *>();
+        for (QQuickItem *child : descendants) {
+            if (child->inherits("QQuickText") && child->property("text").toString() == text && child->isVisible()) {
+                return child->mapToItem(nullptr, QPointF(0, 0)).x();
+            }
+        }
+        return -1.0;
+    };
+    const qreal pauseWords = wordsLeft(pause);
+    QVERIFY(pauseWords >= 0);
+    QCOMPARE(wordsLeft(settings), pauseWords);
+    QCOMPARE(settings->mapToItem(nullptr, QPointF(0, 0)).x(), pause->mapToItem(nullptr, QPointF(0, 0)).x());
+    QVERIFY(QMetaObject::invokeMethod(menu, "close"));
+    QTRY_VERIFY(!menu->property("visible").toBool());
+}
+
+void TransportStatusTest::lastFmKeyboardMenuOpensAboveTheBar_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("key");
+    QTest::newRow("Shift+F10") << 10.0 << int(Qt::Key_F10);
+    QTest::newRow("Menu") << 10.0 << int(Qt::Key_Menu);
+    QTest::newRow("Shift+F10, 24 pt") << 24.0 << int(Qt::Key_F10);
+}
+
+// The Last.fm menu opened from the keyboard is in the window, above the
+// status bar and on the indicator's right edge (it opened under the bar,
+// out of the window). The pointer's stays a window of its own at the
+// pointer.
+void TransportStatusTest::lastFmKeyboardMenuOpensAboveTheBar() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, key);
+    const ScopedApplicationFont font(pointSize);
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    // The status bar at the window's bottom, as in the app, with room over it.
+    harness.window->setHeight(700);
+    QTRY_COMPARE(harness.window->contentItem()->height(), 700.0);
+    QQuickItem *status = harness.item(QStringLiteral("statusBar"));
+    QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
+    QObject *menu = harness.root->findChild<QObject *>(QStringLiteral("scrobbleIndicatorMenu"));
+    QVERIFY(status && slot && menu);
+    status->setParentItem(harness.window->contentItem());
+    status->setPosition(QPointF(0, 700 - status->height()));
+    harness.bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
+    harness.bridge->setProperty("lastFmScrobbleState", 1);
+    QTRY_VERIFY(slot->isVisible());
+    const auto openFromKeys = [&]() {
+        slot->forceActiveFocus(Qt::TabFocusReason);
+        QTest::keyClick(harness.window, Qt::Key(key),
+                        key == Qt::Key_F10 ? Qt::ShiftModifier : Qt::NoModifier);
+    };
+    auto *panel = menu->property("background").value<QQuickItem *>();
+    QVERIFY(panel != nullptr);
+    for (int opening = 0; opening < 2; ++opening) {
+        openFromKeys();
+        QTRY_VERIFY(menu->property("opened").toBool());
+        QCOMPARE(panel->window(), harness.window);
+        QRectF at;
+        QTRY_VERIFY2((at = sceneRect(panel), std::abs(at.right() - sceneRect(slot).right()) <= 1.0),
+                     qPrintable(describeRect(at)));
+        QVERIFY2(at.bottom() <= sceneRect(status).top() && at.bottom() >= sceneRect(status).top() - 6,
+                 qPrintable(describeRect(at)));
+        QVERIFY2(at.top() >= 0 && at.left() >= 0 && at.right() <= harness.window->width(),
+                 qPrintable(describeRect(at)));
+        // The keys work in it, and Escape closes it.
+        QTest::keyClick(harness.window, Qt::Key_Down);
+        QTRY_VERIFY(menu->property("currentIndex").toInt() >= 0);
+        QTest::keyClick(harness.window, Qt::Key_Escape);
+        QTRY_VERIFY(!menu->property("visible").toBool());
+    }
+    // The pointer's, after that: a window of its own, at the pointer.
+    const QPoint pressed = sceneCentre(slot);
+    QTest::mouseClick(harness.window, Qt::RightButton, Qt::NoModifier, pressed);
+    QTRY_VERIFY(menu->property("opened").toBool());
+    QCOMPARE(menu->property("popupType").toInt(), 1); // Popup.Window
+    auto *anchor = menu->property("pointAnchor").value<QQuickItem *>();
+    QVERIFY(anchor != nullptr);
+    QCOMPARE(menu->property("parent").value<QQuickItem *>(), anchor);
+    QVERIFY(std::abs(anchor->mapToScene(QPointF()).x() - pressed.x()) <= 1.0
+            && std::abs(anchor->mapToScene(QPointF()).y() - pressed.y()) <= 1.0);
+    QVERIFY(QMetaObject::invokeMethod(menu, "close"));
+    QTRY_VERIFY(!menu->property("visible").toBool());
 }
 
 void TransportStatusTest::issuesButtonShowsNewSeenAndOpen_data() {
@@ -3571,10 +5682,10 @@ void TransportStatusTest::issuesButtonShowsNewSeenAndOpen() {
     QTRY_VERIFY(button->isVisible());
     QCOMPARE(label->property("text").toString(), QStringLiteral("2 new issues"));
     // The status bar's one treatment of an error: a 16 px glyph in the
-    // negative colour and the words in the text colour.
+    // negative colour and the words in the text colour. One of the new
+    // issues is an error: its ring with a cross.
     QCOMPARE(glyph->size(), QSizeF(16, 16));
-    // An outlined triangle: Breeze's filled one loses its "!" as a mask.
-    QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("status-warning.svg")));
+    QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("status-error.svg")));
     QCOMPARE(button->height(), 22.0);
     const QColor negative = harness.token("negative");
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), negative));
@@ -3608,19 +5719,90 @@ void TransportStatusTest::issuesButtonShowsNewSeenAndOpen() {
     QVERIFY2(contrastRatio(negative, onTint) >= 3.0,
              qPrintable(describeContrast(QStringLiteral("glyph on the tint"), negative, onTint)));
 
-    // Seen: "3 issues" in the secondary colour.
+    // Seen: "3 issues" alone in the secondary colour, without a glyph (a
+    // grey ring with a cross beside the count read as "dismiss"), in the
+    // same plate and 6 px padding.
     QVERIFY(QMetaObject::invokeMethod(harness.errors, "markSeen"));
     harness.root->property("statusBar").value<QObject *>()->setProperty("issuesOpen", false);
     QTRY_COMPARE(label->property("text").toString(), QStringLiteral("3 issues"));
-    QCOMPARE(glyph->size(), QSizeF(16, 16));
-    QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
+    QVERIFY(!glyph->isVisible());
+    QVERIFY(label->isVisible());
     QVERIFY(sameColor(label->property("color").value<QColor>(), harness.token("textSecondary")));
+    QTRY_COMPARE(sceneRect(label).left() - sceneRect(button).left(), 6.0);
+    QVERIFY(std::abs(button->width() - (label->width() + 12.0)) <= 1.0);
+    QCOMPARE(button->height(), 22.0);
+    QTRY_COMPARE(sceneRect(status).right() - sceneRect(button).right(), 6.0);
     QVERIFY2(contrastRatio(harness.token("textSecondary"), chrome) >= 4.5,
              qPrintable(describeContrast(QStringLiteral("seen issues"), harness.token("textSecondary"), chrome)));
 
     // A repeat is new again.
     QVERIFY(harness.reportIssue(1, 0, QStringLiteral("old")));
     QTRY_COMPARE(label->property("text").toString(), QStringLiteral("1 new issue"));
+}
+
+void TransportStatusTest::issuesGlyphTakesTheMostSevereNewIssue_data() {
+    addThemeRows();
+}
+
+// Severity is one system: the issues button's glyph is the shape of the
+// most severe new issue, an error's ring with a cross or a warning's
+// triangle, and red only while a new one is an error. New warnings alone
+// keep the triangle in the secondary colour, with "new" in the text colour
+// saying they are new (every new issue was a red triangle, so a scan's
+// notice looked like a stopped engine). Once seen, the glyph is the most
+// severe issue's shape in the secondary colour.
+void TransportStatusTest::issuesGlyphTakesTheMostSevereNewIssue() {
+    QFETCH(bool, dark);
+    Harness harness;
+    QVERIFY2(harness.load(breeze(dark)), qPrintable(harness.error));
+    QQuickItem *button = harness.item(QStringLiteral("statusBarErrorsButton"));
+    QQuickItem *glyph = harness.item(QStringLiteral("statusBarErrorsGlyph"));
+    QQuickItem *label = harness.item(QStringLiteral("statusBarErrorsLabel"));
+    QVERIFY(button && glyph && label);
+    const QColor chrome = harness.token("chrome");
+    const auto shows = [&](const QString &file, const char *glyphToken, const char *labelToken) {
+        return glyph->property("source").toString().endsWith(file)
+            && sameColor(glyph->property("color").value<QColor>(), harness.token(glyphToken))
+            && sameColor(label->property("color").value<QColor>(), harness.token(labelToken));
+    };
+    const QString error = QStringLiteral("status-error.svg");
+    const QString warning = QStringLiteral("status-warning.svg");
+
+    // Two new warnings: the triangle, not red, the words "new" in the text colour.
+    QVERIFY(harness.reportIssue(2, 0, QStringLiteral("notice")));
+    QVERIFY(harness.reportIssue(1, 0, QStringLiteral("ends early")));
+    QTRY_VERIFY(button->isVisible());
+    QCOMPARE(label->property("text").toString(), QStringLiteral("2 new issues"));
+    QCOMPARE(harness.errors->property("unseenErrorCount").toInt(), 0);
+    QVERIFY(shows(warning, "textSecondary", "text"));
+    QVERIFY2(contrastRatio(harness.token("textSecondary"), chrome) >= 3.0,
+             qPrintable(describeContrast(QStringLiteral("warning glyph"), harness.token("textSecondary"), chrome)));
+
+    // An error among them: its ring with a cross, red.
+    QVERIFY(harness.reportIssue(1, 1, QStringLiteral("unreadable")));
+    QTRY_COMPARE(label->property("text").toString(), QStringLiteral("3 new issues"));
+    QCOMPARE(harness.errors->property("unseenErrorCount").toInt(), 1);
+    QVERIFY(shows(error, "negative", "text"));
+
+    // Seen: no glyph, the count alone and quiet, although an error is
+    // among them: a glyph means new issues.
+    QVERIFY(QMetaObject::invokeMethod(harness.errors, "markSeen"));
+    QTRY_COMPARE(label->property("text").toString(), QStringLiteral("3 issues"));
+    QCOMPARE(harness.errors->property("unseenErrorCount").toInt(), 0);
+    QVERIFY(!glyph->isVisible());
+    QVERIFY(sameColor(label->property("color").value<QColor>(), harness.token("textSecondary")));
+
+    // A warning that repeats is new again, and the newest issues are
+    // warnings alone: the triangle, not red, although an error is seen.
+    QVERIFY(harness.reportIssue(2, 0, QStringLiteral("notice")));
+    QTRY_COMPARE(label->property("text").toString(), QStringLiteral("1 new issue"));
+    QVERIFY(glyph->isVisible());
+    QVERIFY(shows(warning, "textSecondary", "text"));
+
+    // The error repeats: red again.
+    QVERIFY(harness.reportIssue(1, 1, QStringLiteral("unreadable")));
+    QTRY_COMPARE(label->property("text").toString(), QStringLiteral("2 new issues"));
+    QVERIFY(shows(error, "negative", "text"));
 }
 
 // Groups are set apart by space alone: no "|" labels, no 1 px rules other
@@ -3684,7 +5866,8 @@ void TransportStatusTest::transportAndStatusBarGrowWithALargeFont() {
         QVERIFY2(rect.left() >= previousRight, qPrintable(names[i]));
         previousRight = rect.right();
     }
-    QCOMPARE(band.height(), std::max(48.0, buttonSize + 16.0));
+    QCOMPARE(band.height(), std::max(48.0, buttonSize + 16.0) + transport->property("laneGrowth").toReal()
+                                + transport->property("balanceRoom").toReal());
     for (const QString &name : {QStringLiteral("seekSlider"), QStringLiteral("transportTimePosition"),
                                 QStringLiteral("transportTimeLength"), QStringLiteral("muteButton"),
                                 QStringLiteral("volumeSlider")}) {
@@ -3716,8 +5899,8 @@ void TransportStatusTest::transportAndStatusBarGrowWithALargeFont() {
     // The status bar: its text and glyphs within the bar under the seam,
     // and centred in it.
     harness.bridge->setProperty("lastFmScrobbleThresholdMs", 115000);
-    harness.bridge->setProperty("lastFmScrobbleState", 6);
-    harness.bridge->setProperty("lastFmScrobbleIneligibility", 3);
+    harness.bridge->setProperty("lastFmScrobbleState", 5);
+    harness.bridge->setProperty("lastFmPendingScrobbleCount", 3);
     QVERIFY(harness.reportIssue(1, 0, QStringLiteral("first")));
     QQuickItem *status = harness.item(QStringLiteral("statusBar"));
     QQuickItem *label = harness.item(QStringLiteral("statusBarPlaybackStateLabel"));
@@ -3755,6 +5938,104 @@ void TransportStatusTest::transportAndStatusBarGrowWithALargeFont() {
     QVERIFY(within(sceneRect(harness.item(QStringLiteral("scrobbleIndicatorLabel"))), sceneRect(slot)));
     QVERIFY(within(sceneRect(harness.item(QStringLiteral("statusBarErrorsLabel"))), sceneRect(issues)));
 }
+
+
+
+void TransportStatusTest::statusItemsShareOneToolTipLineAndTheScanIsOneUnit_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Every tooltip of the status bar's items, the engine's, the scan's, the
+// Last.fm slot's and the issues', ends on one line 6 px above the bar's
+// seam (the engine's floated over it and the others sat on it), and shows
+// its text as plain text. The scan's words, bar and percent are one unit,
+// 6 px apart, the percent after the bar and left-aligned in the room of
+// "100%" (right-aligned after the words, it stood some 16 px off them).
+void TransportStatusTest::statusItemsShareOneToolTipLineAndTheScanIsOneUnit() {
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    Harness harness;
+    QVERIFY2(harness.load(kBreezeDark, 1200), qPrintable(harness.error));
+    QQuickItem *status = harness.item(QStringLiteral("statusBar"));
+    QQuickItem *engine = harness.item(QStringLiteral("statusBarEngineError"));
+    QQuickItem *scan = harness.item(QStringLiteral("statusBarScan"));
+    QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
+    QQuickItem *issues = harness.item(QStringLiteral("statusBarErrorsButton"));
+    QQuickItem *label = harness.item(QStringLiteral("statusBarScanLabel"));
+    QQuickItem *bar = harness.item(QStringLiteral("statusBarScanBar"));
+    QQuickItem *count = harness.item(QStringLiteral("statusBarScanCount"));
+    QVERIFY(status && engine && scan && slot && issues && label && bar && count);
+    harness.bridge->setProperty("libraryRootEntries",
+                                QVariantList{QVariantMap{{QStringLiteral("name"), QStringLiteral("<b>Music</b>")},
+                                                         {QStringLiteral("path"), QStringLiteral("/fixture/music")}}});
+    harness.bridge->setProperty("libraryScanProcessed", 31);
+    harness.bridge->setProperty("libraryScanTotal", 100);
+    harness.bridge->setProperty("libraryScanInProgress", true);
+    harness.bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
+    harness.bridge->setProperty("lastFmScrobbleListenedMs", 60000);
+    harness.bridge->setProperty("lastFmScrobbleState", 1);
+    QVERIFY(harness.reportIssue(2, 0, QStringLiteral("notice")));
+    QTRY_VERIFY(scan->isVisible() && slot->isVisible() && issues->isVisible() && bar->isVisible());
+    // Room over the status bar for the tooltips, as at a window's foot: a
+    // tooltip with none would open under it.
+    harness.window->resize(harness.window->width(), 700);
+    harness.root->property("startButton").value<QQuickItem *>()->setHeight(480);
+    QTRY_VERIFY(sceneRect(status).top() > 500);
+    const qreal seam = sceneRect(status).top();
+    const qreal clearance = status->property("toolTipClearance").toReal();
+    QCOMPARE(clearance, 6.0);
+
+    // Each opened in turn, where its owner shows it.
+    const auto toolTipBottom = [&](QQuickItem *owner, const char *name) -> qreal {
+        QObject *tip = owner->findChild<QObject *>(QLatin1String(name));
+        if (tip == nullptr || !QMetaObject::invokeMethod(tip, "open")
+            || !QTest::qWaitFor([tip] { return tip->property("opened").toBool(); })) {
+            return -1;
+        }
+        // The popup's own item, which its content is in.
+        const QQuickItem *popupItem = qvariant_cast<QQuickItem *>(tip->property("contentItem"))->parentItem();
+        const qreal bottom = popupItem->mapToScene(QPointF(0, popupItem->height())).y();
+        QMetaObject::invokeMethod(tip, "close");
+        return QTest::qWaitFor([tip] { return !tip->property("visible").toBool(); }) ? bottom : -1;
+    };
+    struct Owner {
+        QQuickItem *item;
+        const char *toolTip;
+    };
+    for (const Owner &owner : {Owner{scan, "statusBarScanToolTip"}, Owner{slot, "scrobbleIndicatorToolTip"},
+                               Owner{issues, "statusBarErrorsToolTip"}}) {
+        const qreal bottom = toolTipBottom(owner.item, owner.toolTip);
+        QVERIFY2(std::abs(seam - clearance - bottom) <= 0.5,
+                 qPrintable(QStringLiteral("%1 ends at %2, the seam at %3").arg(QLatin1String(owner.toolTip)).arg(bottom).arg(seam)));
+    }
+    // The scan's tooltip names the folder as it is, not as markup.
+    QObject *scanTip = scan->findChild<QObject *>(QStringLiteral("statusBarScanToolTip"));
+    QVERIFY(scanTip->property("message").toString().contains(QStringLiteral("<b>Music</b>")));
+    QCOMPARE(qvariant_cast<QObject *>(scanTip->property("contentItem"))->property("textFormat").toInt(),
+             int(Qt::PlainText));
+    harness.bridge->setProperty("connected", false);
+    QTRY_VERIFY(engine->isVisible());
+    const qreal engineBottom = toolTipBottom(engine, "statusBarEngineErrorToolTip");
+    QVERIFY2(std::abs(seam - clearance - engineBottom) <= 0.5, qPrintable(QString::number(engineBottom)));
+    harness.bridge->setProperty("connected", true);
+
+    // The scan as one unit: its words, then its bar, then its percent, 6 px
+    // apart, the percent at the bar's end whatever its digits.
+    const qreal gap = scan->property("spacing").toReal();
+    QCOMPARE(gap, 6.0);
+    QTRY_COMPARE(sceneRect(bar).left() - sceneRect(label).right(), gap);
+    QCOMPARE(sceneRect(count).left() - sceneRect(bar).right(), gap);
+    QCOMPARE(count->property("horizontalAlignment").toInt(), int(Qt::AlignLeft));
+    const qreal countLeft = sceneRect(count).left();
+    const qreal scanRight = sceneRect(scan).right();
+    harness.bridge->setProperty("libraryScanProcessed", 7);
+    QTRY_COMPARE(count->property("text").toString(), QStringLiteral("7%"));
+    QCOMPARE(sceneRect(count).left(), countLeft);
+    QCOMPARE(sceneRect(scan).right(), scanRight);
+}
+
 
 int main(int argc, char **argv) {
     useOffscreenPlatformByDefault(argc, argv);

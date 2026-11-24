@@ -304,5 +304,22 @@ class PrivacyOfMenuFrames(unittest.TestCase):
         self.assertEqual(self.painted(2, crop=[20, 10, 70, 45]), 0)
 
 
+class ToolTipWindowTest(unittest.TestCase):
+    def test_a_tooltips_window_is_not_taken_for_the_dialog_it_is_over(self):
+        session = shotlib.Session.__new__(shotlib.Session)
+        row = "[{cls} title={title} name= vis=1 {w}x{h} dpr=1 pos=0,0 flags={flags} active={active} parent={parent}] "
+        listing = (row.format(cls="Main", title="Ferrous", w=1600, h=1000, flags="1", active=0, parent=-1)
+                   + row.format(cls="Dialog", title="Edit Tags", w=1600, h=456, flags="3", active=1, parent=0)
+                   + row.format(cls="ToolTipWindow", title="", w=180, h=30, flags="80d", active=0, parent=1))
+        session.cmd = lambda command: listing
+        self.assertEqual([w["title"] for w in session.dialog_windows()], ["Edit Tags"])
+        dialog = session.dialog_windows()[0]
+        self.assertEqual([w["h"] for w in session.tooltip_windows(session.windows(), dialog)], [30])
+
+    def test_a_dialogs_shot_has_room_for_a_tooltip_over_its_top(self):
+        self.assertEqual(shotlib.Session.area_with_room_above((100, 200, 800, 400), 30), (100, 170, 800, 430))
+        self.assertEqual(shotlib.Session.area_with_room_above((100, 10, 800, 400), 30), (100, 0, 800, 410))
+
+
 if __name__ == "__main__":
     unittest.main()

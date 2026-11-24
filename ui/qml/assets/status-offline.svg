@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!-- The status bar's offline glyph, for scrobbles that wait while Last.fm can't be reached: of
      the Last.fm glyph's family (lastfm.svg), drawn for 16 px in its weight and its rows (3 to 12).
-     Two 2 px arcs over a dot, their tops on whole pixels, struck through with lastfm-paused.svg's
+     Two 2 px arcs over a dot, their tops on whole pixels, struck through with lastfm-strike.svg's
      stroke and its 1.5 px of clear space on either side. A one-colour mask, drawn in the secondary
      colour. -->
 <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">

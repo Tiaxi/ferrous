@@ -59,6 +59,11 @@ QtObject {
             root.albumArtPreviewClosed()
             return
         }
+        root.closeAlbumArtViewerNow()
+    }
+
+    // Closes the album art viewer, whether or not it shows a preview.
+    function closeAlbumArtViewerNow() {
         root.albumArtViewerOpen = false
         root.albumArtShowsAppliedCover = false
         root.comparisonModeAvailable = false
@@ -147,12 +152,17 @@ QtObject {
         if (!root.albumArtPreviewActive) {
             return
         }
-        root.albumArtPreviewActive = false
         const coverSource = root.uiBridge.currentTrackCoverPath || ""
         if (!applied && (!root.albumArtOpenBeforePreview || coverSource.length === 0)) {
-            root.closeAlbumArtViewer()
+            // The viewer closes while it still shows the preview, and ends
+            // it after: it fades out as it was, as it does with its art (the
+            // preview ended first, and the viewer's heading, Show Current
+            // Album Art and footer went on the fade's first frame).
+            root.closeAlbumArtViewerNow()
+            root.albumArtPreviewActive = false
             return
         }
+        root.albumArtPreviewActive = false
         const showsApplied = applied && (appliedSource || "").length > 0
         root.albumArtViewerSource = showsApplied ? appliedSource : coverSource
         root.albumArtViewerInfoSource = PathUtils.pathFromAnyUrl(root.albumArtViewerSource)
@@ -214,7 +224,7 @@ QtObject {
         root.comparisonCandidateSource = ""
         root.comparisonCandidateInfoSource = ""
         root.comparisonModeAvailable = false
-        root.comparisonLabel = I18n.i18nc("@label", "Current Album Art")
+        root.comparisonLabel = I18n.i18nc("@title the album's own art, shown in a preview", "Current Album Art")
         root.albumArtInfoVisible = true
         root.albumArtViewResetToken += 1
         root.refreshAlbumArtFileInfo()
@@ -242,7 +252,7 @@ QtObject {
         root.comparisonCurrentSource = currentSource
         root.comparisonCurrentInfoSource = PathUtils.pathFromAnyUrl(currentSource)
         root.comparisonModeAvailable = currentSource.length > 0
-        root.comparisonLabel = I18n.i18nc("@label artwork found on iTunes", "iTunes Candidate")
+        root.comparisonLabel = I18n.i18nc("@title artwork found on iTunes, shown in a preview", "iTunes Artwork")
 
         root.albumArtInfoVisible = true
         root.albumArtViewResetToken += 1
@@ -258,12 +268,12 @@ QtObject {
             root.albumArtViewerSource = root.comparisonCandidateSource
             root.albumArtViewerInfoSource = root.comparisonCandidateInfoSource
             root.albumArtViewerShowsCurrentTrack = false
-            root.comparisonLabel = I18n.i18nc("@label artwork found on iTunes", "iTunes Candidate")
+            root.comparisonLabel = I18n.i18nc("@title artwork found on iTunes, shown in a preview", "iTunes Artwork")
         } else {
             root.albumArtViewerSource = root.comparisonCurrentSource
             root.albumArtViewerInfoSource = root.comparisonCurrentInfoSource
             root.albumArtViewerShowsCurrentTrack = true
-            root.comparisonLabel = I18n.i18nc("@label", "Current Album Art")
+            root.comparisonLabel = I18n.i18nc("@title the album's own art, shown in a preview", "Current Album Art")
         }
         root.albumArtInfoVisible = true
         root.albumArtViewResetToken += 1

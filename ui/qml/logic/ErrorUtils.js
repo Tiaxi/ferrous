@@ -41,6 +41,20 @@ function countSuffix(count) {
         : ""
 }
 
+// Why the file `subject` is marked unreadable on its rows, from a playback
+// error about it: the file and why it failed, the system's text of the
+// error, as of now, without what playback did then ("playback stopped"),
+// which is stale once another track plays; Recent Issues keeps that. An
+// error with no system text gives its message.
+function unreadableReason(subject, message, detail) {
+    const why = String(detail || "").trim()
+    if (why.length === 0) {
+        return String(message || "")
+    }
+    return FerrousUi.I18n.i18nc("@info:tooltip why a track could not be played; file name, system's reason",
+        "Couldn't play \u201c%1\u201d (%2).", String(subject || "").split("/").pop(), why)
+}
+
 // The heading and message of an entry, for one line of text.
 function describe(entry) {
     if (!entry) {
@@ -113,19 +127,37 @@ function issueTimeText(ms, nowMs) {
             Qt.formatDate(date, Qt.locale().dateFormat(1 /* Locale.ShortFormat */)), time)
 }
 
-// The glyph of an entry: Last.fm's waiting scrobbles and the library's
-// notices are quiet; anything else that went wrong is a warning in the
-// negative colour.
-const GlyphWarning = 0
-const GlyphOffline = 1
-const GlyphInformation = 2
+// The glyph of an entry, one per severity wherever an issue shows: an
+// error's ring with a cross, in the negative colour; a warning's triangle,
+// quiet, in the secondary colour; Last.fm's waiting scrobbles, a warning,
+// the Last.fm slot's offline glyph in that colour. Shape and colour both
+// say which (the triangle in two colours told them apart by colour alone).
+const GlyphError = 0
+const GlyphWarning = 1
+const GlyphOffline = 2
 
 function issueGlyph(category, severity) {
-    if (severity === SeverityWarning && category === CategoryLastFm) {
-        return GlyphOffline
+    if (severity === SeverityError) {
+        return GlyphError
     }
-    if (severity === SeverityWarning && category === CategoryLibrary) {
-        return GlyphInformation
-    }
-    return GlyphWarning
+    return category === CategoryLastFm ? GlyphOffline : GlyphWarning
 }
+
+// The asset of a glyph, in ui/qml/assets.
+function glyphAsset(glyph) {
+    return glyph === GlyphError ? "status-error.svg"
+        : glyph === GlyphOffline ? "status-offline.svg"
+        : "status-warning.svg"
+}
+
+// The colour of a glyph from `palette` (a UiPalette): an error's the
+// negative colour, the others the secondary one.
+function glyphColor(glyph, palette) {
+    return glyph === GlyphError ? palette.negative : palette.textSecondary
+}
+
+// A file that ends early: a playback warning, as the bridge records it
+// (file_ends_early in src/frontend_bridge/events.rs, passed on unchanged by
+// BridgeClient), so the seek bar's mark at the cut is the warning's glyph
+// in its colour, as the issue is in the status bar and Recent Issues.
+const EndsEarlyGlyph = issueGlyph(CategoryPlayback, SeverityWarning)

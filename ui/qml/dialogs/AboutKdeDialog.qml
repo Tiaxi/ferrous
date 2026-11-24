@@ -24,12 +24,12 @@ Components.DialogWindow {
     objectName: "aboutKdeDialog"
     title: I18n.i18nc("@title:window", "About KDE")
 
-    // About Ferrous's geometry: the content's inset from the window's
-    // edges, the page's inset and its gap under the heading, where About
-    // Ferrous has its tabs and the gap under them, and the room between
-    // the page's last line and the buttons.
-    readonly property real contentPadding: Kirigami.Units.gridUnit
-    readonly property real pageInset: Kirigami.Units.largeSpacing
+    // About Ferrous's geometry: the page's inset and its gap under the
+    // heading, where About Ferrous has its tabs and the gap under them,
+    // and the room between the page's last line and the buttons.
+    readonly property real pageInset: root.uiPalette.scaledSize(Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing)
+    readonly property real iconSize: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.large)
+    readonly property real headingInset: Math.max(0, Math.round(root.pageInset - root.iconSize / 12))
     readonly property real pageTopMargin: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing + 2
     readonly property real pageBottomGap: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
     // The room around the page, inside its view, for a link's focus ring,
@@ -42,7 +42,7 @@ Components.DialogWindow {
     // text wraps within it.
     readonly property real contentMinimumWidth: Math.ceil(Math.max(
         Kirigami.Units.gridUnit * 18,
-        aboutKdeHeading.implicitWidth + Kirigami.Units.smallSpacing + 2 * root.contentPadding,
+        aboutKdeHeading.implicitWidth + root.headingInset + 2 * root.contentPadding,
         aboutKdeLinks.widestLink + 2 * root.pageInset + 2 * root.contentPadding,
         aboutKdeFooter.implicitWidth))
     FontMetrics {
@@ -125,14 +125,14 @@ Components.DialogWindow {
 
         RowLayout {
             id: aboutKdeHeading
-            Layout.leftMargin: Kirigami.Units.smallSpacing
+            Layout.leftMargin: root.headingInset
             spacing: Kirigami.Units.gridUnit - 2
 
             Kirigami.Icon {
                 objectName: "aboutKdeIcon"
                 // As About Ferrous's icon: larger with a larger font.
-                implicitWidth: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.large)
-                implicitHeight: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.large)
+                implicitWidth: root.iconSize
+                implicitHeight: root.iconSize
                 source: "kde"
                 Accessible.ignored: true
             }

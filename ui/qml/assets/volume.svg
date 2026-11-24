@@ -1,9 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- The transport's volume glyph, drawn for 16 px at 1x on whole pixels at the weight of
-     the transport's glyphs beside it (Breeze's speaker, with 1 px waves, read lighter than Next): a
-     solid speaker in columns 1 to 7 and rows 2 to 13, as tall as Next, and two 2 px waves, with a
-     clear pixel between each part, corners included. A one-colour mask, drawn in the text colour. -->
+<!-- The transport's volume glyph, outlines drawn for 16 px at the weight of the transport's glyphs
+     beside it (Breeze's speaker, with 1 px waves, read lighter than Next): a solid speaker in columns 1
+     to 7 and rows 2 to 13, as tall as Next, and two waves as 2 px arcs, whole pixels where they are
+     upright, with clear space between each part. Its diagonals and arcs are smooth at 2x and at a
+     larger font (a grid of squares was a staircase there). A one-colour mask, drawn in the text
+     colour. -->
 <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
-<path fill="#000" d="M6 2h2v1h-2z M11 2h2v1h-2z M5 3h3v1h-3z M12 3h2v1h-2z M4 4h4v1h-4z M13 4h2v1h-2z M1 5h7v1h-7z M9 5h2v1h-2z M13 5h2v1h-2z M1 6h7v1h-7z M10 6h2v1h-2z M14 6h2v1h-2z M1 7h7v1h-7z M10 7h2v1h-2z M14 7h2v1h-2z M1 8h7v1h-7z M10 8h2v1h-2z M14 8h2v1h-2z M1 9h7v1h-7z M10 9h2v1h-2z M14 9h2v1h-2z M1 10h7v1h-7z M9 10h2v1h-2z M13 10h2v1h-2z M4 11h4v1h-4z M13 11h2v1h-2z M5 12h3v1h-3z M12 12h2v1h-2z M6 13h2v1h-2z M11 13h2v1h-2z"/>
+<path fill="#000" d="M1 5H3.5L6.5 2H8V14H6.5L3.5 11H1Z"/>
+<path fill="none" stroke="#000" stroke-width="2" stroke-linecap="butt" d="M9.8 5.1C10.6 5.7 11 6.3 11 7V9C11 9.7 10.6 10.3 9.8 10.9 M12 2.6C13.9 3.8 15 5.4 15 7V9C15 10.6 13.9 12.2 12 13.4"/>
 </svg>

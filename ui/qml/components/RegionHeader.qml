@@ -9,15 +9,19 @@ import "../logic/FormatUtils.js" as FormatUtils
 // The header row of a region, such as the library and the queue: its name,
 // its totals ("12 artists · 28 albums · 176 tracks") and a hairline under
 // it. Items declared inside go at its right end, such as column labels.
-// When the row is short of room, the totals drop whole totals from the end
-// ("12 artists · 28 albums"), never a part of one, and go once even their
-// first total doesn't fit; the name elides only when it alone doesn't fit.
+// When the row is short of room, the totals give way to compactTotals, when
+// the region has one, such as the library's "176 tracks"; without one they
+// drop whole totals from the end ("12 artists · 28 albums"), never a part of
+// one. They go once even that doesn't fit; the name elides only when it alone
+// doesn't fit.
 Item {
     id: root
 
     required property var uiPalette
     property string title: ""
     property string totals: ""
+    // What the totals shorten to when they don't fit whole, at any width.
+    property string compactTotals: ""
     // Where the name starts, such as the queue's title column.
     property real leftInset: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
     property real rightInset: 0
@@ -31,14 +35,19 @@ Item {
     // items at the right end.
     readonly property real totalsRoom: root.width - root.leftInset - root.rightInset
         - Math.ceil(titleLabel.implicitWidth) - Kirigami.Units.largeSpacing - trailing.implicitWidth
-    // As many of the totals, from the first, as fit whole in their room;
-    // none when even the first, "12 artists", doesn't.
+    // The totals when they fit whole in their room; otherwise the compact
+    // totals, or as many of the totals, from the first, as fit whole; none
+    // when even that doesn't fit.
     readonly property string shownTotals: {
+        const fits = text => Math.ceil(totalsMetrics.advanceWidth(text)) <= root.totalsRoom
+        if (root.compactTotals.length > 0 && root.totals.length > 0 && !fits(root.totals)) {
+            return fits(root.compactTotals) ? root.compactTotals : ""
+        }
         const parts = root.totals.length > 0 ? root.totals.split(FormatUtils.fieldSeparator) : []
         let shown = ""
         for (let i = 0; i < parts.length; ++i) {
             const candidate = i === 0 ? parts[0] : shown + FormatUtils.fieldSeparator + parts[i]
-            if (Math.ceil(totalsMetrics.advanceWidth(candidate)) > root.totalsRoom) {
+            if (!fits(candidate)) {
                 break
             }
             shown = candidate

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "QmlSmokeTest.h"
+#include "TestColor.h"
 
 #include <gst/gst.h>
 
@@ -21,6 +22,7 @@ private slots:
     void pointerOverTheViewBringsTheViewerControlsBack();
     void gstreamerStoppedTrackPlaysAgainWithItsOverview_data();
     void gstreamerStoppedTrackPlaysAgainWithItsOverview();
+    void gstreamerTrackChangesKeepTheTransportsTrack();
     void modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPicture_data();
     void modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPicture();
     void hiddenWaveformFetchesTheDetailItsFirstSwitchNeeds_data();
@@ -62,6 +64,7 @@ private slots:
     void waveformEditorPerChannelZoomShowsOlderDetailUntilTheNewArrives();
     void waveformEditorSparseDetailCoversEachPointsFrames();
     void waveformEditorSeparatesChannelPanes();
+    void waveformEditorDrawsNothingPastTheCut();
     void waveformEditorRestrictsDetailWorkToVisiblePoints();
     void waveformEditorDetailPointsUseAbsoluteSampleTimes();
     void waveformEditorReusesSameSizedCache();
@@ -75,11 +78,14 @@ private slots:
     void waveformEditorFollowsThePlaybackClock();
     void waveformEditorSeeksMoveAtOnce();
     void waveformEditorHoverDrawsCrosshairAndReadouts();
+    void waveformEditorCrosshairReadsOverTheFill_data();
+    void waveformEditorCrosshairReadsOverTheFill();
     void waveformEditorCrosshairLabelsMatchSpectrogramMargins();
     void waveformEditorCrosshairLabelsKeepApartInShortPlots();
     void waveformEditorCrosshairLabelsStayReadableInNarrowPlots();
     void waveformEditorDrawsNoCrosshairLabelItLeavesOut();
     void waveformEditorLevelReadoutUsesTheMinusSign();
+    void waveformEditorReadoutFollowsTheTextScale();
     void waveformOverlaysKeepClearOfTheReservedCorner();
     void waveformEditorSampleViewRepaintsCrosshairCleanly();
     void waveformEditorSampleViewUsesSmoothInterpolation();
@@ -87,6 +93,7 @@ private slots:
     void waveformEditorRulersFollowGridSetting();
     void waveformEditorRulersRemainVisibleWhenZoomed();
     void waveformEditorPlayheadIsThinAndNeutral();
+    void waveformEditorCrosshairYieldsToThePlayhead();
     void waveformEditorOverviewRespectsCoverageAndChannelIdentity();
     void waveformEditorReferenceLineContrastsWaveform();
     void waveformEditorContrastLinesUseFboSafeCompositionModes();
@@ -426,10 +433,21 @@ Item {
     QCOMPARE(waveform->backgroundColor(), palette->property("view").value<QColor>());
     QCOMPARE(waveform->waveformColor(), palette->property("paneWave").value<QColor>());
     QCOMPARE(waveform->laneSeamColor(), plotColors->property("plotLaneSeam").value<QColor>());
+    // In a viewer, the pane's seam: one line between the lanes.
+    QVERIFY(surface->setProperty("viewerMode", true));
+    QCOMPARE(waveform->laneSeamColor(), plotColors->property("plotLaneSeam").value<QColor>());
+    QVERIFY(palette->metaObject()->indexOfProperty("viewerWaveformLaneSeam") < 0);
+    QVERIFY(surface->setProperty("viewerMode", false));
+    QCOMPARE(waveform->laneSeamColor(), plotColors->property("plotLaneSeam").value<QColor>());
     QCOMPARE(waveform->playheadColor().alpha(), 255);
     // The crosshair's readout on the plot's plates, as the spectrogram's
-    // (not a translucent grey of its own, #5f5f65 on Breeze Light).
-    QCOMPARE(waveform->readoutPlateColor(), plotColors->property("plotPlate").value<QColor>());
+    // (not a translucent grey of its own, #5f5f65 on Breeze Light), and
+    // opaque as the spectrogram's are: the dashed line and the peaks showed
+    // through its digits (H22).
+    QColor plate = plotColors->property("plotPlate").value<QColor>();
+    QVERIFY(plate.alpha() < 255);
+    plate.setAlpha(255);
+    QCOMPARE(waveform->readoutPlateColor(), plate);
     QCOMPARE(waveform->readoutPlateEdgeColor(), plotColors->property("plotPlateEdge").value<QColor>());
     QCOMPARE(waveform->readoutTextColor(), plotColors->property("plotText").value<QColor>());
     QTRY_VERIFY(waveform->crosshairEnabled());
@@ -619,7 +637,7 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
     // height in either state.
     QVERIFY(!bridge->property("showLevelMeter").toBool());
     QTRY_VERIFY(surface->height() > 20);
-    // The queue at its default height: the visualization has 47% of the
+    // The queue at its default height: the visualization has 46% of the
     // right column, and what the queue's whole rows leave over. The meter
     // changes neither.
     auto *rightSplit = root->findChild<QQuickItem *>(QStringLiteral("rightSplit"));
@@ -629,7 +647,7 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
     const double rowPitch = queue->property("rowPitch").toReal();
     QVERIFY(listTop > 0 && rowPitch > 0);
     const double queueHeight = listTop
-        + std::floor((std::round(rightSplit->height() * (1 - 0.47)) - listTop) / rowPitch) * rowPitch;
+        + std::floor((std::round(rightSplit->height() * (1 - 0.46)) - listTop) / rowPitch) * rowPitch;
     QTRY_COMPARE(queue->height(), queueHeight);
     QVERIFY(!meter->isVisible());
     QTRY_COMPARE(spectrogram->height(), surface->height());
@@ -1047,36 +1065,56 @@ void WaveformSmokeTest::waveformEditorSeeksWhereTheCrosshairShows() {
         return device;
     };
 
+    // The time scale's labels, which read as finely.
+    item->setHoverPosition(0.0, 0.0, false);
+    const QStringList scaleTexts = record()->engine.texts;
     for (const double pointerX : {0.2, 137.7, 211.33, 319.9}) {
         item->setHoverPosition(pointerX, 50.0, true);
         const auto drawn = record();
         // The crosshair is on the device column under the pointer, at its
         // left edge, dashed as the spectrogram's: 4 px on, 3 off, in the
         // plot's text at 45 %.
-        const QVector<double> crosshair = verticalLinesIn(drawn->engine, Qt::CustomDashLine);
+        QVector<double> crosshair;
+        for (const auto &[line, pen] : drawn->engine.lines) {
+            if (line.dx() == 0.0 && line.dy() != 0.0 && pen.style() == Qt::CustomDashLine
+                && pen.dashOffset() == 0.0) {
+                crosshair.push_back(line.x1());
+            }
+        }
         QCOMPARE(crosshair.size(), 1);
         const double columnX = std::floor(pointerX * scale + 1e-6) / scale;
         QVERIFY(std::abs(crosshair.constFirst() - columnX) < 1e-9);
         for (const auto &[line, pen] : drawn->engine.lines) {
-            if (pen.style() == Qt::CustomDashLine) {
+            if (pen.style() == Qt::CustomDashLine && pen.dashOffset() != 0.0) {
+                // What is between them, on the same line and no wider.
+                QCOMPARE(pen.dashPattern(), (QList<qreal>{3.0, 4.0}));
+                QVERIFY(pen.widthF() <= 1.0);
+                if (line.dx() == 0.0) {
+                    QVERIFY(std::abs(line.x1() - columnX) < 1e-9);
+                }
+            } else if (pen.style() == Qt::CustomDashLine) {
                 QCOMPARE(pen.dashPattern(), (QList<qreal>{4.0, 3.0}));
                 QCOMPARE(pen.color().rgb(), item->readoutTextColor().rgb());
                 QVERIFY(std::abs(pen.color().alphaF() - item->readoutTextColor().alphaF() * 0.45) < 0.01);
             }
         }
-        // The time with one decimal at the default zoom, as the
-        // spectrogram's; zoomed in, as many as tell its columns apart.
+        // The time as finely as a device pixel tells it, and no finer:
+        // tenths for the whole 10 s track, 31 ms a pixel at 1x; zoomed in,
+        // 4 ms a pixel at 1x, hundredths (it read milliseconds).
         double viewStart = 0.0;
         double viewEnd = 0.0;
         {
             QMutexLocker lock(&item->m_stateMutex);
             std::tie(viewStart, viewEnd) = item->visibleRangeLocked();
         }
-        const int decimals = WaveformEditorItem::crosshairTimeDecimals(
-            (viewEnd - viewStart) / std::ceil(320 * scale - 1e-6), zoom);
-        QCOMPARE(decimals, zoom == 1.0 ? 1 : 3);
+        const int decimals = CrosshairReadout::crosshairTimeDecimals(
+            (viewEnd - viewStart) / std::ceil(320 * scale - 1e-6));
+        QCOMPARE(decimals, zoom == 1.0 ? 1 : 2);
         const QRegularExpression timeLabel(QStringLiteral("^\\d+:\\d\\d\\.\\d{%1}$").arg(decimals));
-        const QStringList shown = drawn->engine.texts.filter(timeLabel);
+        QStringList shown = drawn->engine.texts.filter(timeLabel);
+        for (const QString &label : scaleTexts) {
+            shown.removeOne(label);
+        }
         QCOMPARE(shown.size(), 1);
 
         // A click there seeks to the time it shows.
@@ -1086,7 +1124,7 @@ void WaveformSmokeTest::waveformEditorSeeksWhereTheCrosshairShows() {
         item->mousePressEvent(&press);
         QCOMPARE(seekSpy.count(), 1);
         const double seconds = seekSpy.at(0).at(0).toDouble();
-        QCOMPARE(WaveformEditorItem::formatCrosshairTime(seconds, decimals), shown.constFirst());
+        QCOMPARE(CrosshairReadout::formatCrosshairTime(seconds, decimals), shown.constFirst());
         double start = 0.0;
         double end = 0.0;
         {
@@ -2095,6 +2133,70 @@ void WaveformSmokeTest::waveformEditorSeparatesChannelPanes() {
     QVERIFY(canvas.pixelColor(160, 91).green() > 180);
 }
 
+// A file that ends early: nothing of the lanes is drawn past where it is
+// cut off, neither the waveform's spine nor the centre lines nor the seam
+// between the lanes. The plot ends in a lane seam's line at the cut, and the
+// rest is the bare floor (H26).
+void WaveformSmokeTest::waveformEditorDrawsNothingPastTheCut() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setViewMode(1);
+    item.setChannelCountHint(2);
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 10.0;
+    item.m_detail.sampleRateHz = 1'000;
+    item.m_detail.channelCount = 2;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 10'000;
+    item.m_detail.extrema.resize(40'000);
+    for (int i = 0; i < 20'000; ++i) {
+        // Silence after the cut, as the decoder reads none there.
+        const bool cut = i / 2 >= 5'000;
+        item.m_detail.extrema[i * 2] = cut ? 0.0F : -0.5F;
+        item.m_detail.extrema[i * 2 + 1] = cut ? 0.0F : 0.5F;
+    }
+    const QColor floor(5, 9, 7);
+    const QColor seam(79, 94, 86);
+    const auto paint = [&item] {
+        QImage canvas(320, 180, QImage::Format_RGB32);
+        canvas.fill(Qt::magenta);
+        QPainter painter(&canvas);
+        item.paint(&painter);
+        painter.end();
+        return canvas;
+    };
+
+    // Without a cut, the lanes' lines run to the plot's end.
+    const QImage whole = paint();
+    QCOMPARE(whole.pixelColor(240, 90), seam);
+    QVERIFY(whole.pixelColor(240, 45) != floor);
+    QVERIFY(whole.pixelColor(80, 35).green() > 180);
+
+    item.setMarkerSeconds(5.0);
+    const QImage cut = paint();
+    QTRY_COMPARE(item.markerX(), 160.0);
+    // Before the cut, the waveform and the seam between the lanes.
+    QVERIFY(cut.pixelColor(80, 35).green() > 180);
+    QCOMPARE(cut.pixelColor(80, 90), seam);
+    // At it, a seam's line the plot's height.
+    for (int y : {0, 45, 90, 179}) {
+        QCOMPARE(cut.pixelColor(160, y), seam);
+    }
+    // Past it, every pixel is the floor.
+    for (int x = 161; x < 320; ++x) {
+        for (int y = 0; y < 180; ++y) {
+            if (cut.pixelColor(x, y) != floor) {
+                QFAIL(qPrintable(QStringLiteral("drawn past the cut at %1,%2").arg(x).arg(y)));
+            }
+        }
+    }
+    // A cut past the view's end leaves the view as it is.
+    item.setMarkerSeconds(12.0);
+    QCOMPARE(paint(), whole);
+}
+
 void WaveformSmokeTest::waveformEditorRestrictsDetailWorkToVisiblePoints() {
     WaveformEditorItem item;
     item.setWidth(400);
@@ -2515,28 +2617,174 @@ void WaveformSmokeTest::waveformEditorHoverDrawsCrosshairAndReadouts() {
     QVERIFY(changedPixels > 250);
 }
 
+void WaveformSmokeTest::waveformEditorCrosshairReadsOverTheFill_data() {
+    QTest::addColumn<QColor>("floor");
+    QTest::addColumn<QColor>("fill");
+    QTest::addColumn<QColor>("text");
+    // The waveform plot's floor, fill and text in Breeze's two themes.
+    QTest::newRow("dark") << QColor(0x14, 0x16, 0x18) << QColor(0x86, 0xba, 0xd4) << QColor(0xfc, 0xfc, 0xfc);
+    QTest::newRow("light") << QColor(0xff, 0xff, 0xff) << QColor(0x2c, 0x56, 0x6c) << QColor(0x23, 0x26, 0x29);
+}
+
+void WaveformSmokeTest::waveformEditorCrosshairReadsOverTheFill() {
+    // The crosshair's dashes vanished over the waveform's fill, at 1.4:1,
+    // and at 60 % of the floor what is between them was a faint second
+    // line there (3.6:1). At 85 % it is one dark dotted line through the
+    // fill (6.5:1; 6.3:1 in light), nothing on the floor, and the line is a
+    // pixel wide as before.
+    QFETCH(QColor, floor);
+    QFETCH(QColor, fill);
+    QFETCH(QColor, text);
+    WaveformEditorItem item;
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDurationSeconds(10.0);
+    item.setBackgroundColor(floor);
+    item.setReadoutTextColor(text);
+    item.m_hoverPosition = QPointF(60.0, 30.0);
+    const auto drawnOn = [&item](const QColor &under) {
+        QImage plot(200, 100, QImage::Format_ARGB32_Premultiplied);
+        plot.fill(under);
+        QPainter painter(&plot);
+        item.drawCrosshair(painter, 200, 100, 0.0, 10.0);
+        painter.end();
+        return plot;
+    };
+    const QImage onFill = drawnOn(fill);
+    const QImage onFloor = drawnOn(floor);
+    // Both lines, where no plate is on them.
+    for (const bool column : {true, false}) {
+        double best = 1.0;
+        int touchedBeside = 0;
+        int dashes = 0;
+        int gaps = 0;
+        for (int i = 0; i < 25; ++i) {
+            const QPoint at = column ? QPoint(60, i) : QPoint(i, 30);
+            const QPoint beside = at + (column ? QPoint(-2, 0) : QPoint(0, -2));
+            best = std::max(best, contrastRatio(onFill.pixelColor(at), fill));
+            if (channelDistance(onFill.pixelColor(beside), fill) > 1) {
+                ++touchedBeside;
+            }
+            if (channelDistance(onFloor.pixelColor(at), floor) > 1) {
+                ++dashes;
+            } else {
+                ++gaps;
+            }
+        }
+        QVERIFY2(best >= 6.0, qPrintable(QStringLiteral("%1:1 over the fill").arg(best)));
+        QCOMPARE(touchedBeside, 0);
+        // Still dashed on the floor, 4 on and 3 off.
+        QVERIFY2(dashes >= 12 && gaps >= 8,
+            qPrintable(QStringLiteral("%1 on, %2 off").arg(dashes).arg(gaps)));
+    }
+}
+
+void WaveformSmokeTest::waveformEditorReadoutFollowsTheTextScale() {
+    // In a viewer over the whole screen the readout is on its strip's type
+    // scale, as the lane heads are: its plates drawn for its text at 1.2
+    // times the window's, padded at that scale, and the window's at 1.
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setHeight(200);
+    item.setDurationSeconds(10.0);
+    const QColor floor(0x14, 0x16, 0x18);
+    const QColor plateFill(0xff, 0x00, 0x00);
+    item.setBackgroundColor(floor);
+    item.setReadoutPlateColor(plateFill);
+    item.setReadoutPlateEdgeColor(Qt::transparent);
+    item.setReadoutTextColor(plateFill);
+    item.m_hoverPosition = QPointF(200.0, 60.0);
+    QCOMPARE(item.textScale(), 1.0);
+    QSignalSpy changed(&item, &WaveformEditorItem::textScaleChanged);
+    // The plates' rects, from the pixels of their fill.
+    const auto plates = [&item, &floor, &plateFill]() {
+        QImage plot(400, 200, QImage::Format_ARGB32_Premultiplied);
+        plot.fill(floor);
+        QPainter painter(&plot);
+        item.drawCrosshair(painter, 400, 200, 0.0, 10.0);
+        painter.end();
+        // The value's above the time's, which is on the bottom edge.
+        QRect value;
+        QRect time;
+        for (int y = 0; y < plot.height(); ++y) {
+            for (int x = 0; x < plot.width(); ++x) {
+                if (plot.pixelColor(x, y) != plateFill) {
+                    continue;
+                }
+                QRect &rect = y >= 150 ? time : value;
+                rect = rect.isNull() ? QRect(x, y, 1, 1) : rect.united(QRect(x, y, 1, 1));
+            }
+        }
+        return std::pair{value, time};
+    };
+    const auto expected = [](const QString &text, double textScale) {
+        const QFontMetrics metrics(CrosshairReadout::font(textScale));
+        return CrosshairReadout::plateSize(metrics.horizontalAdvance(text), metrics,
+                                           CrosshairReadout::Colors{}, textScale);
+    };
+    const QString timeText = CrosshairReadout::formatCrosshairTime(5.0, 1);
+    const auto [windowValue, windowTime] = plates();
+    QVERIFY(windowValue.isValid() && windowTime.isValid());
+    // The rounded corners leave a plate's corner pixels out: its middle
+    // row and column are its size.
+    QCOMPARE(windowTime.width(), expected(timeText, 1.0).width());
+    QCOMPARE(windowTime.height(), expected(timeText, 1.0).height());
+
+    item.setTextScale(1.2);
+    QCOMPARE(changed.count(), 1);
+    QCOMPARE(item.textScale(), 1.2);
+    item.setTextScale(1.2);
+    QCOMPARE(changed.count(), 1);
+    const auto [screenValue, screenTime] = plates();
+    QVERIFY(screenValue.isValid() && screenTime.isValid());
+    QCOMPARE(screenTime.width(), expected(timeText, 1.2).width());
+    QCOMPARE(screenTime.height(), expected(timeText, 1.2).height());
+    QVERIFY(screenTime.width() > windowTime.width());
+    QVERIFY(screenValue.width() > windowValue.width());
+
+    item.setTextScale(1.0);
+    const auto [againValue, againTime] = plates();
+    QCOMPARE(againValue, windowValue);
+    QCOMPARE(againTime, windowTime);
+}
+
 void WaveformSmokeTest::waveformEditorCrosshairLabelsMatchSpectrogramMargins() {
-    QCOMPARE(WaveformEditorItem::formatCrosshairTime(28.98, 3), QStringLiteral("0:28.980"));
-    QCOMPARE(WaveformEditorItem::formatCrosshairTime(3'723.004, 3), QStringLiteral("1:02:03.004"));
+    QCOMPARE(CrosshairReadout::formatCrosshairTime(28.98, 3), QStringLiteral("0:28.980"));
+    QCOMPARE(CrosshairReadout::formatCrosshairTime(3'723.004, 3), QStringLiteral("1:02:03.004"));
     // One decimal, as the spectrogram's: "1:46.0".
-    QCOMPARE(WaveformEditorItem::formatCrosshairTime(106.0, 1), QStringLiteral("1:46.0"));
-    QCOMPARE(WaveformEditorItem::formatCrosshairTime(28.98, 1), QStringLiteral("0:29.0"));
-    QCOMPARE(WaveformEditorItem::formatCrosshairTime(3'723.004, 2), QStringLiteral("1:02:03.00"));
-    // One at the default zoom, whatever the track's length; zoomed in, as
-    // many as a column needs, to milliseconds.
-    QCOMPARE(WaveformEditorItem::crosshairTimeDecimals(0.24, 1.0), 1);
-    QCOMPARE(WaveformEditorItem::crosshairTimeDecimals(0.002, 1.0), 1);
-    QCOMPARE(WaveformEditorItem::crosshairTimeDecimals(0.24, 2.0), 1);
-    QCOMPARE(WaveformEditorItem::crosshairTimeDecimals(0.05, 4.0), 2);
-    QCOMPARE(WaveformEditorItem::crosshairTimeDecimals(0.0001, 64.0), 3);
+    QCOMPARE(CrosshairReadout::formatCrosshairTime(106.0, 1), QStringLiteral("1:46.0"));
+    QCOMPARE(CrosshairReadout::formatCrosshairTime(28.98, 1), QStringLiteral("0:29.0"));
+    QCOMPARE(CrosshairReadout::formatCrosshairTime(3'723.004, 2), QStringLiteral("1:02:03.00"));
+    QCOMPARE(CrosshairReadout::formatCrosshairTime(83.43, 0), QStringLiteral("1:23"));
+    QCOMPARE(CrosshairReadout::formatCrosshairTime(3'723.6, 0), QStringLiteral("1:02:04"));
+    // From how long a column is, one rule for both plots, whatever the
+    // zoom: hundredths below 10 ms, tenths to 100 ms, whole seconds above.
+    // A 3:49 track across 1,240 px: 185 ms at 100 %, 48 ms at 381 %, and
+    // 9 ms at 2,000 %.
+    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(229.0 / 1'240), 0);
+    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(229.0 / 3.81 / 1'240), 1);
+    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(229.0 / 20.0 / 1'240), 2);
+    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(0.1), 1);
+    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(0.01), 1);
+    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(0.0099), 2);
+    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(0.0001), 2);
+    // Its digits tabular.
+    QCOMPARE(CrosshairReadout::font().featureValue(QFont::Tag("tnum")), 1u);
+    // Padded as a lane's label, 6 px at either side of the text and 20 px
+    // tall at the default font (it had 3 px around the text).
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont defaultSize = applicationFont;
+    defaultSize.setPointSizeF(10.0);
+    QGuiApplication::setFont(defaultSize);
     // With the plates' 1 px edge, as the spectrogram's, each plate is 2 px
     // larger each way.
     {
         const CrosshairReadout::Colors edged{QColor(Qt::black), QColor(Qt::white), QColor(255, 255, 255, 36)};
         const auto [value, time] = WaveformEditorItem::crosshairLabelRects(
             1'183, 318, 563, 137, 42, 48, 12, QSizeF(), QRect(), 0, 0, edged);
-        QCOMPARE(value.size(), QSize(42 + 8, 12 + 8));
-        QCOMPARE(time.size(), QSize(48 + 8, 12 + 8));
+        QCOMPARE(value.size(), QSize(42 + 14, 22));
+        QCOMPARE(time.size(), QSize(48 + 14, 22));
     }
 
     constexpr int width = 1'183;
@@ -2551,13 +2799,14 @@ void WaveformSmokeTest::waveformEditorCrosshairLabelsMatchSpectrogramMargins() {
             width, height, cursorX, cursorY,
             valueWidth, timeWidth, textHeight);
 
-    QCOMPARE(valueRect.right(), width - 3);
+    // Its fill 5 px from the edges, as the plates', with their edge's pixel.
+    QCOMPARE(valueRect.right(), width - 5);
     // Centred on the horizontal line.
     QCOMPARE(valueRect.y(), cursorY - valueRect.height() / 2);
     QCOMPARE(timeRect.x(), cursorX - timeRect.width() / 2);
-    QCOMPARE(timeRect.bottom(), height - 3);
-    QCOMPARE(valueRect.size(), QSize(valueWidth + 6, textHeight + 6));
-    QCOMPARE(timeRect.size(), QSize(timeWidth + 6, textHeight + 6));
+    QCOMPARE(timeRect.bottom(), height - 5);
+    QCOMPARE(valueRect.size(), QSize(valueWidth + 12, 20));
+    QCOMPARE(timeRect.size(), QSize(timeWidth + 12, 20));
 }
 
 void WaveformSmokeTest::waveformEditorCrosshairLabelsKeepApartInShortPlots() {
@@ -2586,7 +2835,7 @@ void WaveformSmokeTest::waveformEditorCrosshairLabelsKeepApartInShortPlots() {
     const auto [value, time] = WaveformEditorItem::crosshairLabelRects(
         width, 220, 599, 219, 42, 48, 12, reserved);
     QVERIFY(value.bottom() < time.top());
-    QCOMPARE(value.right(), width - 3);
+    QCOMPARE(value.right(), width - 5);
     // In a plot too short for that, the time stops at the level's left.
     const auto [shortValue, shortTime] = WaveformEditorItem::crosshairLabelRects(
         width, 30, 599, 29, 42, 48, 12, reserved);
@@ -2769,7 +3018,7 @@ void WaveformSmokeTest::waveformOverlaysKeepClearOfTheReservedCorner() {
     QCOMPARE(topValue.right(), corner.left() - 1 - CrosshairReadout::kCornerGap);
     const auto [lowValue, lowTime] = WaveformEditorItem::crosshairLabelRects(
         width, height, 100, 100, 42, 48, 12, reserved);
-    QCOMPARE(lowValue.right(), width - 3);
+    QCOMPARE(lowValue.right(), width - 5);
     QCOMPARE(lowTime, topTime);
 
     WaveformEditorItem item;
@@ -2976,6 +3225,63 @@ void WaveformSmokeTest::waveformEditorPlayheadIsThinAndNeutral() {
     QVERIFY(std::abs(playhead.red() - playhead.green()) < 12);
     QVERIFY(playhead.red() > left.red());
     QCOMPARE(left, right);
+}
+
+// A seek on the plot lands the playhead under the pointer, where the
+// crosshair's dashes were drawn over it: the landing read as the hover line.
+// Within 2 px of the playhead the crosshair's vertical line gives way to
+// it, and its time stays on the axis: within 1 px, a landing a pixel off
+// still showed the dashes beside the playhead as a doubled line (H16).
+void WaveformSmokeTest::waveformEditorCrosshairYieldsToThePlayhead() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setCrosshairEnabled(true);
+    setTestPosition(item, 5.0);
+    const auto paint = [&item]() {
+        QImage canvas(320, 180, QImage::Format_RGB32);
+        canvas.fill(Qt::black);
+        QPainter painter(&canvas);
+        item.paint(&painter);
+        painter.end();
+        return canvas;
+    };
+    const QImage bare = paint();
+    // The playhead, at 5 s of 10 in 320 px.
+    QVERIFY(QColor(bare.pixel(160, 40)).red() > QColor(bare.pixel(156, 40)).red());
+    // The rows above the horizontal line and the plates, and the bottom
+    // edge, where the time is.
+    const auto columnDiffers = [&bare](const QImage &shown, int x) {
+        int differing = 0;
+        for (int y = 0; y < 80; ++y) {
+            differing += shown.pixel(x, y) != bare.pixel(x, y) ? 1 : 0;
+        }
+        return differing;
+    };
+    const auto bottomDiffers = [&bare](const QImage &shown) {
+        int differing = 0;
+        for (int y = 150; y < 180; ++y) {
+            for (int x = 120; x < 200; ++x) {
+                differing += shown.pixel(x, y) != bare.pixel(x, y) ? 1 : 0;
+            }
+        }
+        return differing;
+    };
+    for (const double x : {158.0, 159.0, 160.0, 161.0, 162.0}) {
+        item.setHoverPosition(x, 120.0, true);
+        const QImage shown = paint();
+        for (int column = 157; column <= 163; ++column) {
+            QVERIFY2(columnDiffers(shown, column) == 0,
+                qPrintable(QStringLiteral("hover at %1: column %2").arg(x).arg(column)));
+        }
+        QVERIFY2(bottomDiffers(shown) > 50, qPrintable(QStringLiteral("no time at %1").arg(x)));
+    }
+    // Three pixels off, the line is the crosshair's.
+    item.setHoverPosition(163.0, 120.0, true);
+    QVERIFY(columnDiffers(paint(), 163) > 20);
+    item.setHoverPosition(157.0, 120.0, true);
+    QVERIFY(columnDiffers(paint(), 157) > 20);
 }
 
 void WaveformSmokeTest::waveformEditorOverviewRespectsCoverageAndChannelIdentity() {
@@ -3268,6 +3574,19 @@ Window {
     if (QTest::currentTestFailed()) {
         return;
     }
+
+    // Moving on the label with its plate shown round it: the label's cell
+    // takes no hover from the plot under it, as the label does not (the
+    // plate's handler over the cell took it, and the crosshair's place with
+    // it).
+    QTRY_VERIFY(firstVisibleItemNamed(window->contentItem(), QStringLiteral("plotLaneButtons"))->opacity() == 1.0);
+    QVERIFY(!window->grabWindow().isNull());
+    const QPoint onLabel = center(label) + QPoint(2, 1);
+    QTest::mouseMove(window, onLabel);
+    QTest::qWait(50);
+    QVERIFY(waveform->m_hoverActive);
+    QVERIFY(hoverHandler->property("hovered").toBool());
+    QCOMPARE(waveform->mapToScene(waveform->m_hoverPosition).toPoint(), onLabel);
 
     // Where a button shows when the controls return, and then on it: the
     // pointer keeps the controls up, and the button still takes the click.
@@ -4279,6 +4598,117 @@ void WaveformSmokeTest::gstreamerStoppedTrackPlaysAgainWithItsOverview() {
     QTest::qWait(1000);
     QVERIFY(!analysing->isVisible());
     QVERIFY(!awaiting());
+}
+
+// Writes `seconds` of a tone as FLAC at `path`: whether it did.
+bool writeToneFlac(const QString &path, int seconds) {
+    const QByteArray launch = QStringLiteral(
+        "audiotestsrc num-buffers=%1 samplesperbuffer=4410 wave=sine ! audio/x-raw,format=S16LE,rate=44100,channels=2 "
+        "! flacenc ! filesink location=\"%2\"").arg(seconds * 10).arg(path).toUtf8();
+    GError *error = nullptr;
+    GstElement *pipeline = gst_parse_launch(launch.constData(), &error);
+    if (error != nullptr) {
+        g_error_free(error);
+    }
+    if (pipeline == nullptr) {
+        return false;
+    }
+    gst_element_set_state(pipeline, GST_STATE_PLAYING);
+    GstBus *bus = gst_element_get_bus(pipeline);
+    GstMessage *message = gst_bus_timed_pop_filtered(
+        bus, 10 * GST_SECOND, static_cast<GstMessageType>(GST_MESSAGE_EOS | GST_MESSAGE_ERROR));
+    const bool written = message != nullptr && GST_MESSAGE_TYPE(message) == GST_MESSAGE_EOS;
+    if (message != nullptr) {
+        gst_message_unref(message);
+    }
+    gst_object_unref(bus);
+    gst_element_set_state(pipeline, GST_STATE_NULL);
+    gst_object_unref(pipeline);
+    return written;
+}
+
+// Against the GStreamer backend, whose about-to-finish the mock has not:
+// a file that ends early hands over to the next gapless, and plays again
+// under Repeat One, with the transport never taking its stopped look.
+// Stopped, it keeps the track's length and waveform, with no playhead.
+void WaveformSmokeTest::gstreamerTrackChangesKeepTheTransportsTrack() {
+    QVERIFY(gst_init_check(nullptr, nullptr, nullptr));
+    for (const char *element : {"fakeaudiosink", "flacenc", "flacdec"}) {
+        GstElementFactory *factory = gst_element_factory_find(element);
+        QVERIFY2(factory != nullptr, element);
+        gst_object_unref(factory);
+    }
+    const QByteArray sink = qgetenv("FERROUS_GST_OUTPUT_SINK");
+    qputenv("FERROUS_GST_OUTPUT_SINK", "fakeaudiosink");
+    const auto restoreSink = qScopeGuard([&sink]() { qputenv("FERROUS_GST_OUTPUT_SINK", sink); });
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString root = QFileInfo(dir.path()).canonicalFilePath();
+    const QString cut = root + QStringLiteral("/cut.flac");
+    const QString whole = root + QStringLiteral("/whole.flac");
+    QVERIFY(writeToneFlac(cut, 5));
+    QVERIFY(writeToneFlac(whole, 3));
+    QFile cutFile(cut);
+    QVERIFY(cutFile.resize(cutFile.size() / 2));
+
+    BridgeClient bridge;
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    const auto finish = qScopeGuard([&bridge]() {
+        bridge.setRepeatMode(0);
+        bridge.stop();
+        bridge.clearQueue();
+    });
+    auto *transport = window->findChild<QQuickItem *>(QStringLiteral("transportBar"));
+    auto *time = window->findChild<QQuickItem *>(QStringLiteral("transportTime"));
+    auto *playhead = window->findChild<QQuickItem *>(QStringLiteral("seekPlayhead"));
+    auto *waveform = window->findChild<QQuickItem *>(QStringLiteral("seekWaveform"));
+    auto *mark = window->findChild<QQuickItem *>(QStringLiteral("seekEndsEarlyMark"));
+    QVERIFY(transport && time && playhead && waveform && mark);
+    const auto playing = [&bridge](const QString &path) {
+        return bridge.playbackState() == QStringLiteral("Playing") && bridge.currentTrackPath() == path;
+    };
+    // Whether the stopped look showed on the way.
+    bool lookedStopped = false;
+    const auto watch = [&]() {
+        lookedStopped = lookedStopped || transport->property("stoppedTrack").toBool() || !playhead->isVisible();
+    };
+
+    bridge.setRepeatMode(0);
+    bridge.replaceWithPaths({cut, whole});
+    QTRY_VERIFY_WITH_TIMEOUT(playing(cut) && bridge.waveformEndsEarly(), 10000);
+    QTRY_VERIFY(playhead->isVisible());
+    QTRY_VERIFY(mark->isVisible());
+
+    // Gapless.
+    QMetaObject::Connection watching = connect(window, &QQuickWindow::frameSwapped, window, watch);
+    QTRY_VERIFY_WITH_TIMEOUT(playing(whole), 15000);
+    QTRY_VERIFY_WITH_TIMEOUT(bridge.waveformComplete() && !bridge.waveformEndsEarly(), 10000);
+    disconnect(watching);
+    QVERIFY(!lookedStopped);
+    // The cut was the track before's.
+    QVERIFY(!mark->isVisible());
+
+    bridge.stop();
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.playbackState(), QStringLiteral("Stopped"), 10000);
+    QTRY_COMPARE(time->property("text").toString(), QStringLiteral("–:–– / 0:03"));
+    QVERIFY(waveform->isVisible() && !playhead->isVisible());
+
+    // Repeat One: the same file again.
+    bridge.setRepeatMode(1);
+    bridge.playAt(0);
+    QTRY_VERIFY_WITH_TIMEOUT(playing(cut) && bridge.waveformEndsEarly() && playhead->isVisible(), 10000);
+    const double serial = bridge.currentPlaySerial();
+    watching = connect(window, &QQuickWindow::frameSwapped, window, watch);
+    QTRY_VERIFY_WITH_TIMEOUT(bridge.currentPlaySerial() != serial && playing(cut) && bridge.waveformEndsEarly(),
+                             15000);
+    disconnect(watching);
+    QVERIFY(!lookedStopped);
+    // The same file's cut, once it is analysed again.
+    QTRY_VERIFY(mark->isVisible());
 }
 
 std::unique_ptr<QmlSmokeTest> makeWaveformSmokeTest(const QString &userDirectoriesParent) {

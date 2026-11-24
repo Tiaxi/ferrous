@@ -12,9 +12,10 @@ import "../logic/KeyUtils.js" as KeyUtils
 // its role with DialogButtonBox.buttonRole, and name the default one, which
 // Breeze draws as such and Enter presses, as `primary`.
 //
-// The buttons sit on the dialogs' content inset, a grid unit from the
-// window's sides and bottom, as the content is from its sides and top;
-// the content's own inset under it is the room above them.
+// The buttons sit on the dialogs' content inset (DialogWindow's
+// contentPadding) from the window's sides and bottom, as the content is
+// from its sides and top; the content's own inset under it is the room
+// above them.
 // Buttons that share the row with the box, such as Defaults, take its
 // `inset` as their side margin and its bottomPadding under them, and its
 // `glyphSize` as their glyphs' size.
@@ -26,7 +27,9 @@ DialogButtonBox {
     id: root
 
     property Item primary: null
-    readonly property real inset: Kirigami.Units.gridUnit
+    readonly property real inset: root.Window.window && root.Window.window.contentPadding !== undefined
+        ? root.Window.window.contentPadding
+        : Kirigami.Units.gridUnit
     readonly property real glyphSize: Kirigami.Units.iconSizes.sizeForLabels
 
     leftPadding: root.inset
@@ -53,7 +56,9 @@ DialogButtonBox {
         when: root.contentItem !== null && root.contentChildren.length > 0
     }
 
-    // Each button's glyph, at the row's size.
+    // Each button's glyph, at the row's size. The bindings restore nothing
+    // as they go: _applyPrimary takes a button out and back, and the old
+    // binding, deleted after the new one was set, put 16 px back.
     Instantiator {
         model: root.contentChildren
         delegate: Binding {
@@ -61,6 +66,7 @@ DialogButtonBox {
             target: modelData
             property: "icon.width"
             value: root.glyphSize
+            restoreMode: Binding.RestoreNone
         }
     }
 
@@ -71,6 +77,7 @@ DialogButtonBox {
             target: modelData
             property: "icon.height"
             value: root.glyphSize
+            restoreMode: Binding.RestoreNone
         }
     }
 

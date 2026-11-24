@@ -137,6 +137,11 @@ class Selection(unittest.TestCase):
         src = SOURCE.replace('"fixed", "a literal', '"plate-a-dark", "a literal')
         self.assertEqual(self.cut(t, dict(sheets=plate), source=src), 2)
 
+    def test_the_shot_a_frames_crop_takes_an_item_from(self):
+        t = table(("motion", "rec", "strip 1 0.1 - :: wait 1"), ("dialog", "a", "wait 1"), ("dialog", "b", "wait 1"))
+        cell = dict(strip="rec", include=("dialog", "a", "button"))
+        self.assertEqual(self.cut(t, dict(sheets=[("sheet-a", "A sheet", "dark", [[cell]])])), 2)
+
     def test_composites_and_direct_index_entries(self):
         t = table(("_", "_s", "macro shot one"), ("_", "_d", "macro direct"), ("_", "_i", "macro idle"))
         self.assertEqual(self.cut(t, dict(sheets=tile_sheet(("details", "made-one", None)))), 1)

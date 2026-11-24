@@ -50,15 +50,15 @@ Components.DialogWindow {
     property int _savedResultCount: 0
 
     title: I18n.i18nc("@title:window", "Replace from iTunes")
-    // The content's inset from the window's edges.
-    readonly property real contentPadding: Kirigami.Units.gridUnit
     // 920 px wide with the default font, and as much wider as a larger font
     // makes the text, up to 1280 px, within the screen: wider left a gulf
-    // between the titles and their actions (as at 1964 px at 24 pt); as
-    // tall as the current art and five results, which the list shows whole
-    // (a fixed 680 px left a framed empty band under them).
-    // The user may resize it.
+    // between the titles and their actions (as at 1964 px at 24 pt), and
+    // wider by as much as the inset grows with the font, which took the
+    // room from the text; as tall as the current art and five results,
+    // which the list shows whole (a fixed 680 px left a framed empty band
+    // under them). The user may resize it.
     defaultWidth: Math.min(root.uiPalette.scaledSize(920), 1280)
+        + 2 * (root.contentPadding - Kirigami.Units.gridUnit)
     defaultHeight: Math.ceil(2 * root.contentPadding + root.rowHeight + root.headingHeight
         + root.shownResultRows * root.rowHeight + 2 + itunesArtworkFooter.implicitHeight)
     // The current art's row whole, and a result under it.
@@ -222,6 +222,7 @@ Components.DialogWindow {
             return
         }
         replaceCoverConfirmDialog.suggestionIndex = index
+        replaceCoverConfirmDialog.suggestion = root.suggestionRowAt(index)
         // Over the viewer during its preview, else over this dialog.
         replaceCoverConfirmDialog.windowRoot = root.previewShown && root.previewHost && root.previewHost.Window.window
             ? root.previewHost.Window.window : root
@@ -232,6 +233,45 @@ Components.DialogWindow {
                 : I18n.i18nc("@info", "Replace the album art of \u201c%1\u201d?", target.album))
             : I18n.i18nc("@info", "Replace the current album art with this artwork?")
         replaceCoverConfirmDialog.open()
+    }
+
+    // Whether the target's cover, as targetArtworkSource() picks it, is a
+    // folder image under a name that holds a cover, by the backend's rule;
+    // undefined while the backend has not said.
+    function targetCoverNamed() {
+        const target = root.uiBridge.itunesArtworkTarget || ({})
+        const targetPath = target.trackPath || ""
+        if (targetPath.length > 0 && targetPath !== (root.uiBridge.currentTrackPath || "")) {
+            return target.coverNamed
+        }
+        return root.uiBridge.currentTrackCoverNamed
+    }
+
+    // What Replace does with the current art, as the backend applies it
+    // (artwork::apply_artwork_to_track), which picks the cover the art
+    // shows as Ferrous shows it (metadata: a folder's JPEG or PNG first):
+    // with art embedded in the tracks, it embeds the new art ("embed");
+    // with a folder image named as a cover, such as cover.jpg, it
+    // overwrites that file ("overwrite"); with another folder image, such
+    // as back.jpg, it adds a cover file beside it, which stays ("add").
+    // Empty when the dialog can't tell, as before the backend has said
+    // whether the image has a cover's name, or before its details came.
+    function replaceOutcomeCase() {
+        if ((root.currentArtworkSource || "").length === 0) {
+            return ""
+        }
+        const named = root.targetCoverNamed()
+        const embedded = (root.currentArtworkInfo || ({})).embeddedCover
+        if (embedded === true) {
+            return "embed"
+        }
+        if (named === true) {
+            return "overwrite"
+        }
+        if (named === false && embedded === false) {
+            return "add"
+        }
+        return ""
     }
 
     function requestSuggestionApply(index) {
@@ -398,6 +438,8 @@ Components.DialogWindow {
     // placeholder without one.
     component ArtworkThumbnail: Item {
         property alias source: thumbnailImage.source
+        // Decoded at the rows' size at any size it is drawn, so one image
+        // serves the row and the question's smaller thumbnail of it.
 
         width: root.thumbnailSize
         height: root.thumbnailSize
@@ -425,12 +467,45 @@ Components.DialogWindow {
         }
     }
 
+    // One case of Replace Album Art, when the dialog can't tell which
+    // applies: the condition in the text's ink, then what Replace does,
+    // secondary, both regular, so the question stays the only semibold
+    // line, as in every other confirmation.
+    component ReplaceCoverCase: ColumnLayout {
+        id: replaceCoverCase
+        property string lead: ""
+        property string outcome: ""
+        Layout.fillWidth: true
+        spacing: 2
+
+        Label {
+            objectName: replaceCoverCase.objectName + "Lead"
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            color: root.uiPalette.text
+            textFormat: Text.PlainText
+            text: replaceCoverCase.lead
+        }
+
+        Label {
+            objectName: replaceCoverCase.objectName + "Outcome"
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            color: root.uiPalette.textSecondary
+            textFormat: Text.PlainText
+            text: replaceCoverCase.outcome
+        }
+    }
+
     // A row's text: the title, elided, then the secondary line, which
     // wraps to a second line where it does not fit, as with a large font
     // (the artist and "Loading high-resolution artwork…" elided at
     // 24 pt), and elides past that, with the whole of it in a tooltip.
     component ArtworkText: Column {
         property string title: ""
+        // Semibold for the dialog's lead, the current art's; a result's
+        // is regular.
+        property int titleWeight: Font.Normal
         property string details: ""
         property color detailsColor: root.uiPalette.textSecondary
         property string titleObjectName: ""
@@ -443,6 +518,7 @@ Components.DialogWindow {
             width: parent.width
             textFormat: Text.PlainText
             text: parent.title
+            font.weight: parent.titleWeight
             color: root.uiPalette.text
             elide: Text.ElideRight
         }
@@ -532,36 +608,35 @@ Components.DialogWindow {
                 id: currentArtworkText
                 x: 1 + root.textX
                 y: Math.round((parent.height - height) / 2)
+                // The lead in every state, as the other dialogs' first
+                // line: what there is, apart from what is offered (it had
+                // the weight of every result's title).
+                titleWeight: Font.DemiBold
                 width: Math.max(0, currentArtworkPreviewButton.x - root.textActionsGap - x)
                 titleObjectName: "itunesArtworkCurrentTitle"
                 detailsObjectName: "itunesArtworkCurrentDetails"
                 title: I18n.i18nc("@label", "Current album art")
+                // Under the lead, which has said what it is: neither line
+                // says it again.
                 details: (root.currentArtworkSource || "").length === 0
-                    ? I18n.i18nc("@label", "No current album art is available for this track.")
+                    ? I18n.i18nc("@info after the title Current album art", "This track has no album art.")
                     : (Object.keys(root.currentArtworkInfo || {}).length === 0
-                        ? I18n.i18nc("@label", "Current artwork metadata is not available.")
+                        ? I18n.i18nc("@info after the title Current album art", "Image details aren’t available.")
                         : root.imageDetailsText(root.currentArtworkInfo))
             }
 
-            // Where the results' Preview is, before Apply and clear of the
-            // scrollbar lane, while it searches and once it has rows, so
-            // nothing moves as they arrive. With no rows to line up with,
-            // when it found nothing or failed, on the content's right
-            // inset, as Close under it (rather than hang on the absent
-            // column, 117 px short of Close).
+            // In the column of the results' Preview, before Apply's, whether
+            // it has rows, searches, found nothing or failed: a button that
+            // stays where it is as the search ends (with no rows it went to
+            // the content's edge, 109 px, in one frame).
             Button {
                 id: currentArtworkPreviewButton
                 objectName: "itunesArtworkCurrentPreviewButton"
-                readonly property bool inResultsColumn: itunesArtworkResultsView.count > 0
-                    || root.uiBridge.itunesArtworkLoading === true
                 // No Alt shortcut: the rows repeat Preview and Apply, which would
                 // each take another letter, and a hidden button has none, so
                 // Apply's measure would differ from the rows' by the mnemonic.
                 Kirigami.MnemonicData.enabled: false
-                x: currentArtworkPreviewButton.inResultsColumn
-                    ? parent.width - 1 - itunesArtworkResultsView.scrollbarLane - root.sideInset
-                        - applyMetrics.implicitWidth - root.actionSpacing - width
-                    : parent.width - width
+                x: parent.width - 1 - root.sideInset - applyMetrics.implicitWidth - root.actionSpacing - width
                 y: Math.round((parent.height - height) / 2)
                 flat: true
                 display: AbstractButton.TextBesideIcon
@@ -616,9 +691,6 @@ Components.DialogWindow {
             ListView {
                 id: itunesArtworkResultsView
                 objectName: "itunesArtworkResultsView"
-                // The lane the rows leave for the scrollbar, when it shows.
-                readonly property real scrollbarLane: itunesArtworkScrollBar.visible
-                    ? itunesArtworkScrollBar.lane : 0
                 anchors.fill: parent
                 anchors.margins: 1
                 clip: true
@@ -673,11 +745,14 @@ Components.DialogWindow {
                             ? root.uiPalette.negative : root.uiPalette.textSecondary
                     }
 
-                    // Preview, then Apply, the row's main action, at its end.
+                    // Preview, then Apply, the row's main action, at its end:
+                    // on the rows' inset, which holds the scroll bar's lane
+                    // whether the bar shows or not, so a sixth result moves
+                    // no column.
                     Row {
                         id: suggestionActions
                         objectName: "itunesArtworkResultActions"
-                        x: parent.width - itunesArtworkResultsView.scrollbarLane - root.sideInset - width
+                        x: parent.width - root.sideInset - width
                         y: Math.round((parent.height - height) / 2)
                         spacing: root.actionSpacing
 
@@ -728,14 +803,17 @@ Components.DialogWindow {
             }
 
             // Searching, or nothing found: what the search says, a little
-            // above the middle of where the results would be, with a busy
-            // indicator above it while it searches. Quiet, as the queue's
-            // empty state: the base font, with no glyph, for finding nothing
-            // is a routine outcome; searching is in the secondary colour,
-            // what it found in the text's. A search that failed says so in a
-            // semibold heading, with the system's words under it in the
-            // secondary colour (otherwise it read as finding nothing),
-            // and a warning glyph in the spinner's place. Built from its
+            // above the middle of where the results would be, under a slot
+            // with the busy indicator while it searches. The slot stays, so
+            // the first line keeps its baseline as the search ends, and the
+            // lines after it grow downwards. A search that ends without
+            // results says how in a semibold heading, the window's whole
+            // answer, with the words under it in the secondary colour:
+            // finding nothing under the search's glyph in the secondary
+            // colour, and a failure, with the system's words, under a
+            // warning glyph in the negative colour (a lone secondary line
+            // under a 32 px glyph was under-scaled for the window's
+            // answer). No frame, as no results are there. Built from its
             // parts: Kirigami.PlaceholderMessage's selectable text brings
             // Copy and Select All actions that would take Ctrl+C and Ctrl+A
             // from the Edit menu's.
@@ -744,59 +822,87 @@ Components.DialogWindow {
                 objectName: "itunesArtworkPlaceholder"
                 readonly property bool searching: root.uiBridge.itunesArtworkLoading === true
                 readonly property bool failed: !placeholder.searching && root.uiBridge.itunesArtworkFailed === true
-                anchors.centerIn: parent
+                // The slot and one line: what is placed, whatever follows
+                // the line (centred whole, finding nothing was 22 px above
+                // searching, and the failure's heading 11 px): searching's
+                // line, or the heading of what the search found.
+                readonly property real firstLineBottom: glyphSlot.Layout.preferredHeight + placeholder.spacing
+                    + lineMetrics.implicitHeight
+                anchors.horizontalCenter: parent.horizontalCenter
                 // 3 grid units above the middle, room permitting.
-                anchors.verticalCenterOffset: -Math.min(3 * Kirigami.Units.gridUnit,
-                    Math.max(0, (parent.height - placeholder.height) / 2))
+                y: Math.round(Math.max(0, Math.min(parent.height - placeholder.height,
+                    (parent.height - placeholder.firstLineBottom) / 2 - 3 * Kirigami.Units.gridUnit)))
                 width: Math.min(parent.width - 4 * Kirigami.Units.gridUnit, root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 24))
                 spacing: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
                 visible: itunesArtworkResultsView.count === 0
                     && (placeholder.searching || placeholderMessage.text.length > 0)
 
-                // The style's spinner, 32 px with the default font and
+                // The state's one glyph: 48 px with the default font and
                 // larger with a larger one, as the text under it (a fixed
-                // 32 px stood over 24 pt text): the state's one glyph.
-                BusyIndicator {
-                    objectName: "itunesArtworkBusyIndicator"
+                // 32 px stood over 24 pt text, and 32 px was small for the
+                // window's whole answer).
+                Item {
+                    id: glyphSlot
+                    objectName: "itunesArtworkGlyphSlot"
                     Layout.alignment: Qt.AlignHCenter
-                    Layout.preferredWidth: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.medium)
-                    Layout.preferredHeight: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.medium)
-                    running: placeholder.searching
-                    visible: running
-                }
+                    Layout.preferredWidth: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.large)
+                    Layout.preferredHeight: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.large)
 
-                // A failed search's glyph, in the spinner's place and size:
-                // the app's own warning mark, as the status bar and the
-                // queue draw it (Breeze's dialog-warning as a mask fills
-                // its "!", leaving a plain triangle).
-                Kirigami.Icon {
-                    objectName: "itunesArtworkFailureIcon"
-                    Layout.alignment: Qt.AlignHCenter
-                    Layout.preferredWidth: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.medium)
-                    Layout.preferredHeight: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.medium)
-                    visible: placeholder.failed
-                    source: Qt.resolvedUrl("../assets/status-warning.svg")
-                    isMask: true
-                    color: root.uiPalette.textSecondary
-                    Accessible.ignored: true
+                    // The style's spinner.
+                    BusyIndicator {
+                        objectName: "itunesArtworkBusyIndicator"
+                        anchors.fill: parent
+                        running: placeholder.searching
+                        visible: running
+                    }
+
+                    // A failed search's glyph, in the spinner's place and
+                    // size: the app's own warning mark, as the status bar
+                    // and the queue draw it (Breeze's dialog-warning as a
+                    // mask fills its "!", leaving a plain triangle).
+                    Kirigami.Icon {
+                        objectName: "itunesArtworkFailureIcon"
+                        anchors.fill: parent
+                        visible: placeholder.failed
+                        source: Qt.resolvedUrl("../assets/status-warning.svg")
+                        isMask: true
+                        color: root.uiPalette.negative
+                        Accessible.ignored: true
+                    }
+
+                    // Nothing to show: the search's glyph, in the same
+                    // place, size and ink.
+                    Kirigami.Icon {
+                        objectName: "itunesArtworkNothingFoundIcon"
+                        anchors.fill: parent
+                        visible: !placeholder.searching && !placeholder.failed
+                        source: "edit-find"
+                        isMask: true
+                        color: root.uiPalette.textSecondary
+                        Accessible.ignored: true
+                    }
                 }
 
                 ColumnLayout {
                     Layout.fillWidth: true
                     spacing: Kirigami.Units.smallSpacing
 
+                    // Searching has none: its line says it all.
                     Label {
-                        objectName: "itunesArtworkFailureHeading"
+                        objectName: "itunesArtworkPlaceholderHeading"
                         Layout.fillWidth: true
-                        visible: placeholder.failed
+                        visible: !placeholder.searching
                         textFormat: Text.PlainText
-                        text: I18n.i18nc("@info", "Couldn\u2019t search iTunes")
+                        text: placeholder.failed
+                            ? I18n.i18nc("@info", "Couldn\u2019t search iTunes")
+                            : I18n.i18nc("@info", "No artwork found")
                         font.weight: Font.DemiBold
                         color: root.uiPalette.text
                         horizontalAlignment: Text.AlignHCenter
                         wrapMode: Text.Wrap
-                        // The status in a sentence, as the bridge has it.
-                        Accessible.description: root.uiBridge.itunesArtworkStatusText || ""
+                        // A failure's status in a sentence, as the bridge has
+                        // it; finding nothing's is the line under it.
+                        Accessible.description: placeholder.failed ? (root.uiBridge.itunesArtworkStatusText || "") : ""
                     }
 
                     Label {
@@ -808,8 +914,7 @@ Components.DialogWindow {
                         text: placeholder.failed
                             ? (root.uiBridge.itunesArtworkErrorText || "")
                             : (root.uiBridge.itunesArtworkStatusText || "")
-                        color: placeholder.searching || placeholder.failed
-                            ? root.uiPalette.textSecondary : root.uiPalette.text
+                        color: root.uiPalette.textSecondary
                         horizontalAlignment: Text.AlignHCenter
                         wrapMode: Text.Wrap
                     }
@@ -830,17 +935,130 @@ Components.DialogWindow {
         id: replaceCoverConfirmDialog
         objectName: "replaceCoverConfirmDialog"
         property int suggestionIndex: -1
+        // The suggestion's row, as it was resolved when the question asked.
+        property var suggestion: ({})
         // Over this dialog, or over the viewer during its preview: see
         // applySuggestion().
         uiPalette: root.uiPalette
         windowRoot: root
         title: I18n.i18nc("@title:window", "Replace Album Art")
-        // Two short sentences, as the backend applies it: to the folder's
-        // cover image where the folder has one, otherwise embedded in the
-        // album's tracks (artwork::apply_artwork_to_track), rather than one
-        // sentence of 31 words.
-        details: I18n.i18nc("@info", "The new artwork replaces the album’s cover image file or, if it has none, "
-            + "the artwork embedded in its tracks. Ferrous keeps no copy of the current album art.")
+
+        // What was chosen, under the question, which covers the row it
+        // came from: that row's thumbnail, title and artist. Display only.
+        RowLayout {
+            objectName: "replaceCoverChosen"
+            Layout.fillWidth: true
+            spacing: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
+
+            ArtworkThumbnail {
+                objectName: "replaceCoverChosenThumbnail"
+                readonly property int side: root.uiPalette.scaledSize(48)
+                Layout.preferredWidth: side
+                Layout.preferredHeight: side
+                source: replaceCoverConfirmDialog.suggestion.previewSource || ""
+                Accessible.ignored: true
+            }
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 2
+
+                Label {
+                    objectName: "replaceCoverChosenTitle"
+                    Layout.fillWidth: true
+                    visible: text.length > 0
+                    textFormat: Text.PlainText
+                    text: replaceCoverConfirmDialog.suggestion.albumTitle || ""
+                    color: root.uiPalette.text
+                    wrapMode: Text.Wrap
+                }
+
+                Label {
+                    objectName: "replaceCoverChosenArtist"
+                    Layout.fillWidth: true
+                    visible: text.length > 0
+                    textFormat: Text.PlainText
+                    text: replaceCoverConfirmDialog.suggestion.artistName || ""
+                    color: root.uiPalette.textSecondary
+                    wrapMode: Text.Wrap
+                }
+            }
+        }
+
+        // What Replace does, as the backend applies it: see
+        // replaceOutcomeCase(). One paragraph, secondary, says the outcome
+        // that applies, naming the file it overwrites or adds a cover file
+        // beside (two cases with semibold conditions made the reader work
+        // out which applied, and outranked the question). All of it is in
+        // the folder of the track the art was searched for, and embedding
+        // writes the tracks there with the album's tag, no other folder's.
+        readonly property string outcomeCase: root.replaceOutcomeCase()
+        readonly property string coverFileName: {
+            const path = PathUtils.pathFromAnyUrl(root.currentArtworkSource || "")
+            return path.substring(path.lastIndexOf("/") + 1)
+        }
+        readonly property string embedOutcome:
+            I18n.i18nc("@info", "Ferrous writes the new art into this album’s tracks in this folder.")
+
+        Label {
+            objectName: "replaceCoverOutcome"
+            Layout.fillWidth: true
+            visible: replaceCoverConfirmDialog.outcomeCase.length > 0
+            wrapMode: Text.Wrap
+            color: root.uiPalette.textSecondary
+            textFormat: Text.PlainText
+            text: replaceCoverConfirmDialog.outcomeCase === "overwrite"
+                ? I18n.i18nc("@info %1 is a file name, such as cover.jpg",
+                    "Ferrous overwrites %1, this folder’s cover image.", replaceCoverConfirmDialog.coverFileName)
+                : (replaceCoverConfirmDialog.outcomeCase === "add"
+                    ? I18n.i18nc("@info %1 is a file name, such as back.jpg",
+                        "Ferrous adds a cover file beside %1, which stays.", replaceCoverConfirmDialog.coverFileName)
+                    : replaceCoverConfirmDialog.embedOutcome)
+        }
+
+        // When the dialog can't tell, both cases, as conditions: a folder
+        // with a JPEG or PNG gets a cover file, the one with a cover's name
+        // overwritten or a new one beside the images that stay; otherwise
+        // the tracks get the art. 12 px apart with the default font, more
+        // with a larger one; a case's condition and outcome sit as close as
+        // a question and its path.
+        ColumnLayout {
+            objectName: "replaceCoverConsequence"
+            Layout.fillWidth: true
+            visible: replaceCoverConfirmDialog.outcomeCase.length === 0
+            spacing: root.uiPalette.scaledSize(Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing)
+
+            ReplaceCoverCase {
+                objectName: "replaceCoverFolderCase"
+                lead: I18n.i18nc("@info", "If the folder has a JPEG or PNG image")
+                outcome: I18n.i18nc("@info", "Ferrous overwrites its cover file, such as cover.jpg, or adds one "
+                    + "beside its images.")
+            }
+
+            ReplaceCoverCase {
+                objectName: "replaceCoverEmbedCase"
+                lead: I18n.i18nc("@info", "If it has none")
+                outcome: replaceCoverConfirmDialog.embedOutcome
+            }
+        }
+
+        // What is lost, on its own line, whenever Replace may overwrite
+        // something: a folder's cover file, or the tracks' own embedded art,
+        // which embedding replaces and Ferrous keeps no copy of either. Only
+        // adding a cover file loses nothing. In secondary ink, as Unsaved
+        // Changes' and Quit Anyway's loss lines: under the question every
+        // line is secondary (in the text's colour it outranked the outcome
+        // above it), and Cancel as the default guards the overwrite.
+        Label {
+            objectName: "replaceCoverWarning"
+            Layout.fillWidth: true
+            visible: replaceCoverConfirmDialog.outcomeCase !== "add"
+            wrapMode: Text.Wrap
+            color: root.uiPalette.textSecondary
+            textFormat: Text.PlainText
+            text: I18n.i18nc("@info", "Ferrous keeps no copy of what it overwrites.")
+        }
+
         confirmText: I18n.i18nc("@action:button", "Replace")
         // Breeze's swap: one image for the other. Its "document-replace", a
         // page with a red ×, read as Delete; red is the glyph of the

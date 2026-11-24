@@ -11,6 +11,7 @@
 #include <QApplication>
 #include <QColor>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFont>
 #include <QImage>
@@ -24,6 +25,7 @@
 #include <QQmlExpression>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QRegularExpression>
 #include <QScopeGuard>
 #include <QSignalSpy>
 #include <QStandardPaths>
@@ -65,10 +67,10 @@ const Scheme kBreezeDark{QStringLiteral("#202326"), QStringLiteral("#141618"), Q
 const Scheme kBreezeLight{QStringLiteral("#eff0f1"), QStringLiteral("#ffffff"), QStringLiteral("#232629"),
                           QStringLiteral("#707d8a"), QStringLiteral("#3daee9"), QStringLiteral("#fcfcfc")};
 
-// A window in `scheme`, `width` × `height`, with a 48 px transport band at
-// the top and the palette over a fake bridge and the real controller and
-// results model.
-QByteArray harnessQml(const Scheme &scheme, int width, int height) {
+// A window in `scheme`, `width` × `height`, with a transport band at the
+// top, 48 px unless told otherwise, under a menu bar where asked for, and
+// the palette over a fake bridge and the real controller and results model.
+QByteArray harnessQml(const Scheme &scheme, int width, int height, bool menuBar = false, int transportHeight = 48) {
     return QStringLiteral(R"QML(
 import QtQuick 2.15
 import QtQuick.Controls 2.15
@@ -93,7 +95,7 @@ ApplicationWindow {
     property alias controller: controller
     property alias dialog: dialog
     property alias transport: transport
-
+%9
     QtObject {
         id: bridge
         property var globalSearchModel: searchModel
@@ -102,6 +104,7 @@ ApplicationWindow {
         property bool globalSearchCanExpand: true
         property var globalSearchTotals: [0, 0, 0]
         property string globalSearchSuggestion: ""
+        property int libraryRootCount: 1
         property string currentTrackPath: ""
         property string playbackState: "Stopped"
         property var queries: []
@@ -145,7 +148,7 @@ ApplicationWindow {
             id: transport
             objectName: "transportBar"
             width: parent.width
-            height: 48
+            height: %10
             color: tokens.chrome
             property int presses: 0
             property int wheels: 0
@@ -174,6 +177,16 @@ ApplicationWindow {
         .arg(scheme.window, scheme.view, scheme.text, scheme.inactiveText, scheme.highlight, scheme.button)
         .arg(width)
         .arg(height)
+        .arg(menuBar ? QStringLiteral(R"QML(
+    menuBar: MenuBar {
+        objectName: "harnessMenuBar"
+        Menu { title: "File" }
+        Menu { title: "Edit" }
+        Menu { title: "View" }
+    }
+)QML")
+                     : QString())
+        .arg(transportHeight)
         .toUtf8();
 }
 
@@ -194,6 +207,34 @@ Row result(const QString &type, const QString &label, float score) {
     row.label = label;
     row.score = score;
     return row;
+}
+
+// Results for "mer", as the capture library's: the artist matches best,
+// then its four albums, then the tracks.
+QVector<Row> merRows(const QString &coverUrl) {
+    QVector<Row> rows;
+    Row artist = result(QStringLiteral("artist"), QStringLiteral("The Quiet Meridian"), 1.0f);
+    artist.count = 4;
+    rows << artist;
+    int year = 1998;
+    for (const QString &name : {QStringLiteral("Field Recordings Vol. 2"), QStringLiteral("Glass Orchard"),
+                                QStringLiteral("Low Tide Atlas"), QStringLiteral("Small Hours")}) {
+        Row album = result(QStringLiteral("album"), name, 2.0f);
+        album.artist = QStringLiteral("The Quiet Meridian");
+        album.year = year++;
+        album.coverUrl = coverUrl;
+        rows << album;
+    }
+    for (int i = 0; i < 8; ++i) {
+        Row track = result(QStringLiteral("track"), QStringLiteral("Meridian Study %1").arg(i + 1), 3.0f);
+        track.artist = QStringLiteral("The Quiet Meridian");
+        track.album = QStringLiteral("Glass Orchard");
+        track.coverUrl = coverUrl;
+        track.trackPath = QStringLiteral("/fixture/study%1.flac").arg(i + 1);
+        track.lengthText = QStringLiteral("4:%1").arg(10 + i);
+        rows << track;
+    }
+    return rows;
 }
 
 // Results for "meridian": the tracks match best, then the artist, then the
@@ -223,7 +264,7 @@ QVector<Row> meridianRows(const QString &coverUrl) {
          << track(QStringLiteral("Meridian Drift"), QStringLiteral("Afterimage"), 1.0f, QStringLiteral("/fixture/drift.flac"))
          << track(QStringLiteral("Morning Tide Field"), QStringLiteral("Small Hours"), 4.0f,
                   QStringLiteral("/fixture/morning.flac"));
-    // No cover: a placeholder glyph.
+    // No cover: the no-cover tile.
     Row bare = track(QStringLiteral("Lantern Signal"), QStringLiteral("Small Hours"), 4.0f, QStringLiteral("/fixture/lantern.flac"));
     bare.coverUrl.clear();
     rows << bare;
@@ -250,7 +291,8 @@ QQuickItem *visibleChildNamed(QQuickItem *root, const QString &name) {
     return items.isEmpty() ? nullptr : items.first();
 }
 
-// A result's context as drawn: whole, in one text.
+// A result's context as drawn: whole, in one text, or in runs where its
+// title has no match.
 QList<QQuickItem *> contextTexts(QQuickItem *row) {
     return visibleNamed(row, QStringLiteral("globalSearchResultContext"));
 }
@@ -265,11 +307,52 @@ QRectF contextBoxOf(QQuickItem *row) {
     return rect;
 }
 
+// The words of a run of a context, which is plain text: anything else
+// reads as no words.
+QString contextWords(QQuickItem *context) {
+    if (context->property("textFormat").toInt() != int(Qt::PlainText)) return QStringLiteral("(not plain text)");
+    return context->property("text").toString();
+}
+
 // A result's context, put together from its runs.
 QString contextText(QQuickItem *row) {
     QString text;
-    for (QQuickItem *item : contextTexts(row)) text += item->property("text").toString();
+    for (QQuickItem *item : contextTexts(row)) text += contextWords(item);
     return text;
+}
+
+// The runs of a result's context that are semibold: its matches.
+QStringList contextMatches(QQuickItem *row) {
+    QStringList runs;
+    for (QQuickItem *item : contextTexts(row)) {
+        if (item->property("font").value<QFont>().weight() == QFont::DemiBold) runs << item->property("text").toString();
+    }
+    return runs;
+}
+
+// A row's height at the default font, by its kind and its place: a heading
+// that follows a section has 8 px more.
+qreal rowHeightFor(const QString &kind, int index) {
+    if (kind == QStringLiteral("item")) return 32.0;
+    if (kind.isEmpty()) return 0.0;
+    return kind == QStringLiteral("section") && index > 0 ? 36.0 : 28.0;
+}
+
+// How many of `model`'s rows, from the first, show whole in `room` at the
+// default font, and their height: a heading only with the row under it.
+std::pair<int, qreal> wholeRowsIn(const GlobalSearchResultsModel &model, qreal room) {
+    qreal whole = 0;
+    int shown = 0;
+    while (shown < model.rowCount()) {
+        const QString kind = model.rowDataAt(shown).value(QStringLiteral("kind")).toString();
+        const qreal under = kind == QStringLiteral("section") && shown + 1 < model.rowCount()
+            ? rowHeightFor(model.rowDataAt(shown + 1).value(QStringLiteral("kind")).toString(), shown + 1)
+            : 0.0;
+        if (whole + rowHeightFor(kind, shown) + under > room) break;
+        whole += rowHeightFor(kind, shown);
+        ++shown;
+    }
+    return {shown, whole};
 }
 
 QColor colorOf(QQuickItem *item) {
@@ -290,7 +373,8 @@ struct Harness {
     QTemporaryDir covers;
     QString coverUrl;
 
-    bool load(const Scheme &scheme, QString *errorText, int width = 1600, int height = 1000) {
+    bool load(const Scheme &scheme, QString *errorText, int width = 1600, int height = 1000, bool menuBar = false,
+              int transportHeight = 48) {
         if (!covers.isValid()) {
             *errorText = QStringLiteral("no temporary directory");
             return false;
@@ -302,7 +386,7 @@ struct Harness {
         coverUrl = QUrl::fromLocalFile(coverPath).toString();
         engine.rootContext()->setContextProperty(QStringLiteral("searchModel"), &model);
         QQmlComponent component(&engine);
-        component.setData(harnessQml(scheme, width, height),
+        component.setData(harnessQml(scheme, width, height, menuBar, transportHeight),
                           QUrl::fromLocalFile(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/SearchPaletteHarness.qml")));
         root.reset(component.create());
         if (!root) {
@@ -430,22 +514,36 @@ private slots:
     void sectionsFollowTheirBestMatch();
     void rowsThatChangeKindRedrawInPlace();
     void tooltipFollowsARowThatChangesKindUnderAStillPointer();
+    void tooltipShowsOnlyWhatARowDoesNot();
+    void tooltipKeepsClearOfTheField();
     void rowsShareTheirColumnsAndThumbnails();
     void matchesAreEmphasisedInTheTitleOnly();
+    void contextSaysWhyARowMatched();
+    void contextMatchHoldsOnTheSelection_data();
+    void contextMatchHoldsOnTheSelection();
     void selectedHoveredAndPlayingRowsAreDrawn();
+    void selectedRowsSecondaryMarksStepUp_data();
+    void selectedRowsSecondaryMarksStepUp();
     void footerNamesTheKeysForEachState();
     void suggestionIsASelectableRow();
+    void noResultsSpacingFollowsTheFont_data();
+    void noResultsSpacingFollowsTheFont();
     void recentSearchesShowBeforeTyping();
     void moreRowShowsTheWholeSectionAndKeepsTheSelection();
     void resultsListEndsOnAWholeRow_data();
     void resultsListEndsOnAWholeRow();
+    void noHeadingEndsTheResults();
     void scrolledResultsTakeANewRowCountWithoutABindingLoop_data();
     void scrolledResultsTakeANewRowCountWithoutABindingLoop();
     void modelNotifiesItsCountAsRowsChange();
     void keyboardSelectsAndActs();
     void mouseSelectsAndActs();
     void menuKeyOpensTheSelectedResultsMenu();
+    void resultMenuNamesWhatItActsOn();
+    void resultMenuLeavesItsRowTheInactiveSelection();
     void staleAndBusyResultsDoNotAct();
+    void typingKeepsTheResultsInPlaceAsTheyAre();
+    void onlyASlowSearchDimsTheResults();
     void reopeningWithKeptTextShowsNoEmptySearch();
     void paletteAndDimFadeTogether();
     void clearUsesTheBreezeIconAndNoTextGlyphs();
@@ -453,10 +551,25 @@ private slots:
     void textMeetsItsContrastAsDrawn();
     void largeFontRowsAndFooterHoldTheirText_data();
     void largeFontRowsAndFooterHoldTheirText();
+    void shortWindowPaletteShowsFiveResults_data();
+    void shortWindowPaletteShowsFiveResults();
     void glyphsTargetsAndThumbnailsFollowTheFont_data();
     void glyphsTargetsAndThumbnailsFollowTheFont();
+    void glyphsDrawAtTheirOwnSize_data();
+    void glyphsDrawAtTheirOwnSize();
+    void thumbnailsHaveTheLoadingTintUntilTheirCoversLoad();
     void rowColumnsNeverMeet_data();
     void rowColumnsNeverMeet();
+    void headingsStartTheirSections_data();
+    void headingsStartTheirSections();
+    void tooltipStaysOffTheOtherResults_data();
+    void tooltipStaysOffTheOtherResults();
+    void tooltipFadesWhereItWasAsTheRowsChange();
+    void clearGlyphIsQuietUntilPointedAt_data();
+    void clearGlyphIsQuietUntilPointedAt();
+    void tintsEndAtTheScrollbarsLaneAndTheTextStaysPut();
+    void noCoverTileIsTheLibrarys_data();
+    void noCoverTileIsTheLibrarys();
 };
 
 void SearchPaletteTest::initTestCase() {
@@ -487,7 +600,8 @@ void SearchPaletteTest::paletteSitsUnderTheTransportOverADim_data() {
 
 // 800 px wide (less in a narrow window), centred, 32 px under the
 // transport and its seam, on the view colour with a 6 px radius; the field
-// 44 px with the glyph at 16 px and the text at 52; the footer 28 px under
+// 44 px with the glyph at 20 px, centred on the 24 px lead column, and the
+// text at 52; the footer 28 px under
 // a hairline; and the dim over the whole window.
 void SearchPaletteTest::paletteSitsUnderTheTransportOverADim() {
     QFETCH(bool, dark);
@@ -518,7 +632,7 @@ void SearchPaletteTest::paletteSitsUnderTheTransportOverADim() {
     QCOMPARE(hex(outline), hex(harness.token("seam")));
 
     QQuickItem *icon = harness.item(QStringLiteral("globalSearchFieldIcon"));
-    QCOMPARE(sceneRect(icon).left() - frame.left(), 16.0);
+    QCOMPARE(sceneRect(icon).left() - frame.left(), 20.0);
     QCOMPARE(icon->width(), 16.0);
     QCOMPARE(icon->property("source").toString(), QStringLiteral("search"));
     QCOMPARE(sceneRect(harness.field()).left() - frame.left(), 52.0);
@@ -564,8 +678,8 @@ void SearchPaletteTest::paletteSitsUnderTheTransportOverADim() {
 }
 
 // Each type's results under its heading, in the order of the best match of
-// each; 28 px headings in 12 px semibold secondary text at the title
-// column, 32 px rows; the first result selected.
+// each; a 28 px heading, and 36 px ones after a section, in 12 px semibold
+// secondary text at the title column, 32 px rows; the first result selected.
 void SearchPaletteTest::sectionsFollowTheirBestMatch() {
     Harness harness;
     QString errorText;
@@ -585,7 +699,7 @@ void SearchPaletteTest::sectionsFollowTheirBestMatch() {
             QVERIFY(heading != nullptr);
             headings << heading->property("text").toString();
             headingRows << i;
-            QCOMPARE(rowItem->height(), 28.0);
+            QCOMPARE(rowItem->height(), i == 0 ? 28.0 : 36.0);
             const QFont font = heading->property("font").value<QFont>();
             QCOMPARE(font.weight(), QFont::DemiBold);
             QCOMPARE(font.pointSizeF(), harness.tokens->property("smallPointSize").toReal());
@@ -689,7 +803,7 @@ void SearchPaletteTest::rowsThatChangeKindRedrawInPlace() {
     QVERIFY(visibleChildNamed(albumRow, QStringLiteral("globalSearchResultLength")) == nullptr);
 
     QQuickItem *artistHeadingRow = harness.row(2);
-    QCOMPARE(artistHeadingRow->height(), 28.0);
+    QCOMPARE(artistHeadingRow->height(), 36.0);
     QQuickItem *artistHeading = visibleChildNamed(artistHeadingRow, QStringLiteral("globalSearchSectionHeading"));
     QVERIFY(artistHeading != nullptr);
     QCOMPARE(artistHeading->property("text").toString(), QStringLiteral("Artists"));
@@ -753,8 +867,120 @@ void SearchPaletteTest::tooltipFollowsARowThatChangesKindUnderAStillPointer() {
     QTRY_COMPARE(harness.dialog->property("hoveredResultRow").value<QQuickItem *>(), nullptr);
 }
 
+// A result has a tooltip only where it adds to the row: the row is
+// elided, or there is more to say (its genre, its folder where there are
+// several). It repeated the row.
+void SearchPaletteTest::tooltipShowsOnlyWhatARowDoesNot() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeLight, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    auto rows = meridianRows(harness.coverUrl);
+    for (Row &row : rows) row.rootLabel = QStringLiteral("Shelf");
+    rows[1].genre = QStringLiteral("Ambient");
+    rows[3].label = QStringLiteral("A Remarkably Long Track Title That Will Certainly Not Fit In Its Column, "
+                                   "However Wide the Palette Makes It");
+    rows[4].album = QStringLiteral("An Album Whose Name Runs On Well Past the Room Its Column Has for It");
+    harness.search(QStringLiteral("meridian"), rows, {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    QObject *toolTip = harness.root->findChild<QObject *>(QStringLiteral("globalSearchResultToolTip"));
+    QVERIFY(toolTip != nullptr);
+    toolTip->setProperty("delay", 0);
+    const auto shows = [&](const QString &label) {
+        for (int i = 0; i < harness.model.rowCount(); ++i) {
+            if (harness.model.rowDataAt(i).value(QStringLiteral("label")) != label) continue;
+            QQuickItem *row = harness.row(i);
+            if (row == nullptr) return QStringLiteral("no row");
+            QTest::mouseMove(harness.window, sceneCentre(row));
+            if (!QTest::qWaitFor([&] {
+                    return harness.dialog->property("hoveredResultRow").value<QQuickItem *>() == row;
+                })) {
+                return QStringLiteral("no hover");
+            }
+            QTest::qWait(50);
+            // At rest: open, or gone once its fade has ended.
+            if (!QTest::qWaitFor([&] {
+                    return toolTip->property("opened").toBool() || !toolTip->property("visible").toBool();
+                })) {
+                return QStringLiteral("no rest");
+            }
+            return toolTip->property("opened").toBool() ? toolTip->property("text").toString() : QString();
+        }
+        return QStringLiteral("no result");
+    };
+
+    // All of the row shows, and one folder's name says nothing.
+    QCOMPARE(shows(QStringLiteral("The Quiet Meridian")), QString());
+    QCOMPARE(shows(QStringLiteral("Morning Tide Field")), QString());
+    // More to say.
+    QVERIFY(shows(QStringLiteral("Small Hours")).contains(QStringLiteral("Ambient")));
+    QVERIFY(!shows(QStringLiteral("Small Hours")).contains(QStringLiteral("Shelf")));
+    // The elided title and the elided context.
+    QVERIFY(shows(rows[3].label).contains(rows[3].label));
+    QVERIFY(shows(rows[4].label).contains(rows[4].album));
+    // The folder, where there are several.
+    harness.bridge->setProperty("libraryRootCount", 2);
+    QVERIFY(shows(QStringLiteral("The Quiet Meridian")).contains(QStringLiteral("Shelf")));
+}
+
+// A result's tooltip is under its row or the palette, or over the row
+// where the footer is nearer, and never over the query field (it opened
+// over the field), also as it fades out.
+void SearchPaletteTest::tooltipKeepsClearOfTheField() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeLight, &errorText, 1000, 560), qPrintable(errorText));
+    QVERIFY(harness.open());
+    auto rows = meridianRows(harness.coverUrl);
+    for (Row &row : rows) row.genre = QStringLiteral("Ambient");
+    harness.search(QStringLiteral("meridian"), rows, {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    QObject *toolTip = harness.root->findChild<QObject *>(QStringLiteral("globalSearchResultToolTip"));
+    QVERIFY(toolTip != nullptr);
+    toolTip->setProperty("delay", 0);
+    auto *content = toolTip->property("contentItem").value<QQuickItem *>();
+    QVERIFY(content != nullptr);
+    const QRectF field = sceneRect(harness.item(QStringLiteral("globalSearchQueryField")));
+    const QRectF view = sceneRect(harness.view());
+    QList<QQuickItem *> results;
+    for (int i = 0; i < harness.model.rowCount(); ++i) {
+        QQuickItem *row = harness.row(i);
+        if (harness.model.rowDataAt(i).value(QStringLiteral("kind")) == QStringLiteral("item") && row != nullptr
+            && sceneRect(row).bottom() <= view.bottom() + 0.5) {
+            results << row;
+        }
+    }
+    QVERIFY(results.size() >= 3);
+    bool below = false;
+    for (QQuickItem *row : std::as_const(results)) {
+        QTest::mouseMove(harness.window, sceneCentre(row));
+        QTRY_VERIFY(toolTip->property("opened").toBool());
+        QTRY_COMPARE(harness.dialog->property("toolTipRow").value<QQuickItem *>(), row);
+        const auto tip = [&] { return sceneRect(content->parentItem()); };
+        QTRY_VERIFY2(tip().top() >= sceneRect(row).bottom() || tip().bottom() <= sceneRect(row).top(),
+                     "the tooltip is over its row");
+        QVERIFY2(tip().top() >= field.bottom(), "the tooltip is over the field");
+        QVERIFY(tip().bottom() <= harness.window->height());
+        if (row == results.first()) below = tip().top() >= sceneRect(row).bottom();
+    }
+    QVERIFY(below);
+
+    // Back on the first row, then off the list: it fades where it was.
+    QTest::mouseMove(harness.window, sceneCentre(results.first()));
+    QTRY_COMPARE(harness.dialog->property("toolTipRow").value<QQuickItem *>(), results.first());
+    QTRY_VERIFY(toolTip->property("opened").toBool());
+    const QRectF shownAt = sceneRect(content->parentItem());
+    QTest::mouseMove(harness.window, QPoint(2, 2));
+    QTRY_COMPARE(harness.dialog->property("hoveredResultRow").value<QQuickItem *>(), nullptr);
+    while (toolTip->property("visible").toBool() && content->parentItem()->opacity() > 0.2) {
+        QVERIFY2(std::abs(sceneRect(content->parentItem()).top() - shownAt.top()) < 12, "the fading tooltip moved");
+        QVERIFY2(sceneRect(content->parentItem()).top() >= field.bottom(), "the fading tooltip is over the field");
+        QTest::qWait(8);
+    }
+}
+
 // The lead at 16 px (a 24 px thumbnail with a 2 px radius, the artist
-// glyph, or a placeholder without a cover), the title at 52 px in a 300 px
+// glyph, or the no-cover tile), the title at 52 px in a 380 px
 // column, and the context at one x for every row, whatever its title.
 void SearchPaletteTest::rowsShareTheirColumnsAndThumbnails() {
     Harness harness;
@@ -778,7 +1004,7 @@ void SearchPaletteTest::rowsShareTheirColumnsAndThumbnails() {
         const auto runs = visibleNamed(row, QStringLiteral("globalSearchResultTitle"));
         QVERIFY(!runs.isEmpty());
         QCOMPARE(sceneRect(runs.first()).left() - left, 52.0);
-        QVERIFY(sceneRect(runs.last()).right() - left <= 52.0 + 300.0 + 0.5);
+        QVERIFY(sceneRect(runs.last()).right() - left <= 52.0 + 380.0 + 0.5);
         const auto context = contextTexts(row);
         QVERIFY(!context.isEmpty());
         contextXs << contextBoxOf(row).left() - left;
@@ -803,14 +1029,16 @@ void SearchPaletteTest::rowsShareTheirColumnsAndThumbnails() {
         if (type == QStringLiteral("track")) {
             QQuickItem *length = visibleChildNamed(row, QStringLiteral("globalSearchResultLength"));
             QVERIFY(length != nullptr);
-            QCOMPARE(sceneRect(length).right(), sceneRect(row).right() - 16);
+            // 16 px in, and clear of the scrollbar's lane whether it shows
+            // or not.
+            QCOMPARE(sceneRect(length).right(), sceneRect(row).right() - 16 - 8);
         }
         if (type == QStringLiteral("album")) {
             QVERIFY(contextText(row).startsWith(QStringLiteral("The Quiet Meridian · ")));
         }
     }
     QCOMPARE(contextXs.size(), 7);
-    QVERIFY(std::all_of(contextXs.cbegin(), contextXs.cend(), [](qreal x) { return x == 364.0; }));
+    QVERIFY(std::all_of(contextXs.cbegin(), contextXs.cend(), [](qreal x) { return x == 444.0; }));
     QCOMPARE(thumbnails, 5);
     QCOMPARE(placeholders, 1);
     QCOMPARE(artistGlyphs, 1);
@@ -825,9 +1053,9 @@ void SearchPaletteTest::rowsShareTheirColumnsAndThumbnails() {
 }
 
 // "Meridian Line" for "meridian": "Meridian" semibold, " Line" regular; the
-// context has no emphasis. A row emphasises its matches in its title only
-// (the context of an album found by its artist had its match semibold,
-// and outweighed the title).
+// context has no emphasis. A row emphasises its matches in its title, and
+// in its context only where the title has none, there in the context's
+// secondary colour, so it never outweighs a title.
 void SearchPaletteTest::matchesAreEmphasisedInTheTitleOnly() {
     Harness harness;
     QString errorText;
@@ -854,7 +1082,7 @@ void SearchPaletteTest::matchesAreEmphasisedInTheTitleOnly() {
     const auto wholeContext = [](QQuickItem *row) -> QString {
         const QList<QQuickItem *> texts = contextTexts(row);
         if (texts.size() != 1 || texts.first()->property("font").value<QFont>().weight() != QFont::Normal) return {};
-        return texts.first()->property("text").toString();
+        return contextWords(texts.first());
     };
 
     QQuickItem *row = rowLabelled(QStringLiteral("Meridian Line"));
@@ -874,28 +1102,31 @@ void SearchPaletteTest::matchesAreEmphasisedInTheTitleOnly() {
     QQuickItem *context = visibleChildNamed(row, QStringLiteral("globalSearchResultContext"));
     QVERIFY(context != nullptr);
     QCOMPARE(context->property("text").toString(), QStringLiteral("The Quiet Meridian — Grey Lines"));
-    QCOMPARE(context->property("textFormat").toInt(), int(Qt::PlainText));
     QCOMPARE(context->property("font").value<QFont>().weight(), QFont::Normal);
     QCOMPARE(wholeContext(row), QStringLiteral("The Quiet Meridian — Grey Lines"));
 
-    // An album found by its artist: its title has no match, so nothing is
-    // emphasised; its context, which has the match, stays whole and
-    // regular, where the context starts, in the context's size and colour.
+    // An album found by its artist: its title has no match, so nothing in
+    // it is emphasised; its context has the match semibold
+    // (contextSaysWhyARowMatched), where the context starts, in the
+    // context's size and colour.
     row = rowLabelled(QStringLiteral("Small Hours"));
     QVERIFY(row != nullptr);
     QVERIFY(emphasisedIn(row, titleRun).isEmpty());
-    QCOMPARE(wholeContext(row), QStringLiteral("The Quiet Meridian · 2005"));
-    context = visibleChildNamed(row, QStringLiteral("globalSearchResultContext"));
-    QCOMPARE(sceneRect(context).left() - sceneRect(harness.palette()).left(), 364.0);
-    QCOMPARE(context->property("font").value<QFont>().pointSizeF(), harness.tokens->property("smallPointSize").toReal());
-    QCOMPARE(hex(colorOf(context)), hex(harness.token("textSecondary")));
+    QCOMPARE(contextText(row), QStringLiteral("The Quiet Meridian · 2005"));
+    QCOMPARE(contextMatches(row), QStringList{QStringLiteral("Meridian")});
+    QCOMPARE(contextBoxOf(row).left() - sceneRect(harness.palette()).left(), 444.0);
+    for (QQuickItem *text : contextTexts(row)) {
+        QCOMPARE(text->property("font").value<QFont>().pointSizeF(), harness.tokens->property("smallPointSize").toReal());
+        QCOMPARE(hex(colorOf(text)), hex(harness.token("textSecondary")));
+    }
 
-    // Two matches in a context: still whole and regular.
+    // Two matches in a context: both semibold.
     harness.search(QStringLiteral("quiet small"), meridianRows(harness.coverUrl));
     row = rowLabelled(QStringLiteral("Lantern Signal"));
     QVERIFY(row != nullptr);
     QVERIFY(emphasisedIn(row, titleRun).isEmpty());
-    QCOMPARE(wholeContext(row), QStringLiteral("The Quiet Meridian — Small Hours"));
+    QCOMPARE(contextText(row), QStringLiteral("The Quiet Meridian — Small Hours"));
+    QCOMPARE(contextMatches(row), (QStringList{QStringLiteral("Quiet"), QStringLiteral("Small")}));
     // A title that matches keeps every one of its matches, and its context
     // none.
     row = rowLabelled(QStringLiteral("Small Hours"));
@@ -917,6 +1148,164 @@ void SearchPaletteTest::matchesAreEmphasisedInTheTitleOnly() {
     row = rowLabelled(QStringLiteral("Lantern Signal"));
     QVERIFY(row != nullptr);
     QVERIFY(!wholeContext(row).isEmpty());
+}
+
+// A row whose title has no match says why it was found: the matched run of
+// its context semibold, in the context's own secondary colour, so the
+// titles stay the brightest column (in the text colour it outshone them;
+// 12 of 13 rows for "mer", found by their artist, showed no match at all
+// before). Metadata that looks like markup stays text.
+void SearchPaletteTest::contextSaysWhyARowMatched() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    const QColor secondary = harness.token("textSecondary");
+
+    auto rows = meridianRows(harness.coverUrl);
+    rows[0].count = 2;
+    // Quotes in a title are no match.
+    rows[6].label = QStringLiteral("The \"Lantern\" Signal");
+    // Metadata that looks like markup, and a match at the context's start.
+    rows[5].artist = QStringLiteral("Meridian <b>&amp; Sons</b> <img src=x>");
+    harness.search(QStringLiteral("mer"), rows, {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    const auto rowLabelled = [&harness](const QString &label) -> QQuickItem * {
+        for (int i = 0; i < harness.model.rowCount(); ++i) {
+            if (harness.model.rowDataAt(i).value(QStringLiteral("label")) == label) return harness.row(i);
+        }
+        return nullptr;
+    };
+
+    for (const QString &label : {QStringLiteral("Small Hours"), QStringLiteral("The \"Lantern\" Signal")}) {
+        QQuickItem *row = rowLabelled(label);
+        QVERIFY(row != nullptr);
+        QCOMPARE(contextMatches(row), QStringList{QStringLiteral("Mer")});
+        QVERIFY(contextText(row).startsWith(QStringLiteral("The Quiet Meridian")));
+        const auto runs = contextTexts(row);
+        QCOMPARE(runs.size(), 3);
+        QCOMPARE(runs[1]->property("text").toString(), QStringLiteral("Mer"));
+        QFont regular = runs[0]->property("font").value<QFont>();
+        QCOMPARE(regular.weight(), QFont::Normal);
+        QCOMPARE(runs[2]->property("font").value<QFont>().weight(), QFont::Normal);
+        QFont semibold = regular;
+        semibold.setWeight(QFont::DemiBold);
+        QCOMPARE(runs[1]->property("font").value<QFont>(), semibold);
+        // Weight alone: every run in the context's colour.
+        for (QQuickItem *run : runs) QCOMPARE(hex(colorOf(run)), hex(secondary));
+        // The runs abut, each as wide as its words in its weight, so the
+        // words and the spaces between them keep their room.
+        const QFontMetricsF regularMetrics(regular);
+        const QFontMetricsF semiboldMetrics(semibold);
+        const qreal before = regularMetrics.horizontalAdvance(runs[0]->property("text").toString());
+        QVERIFY2(std::abs(runs[1]->x() - runs[0]->x() - before) <= 1,
+                 qPrintable(QStringLiteral("%1 after %2").arg(runs[1]->x() - runs[0]->x()).arg(before)));
+        const qreal match = semiboldMetrics.horizontalAdvance(QStringLiteral("Mer"));
+        QVERIFY(match > regularMetrics.horizontalAdvance(QStringLiteral("Mer")));
+        QVERIFY2(std::abs(runs[2]->x() - runs[1]->x() - match) <= 1,
+                 qPrintable(QStringLiteral("%1 after %2").arg(runs[2]->x() - runs[1]->x()).arg(match)));
+    }
+    QQuickItem *row = rowLabelled(QStringLiteral("Morning Tide Field"));
+    QVERIFY(row != nullptr);
+    QCOMPARE(contextMatches(row), QStringList{QStringLiteral("Mer")});
+    QCOMPARE(contextText(row), QStringLiteral("Meridian <b>&amp; Sons</b> <img src=x> — Small Hours"));
+    for (QQuickItem *run : contextTexts(row)) {
+        QCOMPARE(run->property("textFormat").toInt(), int(Qt::PlainText));
+    }
+
+    // A title that has the match keeps it: its context stays one plain text.
+    row = rowLabelled(QStringLiteral("Meridian Line"));
+    QVERIFY(row != nullptr);
+    QVERIFY(contextMatches(row).isEmpty());
+    QCOMPARE(contextTexts(row).size(), 1);
+
+    // As drawn: the matched run is no brighter than the rest of its
+    // context, and the title, in the text colour, is brighter than both.
+    row = rowLabelled(QStringLiteral("Small Hours"));
+    QVERIFY(row != nullptr);
+    const auto brightestIn = [&](QQuickItem *text) {
+        const QRectF box = sceneRect(text);
+        const QImage image = harness.window->grabWindow();
+        const qreal scale = static_cast<qreal>(image.width()) / harness.window->width();
+        int brightest = 0;
+        for (qreal x = box.left() + 1; x < box.right() - 1; x += 0.5) {
+            for (qreal y = box.top(); y < box.bottom(); y += 0.5) {
+                brightest = std::max(brightest, qGray(image.pixel(qFloor(x * scale), qFloor(y * scale))));
+            }
+        }
+        return brightest;
+    };
+    const auto runs = contextTexts(row);
+    QCOMPARE(runs.size(), 3);
+    QTRY_VERIFY(brightestIn(runs[0]) > qGray(harness.token("view").rgb()) + 60);
+    QVERIFY2(brightestIn(runs[1]) <= brightestIn(runs[0]) + 8,
+             qPrintable(QStringLiteral("match %1, rest %2").arg(brightestIn(runs[1])).arg(brightestIn(runs[0]))));
+    const auto titles = visibleNamed(row, QStringLiteral("globalSearchResultTitle"));
+    QVERIFY(!titles.isEmpty());
+    QVERIFY2(brightestIn(titles.first()) > brightestIn(runs[1]) + 30,
+             qPrintable(QStringLiteral("title %1, match %2").arg(brightestIn(titles.first())).arg(brightestIn(runs[1]))));
+
+    // What the search doesn't read is never a match: an artist's count.
+    harness.search(QStringLiteral("album"), rows, {1, 2, 4});
+    row = rowLabelled(QStringLiteral("The Quiet Meridian"));
+    QVERIFY(row != nullptr);
+    QVERIFY(contextMatches(row).isEmpty());
+    QCOMPARE(contextText(row), QStringLiteral("2 albums"));
+
+    // Text without a match too, and as rows are reused.
+    harness.search(QStringLiteral("tide"), rows, {1, 2, 4});
+    row = rowLabelled(QStringLiteral("Morning Tide Field"));
+    QVERIFY(row != nullptr);
+    QVERIFY(contextMatches(row).isEmpty());
+    QCOMPARE(contextText(row), QStringLiteral("Meridian <b>&amp; Sons</b> <img src=x> — Small Hours"));
+}
+
+void SearchPaletteTest::contextMatchHoldsOnTheSelection_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("dark") << true;
+    QTest::newRow("light") << false;
+}
+
+// On the selected row the context's match stays semibold and steps up with
+// the rest of the context to the selected secondary colour, which holds its
+// contrast on every selection tint; the title stays the text colour.
+void SearchPaletteTest::contextMatchHoldsOnTheSelection() {
+    QFETCH(bool, dark);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(dark ? kBreezeDark : kBreezeLight, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    harness.search(QStringLiteral("mer"), meridianRows(harness.coverUrl), {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    int small = -1;
+    for (int i = 0; i < harness.model.rowCount(); ++i) {
+        if (harness.model.rowDataAt(i).value(QStringLiteral("label")) == QStringLiteral("Small Hours")) small = i;
+    }
+    QVERIFY(small >= 0);
+    QMetaObject::invokeMethod(harness.controller, "selectDisplayIndex", Q_ARG(QVariant, small));
+    QCOMPARE(harness.selection(), small);
+    QQuickItem *row = harness.row(small);
+    QVERIFY(row != nullptr);
+    QCOMPARE(contextMatches(row), QStringList{QStringLiteral("Mer")});
+
+    const qreal minimum = harness.tokens->property("rowSecondaryContrast").toReal();
+    const QColor view = harness.token("view");
+    QStringList failures;
+    for (QQuickItem *run : contextTexts(row)) {
+        QCOMPARE(hex(colorOf(run)), hex(harness.token("textSecondarySelected")));
+        for (const char *tint : {"selection", "selectionInactive", "selectionHovered", "selectionInactiveHovered",
+                                 "selectionPressed"}) {
+            const QColor background = drawnOver(harness.token(tint), view);
+            if (contrastRatio(colorOf(run), background) < minimum) {
+                failures << describeContrast(run->property("text").toString() + QLatin1Char(' ') + QLatin1String(tint),
+                                             colorOf(run), background);
+            }
+        }
+    }
+    for (QQuickItem *title : visibleNamed(row, QStringLiteral("globalSearchResultTitle"))) {
+        QCOMPARE(hex(colorOf(title)), hex(harness.token("text")));
+    }
+    QVERIFY2(failures.isEmpty(), qPrintable(failures.join(QLatin1Char('\n'))));
 }
 
 // Selected: the selection tint; hovered: the hover tint, which differs from
@@ -1000,6 +1389,105 @@ void SearchPaletteTest::selectedHoveredAndPlayingRowsAreDrawn() {
 // text colour, the action in the secondary one; 6 px from a key to its
 // action, more than a word space, and 18 px between pairs (at 4 px, a word
 // space, each pair ran together into one phrase).
+void SearchPaletteTest::selectedRowsSecondaryMarksStepUp_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("dark") << true;
+    QTest::newRow("light") << false;
+}
+
+// On the selected result, the context, the length and the artist's glyph
+// step up to the selected secondary colour, and a playing title to the
+// selected amber, as on the library's and the queue's selected rows, and
+// hold their contrast on every selection tint (in the view's colours they
+// read weaker there than the track number of a selected queue row). The
+// other rows keep the view's colours.
+void SearchPaletteTest::selectedRowsSecondaryMarksStepUp() {
+    QFETCH(bool, dark);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(dark ? kBreezeDark : kBreezeLight, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    harness.bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/drift.flac"));
+    harness.bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    int drift = -1;
+    int line = -1;
+    int artist = -1;
+    for (int i = 0; i < harness.model.rowCount(); ++i) {
+        const QString label = harness.model.rowDataAt(i).value(QStringLiteral("label")).toString();
+        if (label == QStringLiteral("Meridian Drift")) drift = i;
+        if (label == QStringLiteral("Meridian Line")) line = i;
+        if (label == QStringLiteral("The Quiet Meridian")) artist = i;
+    }
+    QVERIFY(drift >= 0 && line >= 0 && artist >= 0);
+    QCOMPARE(harness.selection(), drift);
+
+    const qreal secondaryContrast = harness.tokens->property("rowSecondaryContrast").toReal();
+    QCOMPARE(secondaryContrast, 6.0);
+    const QColor view = harness.token("view");
+    QStringList failures;
+    const auto onSelection = [&](const QString &what, const QColor &color, double minimum) {
+        for (const char *tint : {"selection", "selectionInactive", "selectionHovered", "selectionInactiveHovered",
+                                 "selectionPressed"}) {
+            const QColor background = drawnOver(harness.token(tint), view);
+            if (contrastRatio(color, background) < minimum) {
+                failures << describeContrast(what + QLatin1Char(' ') + QLatin1String(tint), color, background);
+            }
+        }
+    };
+    const auto secondaryOf = [&](QQuickItem *row) {
+        QList<QQuickItem *> marks = contextTexts(row) + visibleNamed(row, QStringLiteral("globalSearchResultLength"))
+            + visibleNamed(row, QStringLiteral("globalSearchArtistGlyph"));
+        return marks;
+    };
+
+    // The selected playing track.
+    QQuickItem *selected = harness.row(drift);
+    QVERIFY(selected != nullptr);
+    const auto selectedMarks = secondaryOf(selected);
+    QCOMPARE(selectedMarks.size(), 2);
+    for (QQuickItem *mark : selectedMarks) {
+        QCOMPARE(hex(colorOf(mark)), hex(harness.token("textSecondarySelected")));
+        onSelection(mark->objectName(), colorOf(mark), secondaryContrast);
+    }
+    QVERIFY(hex(harness.token("textSecondarySelected")) != hex(harness.token("textSecondary")));
+    const auto titles = visibleNamed(selected, QStringLiteral("globalSearchResultTitle"));
+    QVERIFY(!titles.isEmpty());
+    for (QQuickItem *run : titles) {
+        QCOMPARE(hex(colorOf(run)), hex(harness.token("nowSelected")));
+        onSelection(QStringLiteral("playing title"), colorOf(run), 4.5);
+    }
+    // Another track keeps the view's colours.
+    for (QQuickItem *mark : secondaryOf(harness.row(line))) {
+        QCOMPARE(hex(colorOf(mark)), hex(harness.token("textSecondary")));
+    }
+
+    // The artist selected: its glyph steps up, and the playing track,
+    // no longer selected, has the view's amber.
+    QMetaObject::invokeMethod(harness.controller, "selectDisplayIndex", Q_ARG(QVariant, artist));
+    QCOMPARE(harness.selection(), artist);
+    QQuickItem *artistRow = harness.row(artist);
+    QQuickItem *glyph = visibleChildNamed(artistRow, QStringLiteral("globalSearchArtistGlyph"));
+    QVERIFY(glyph != nullptr);
+    QCOMPARE(hex(colorOf(glyph)), hex(harness.token("textSecondarySelected")));
+    onSelection(QStringLiteral("artist glyph"), colorOf(glyph), 3.0);
+    for (QQuickItem *mark : contextTexts(artistRow)) {
+        QCOMPARE(hex(colorOf(mark)), hex(harness.token("textSecondarySelected")));
+    }
+    for (QQuickItem *run : visibleNamed(harness.row(drift), QStringLiteral("globalSearchResultTitle"))) {
+        QCOMPARE(hex(colorOf(run)), hex(harness.token("now")));
+    }
+    for (QQuickItem *mark : secondaryOf(harness.row(drift))) {
+        QCOMPARE(hex(colorOf(mark)), hex(harness.token("textSecondary")));
+    }
+    // Back on the track, the artist's glyph steps down again.
+    QMetaObject::invokeMethod(harness.controller, "selectDisplayIndex", Q_ARG(QVariant, drift));
+    QCOMPARE(hex(colorOf(glyph)), hex(harness.token("textSecondary")));
+
+    QVERIFY2(failures.isEmpty(), qPrintable(failures.join(QLatin1Char('\n'))));
+}
+
 void SearchPaletteTest::footerNamesTheKeysForEachState() {
     Harness harness;
     QString errorText;
@@ -1106,6 +1594,55 @@ void SearchPaletteTest::suggestionIsASelectableRow() {
     QTRY_VERIFY((clickRow = harness.drawn(QStringLiteral("globalSearchSuggestionRow"))) != nullptr);
     QTest::mouseClick(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(clickRow));
     QCOMPARE(harness.field()->property("text").toString(), QStringLiteral("lantern"));
+}
+
+void SearchPaletteTest::noResultsSpacingFollowsTheFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The no-results message keeps its spacing in step with its text: 8 px
+// over it and under it at the default font, and as much more at a larger
+// one, as UiPalette.scaledSize gives (at 24 pt the message sat 8 px under
+// the field, tighter than the results' headings). Its hint stays drawn
+// 6 px up into the title row's padding, which doesn't grow with the font:
+// scaled, it touched the title.
+void SearchPaletteTest::noResultsSpacingFollowsTheFont() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    const qreal scale = pointSize > 0 ? pointSize / 10.0 : 1.0;
+    const auto scaled = [scale](qreal size) { return std::max(size, std::round(size * scale)); };
+    const qreal rowHeight = harness.dialog->property("resultHeight").toReal();
+    harness.search(QStringLiteral("zzzz"), {});
+    QQuickItem *title = harness.item(QStringLiteral("globalSearchNoResultsTitle"));
+    QQuickItem *hint = harness.item(QStringLiteral("globalSearchNoResultsHint"));
+    QTRY_VERIFY(hint->isVisible());
+    QQuickItem *seam = harness.item(QStringLiteral("globalSearchFieldSeam"));
+    QQuickItem *hairline = harness.item(QStringLiteral("globalSearchFooterHairline"));
+    QTRY_COMPARE(sceneRect(title).top() - sceneRect(seam).bottom(), scaled(8));
+    QCOMPARE(sceneRect(title).height(), rowHeight);
+    QCOMPARE(sceneRect(hint).top() - sceneRect(title).top(), rowHeight - 6);
+    // The room the hint was drawn up from stays under it.
+    QTRY_COMPARE(sceneRect(hairline).top() - sceneRect(hint).bottom(), 6 + scaled(8));
+    if (pointSize > 0) QCOMPARE(scaled(8), 19.0);
+
+    // With a correction, its row 8 px, scaled, over the footer.
+    harness.bridge->setProperty("globalSearchSuggestion", QStringLiteral("meridian"));
+    harness.search(QStringLiteral("merdian"), {});
+    QQuickItem *row = nullptr;
+    QTRY_VERIFY((row = harness.drawn(QStringLiteral("globalSearchSuggestionRow"))) != nullptr);
+    QTRY_COMPARE(sceneRect(hairline).top() - sceneRect(row).bottom(), scaled(8));
 }
 
 // The searches whose results were used show before typing, newest first;
@@ -1260,7 +1797,7 @@ void SearchPaletteTest::resultsListEndsOnAWholeRow() {
     qreal all = 0;
     for (int i = 0; i < harness.model.rowCount(); ++i) {
         const QString kind = harness.model.rowDataAt(i).value(QStringLiteral("kind")).toString();
-        heights << (kind == QStringLiteral("item") ? 32.0 : (kind.isEmpty() ? 0.0 : 28.0));
+        heights << rowHeightFor(kind, i);
         all += heights.last();
     }
     QVERIFY2(all > 16 * 32.0, qPrintable(QString::number(all)));
@@ -1269,18 +1806,13 @@ void SearchPaletteTest::resultsListEndsOnAWholeRow() {
     // their two seams.
     const qreal paletteTop = sceneRect(harness.palette()).top();
     const qreal room = std::min(16 * 32.0, windowHeight - paletteTop - 32 - 44 - 2 - footer->height());
-    qreal whole = 0;
-    int shown = 0;
-    while (shown < heights.size() && whole + heights.at(shown) <= room) {
-        whole += heights.at(shown);
-        ++shown;
-    }
+    const auto [shown, whole] = wholeRowsIn(harness.model, room);
     QVERIFY2(shown > 2 && shown < heights.size(), qPrintable(QStringLiteral("%1 rows in %2 px").arg(shown).arg(room)));
     QTRY_COMPARE(view->height(), whole);
     // The rest scroll under the app's lane scrollbar, as the library's and
     // the queue's (Breeze's own was another hand): 8 px at the
-    // view's right edge, its thumb over the rows' tints, which run to the
-    // edge, while the rows' text keeps clear of its lane.
+    // view's right edge, its thumb alone in that lane: the rows' tints end
+    // there and their text keeps clear of it.
     QQuickItem *scrollBar = harness.item(QStringLiteral("globalSearchScrollBar"));
     QVERIFY(scrollBar != nullptr);
     QTRY_VERIFY(scrollBar->isVisible());
@@ -1292,7 +1824,7 @@ void SearchPaletteTest::resultsListEndsOnAWholeRow() {
     QVERIFY(selectedRow != nullptr);
     QQuickItem *selectedTint = visibleChildNamed(selectedRow, QStringLiteral("rowBackgroundTint"));
     QVERIFY(selectedTint != nullptr);
-    QCOMPARE(sceneRect(selectedTint).right(), sceneRect(view).right());
+    QCOMPARE(sceneRect(selectedTint).right(), sceneRect(scrollBar).left());
     QQuickItem *length = visibleChildNamed(selectedRow, QStringLiteral("globalSearchResultLength"));
     if (length != nullptr) {
         QVERIFY(sceneRect(length).right() <= sceneRect(scrollBar).left() - 16 + 0.5);
@@ -1321,11 +1853,54 @@ void SearchPaletteTest::resultsListEndsOnAWholeRow() {
     qreal few = 0;
     for (int i = 0; i < harness.model.rowCount(); ++i) {
         const QString kind = harness.model.rowDataAt(i).value(QStringLiteral("kind")).toString();
-        few += kind == QStringLiteral("item") ? 32.0 : (kind.isEmpty() ? 0.0 : 28.0);
+        few += rowHeightFor(kind, i);
     }
     if (few + 6 <= room) {
         QTRY_COMPARE(view->height(), few + 6);
     }
+}
+
+// A section's heading never ends the list: in a window where the heading
+// would fit but not the row under it, the list ends over the heading and
+// the scrollbar leads on to both (the heading ended the list, a section
+// with nothing in it).
+void SearchPaletteTest::noHeadingEndsTheResults() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText, 1000, 600), qPrintable(errorText));
+    QVERIFY(harness.open());
+    harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    QQuickItem *view = harness.view();
+    QQuickItem *footer = harness.item(QStringLiteral("globalSearchFooter"));
+    const qreal paletteTop = sceneRect(harness.palette()).top();
+    int headingsHeldBack = 0;
+    for (int windowHeight = 360; windowHeight <= 560; windowHeight += 2) {
+        harness.window->resize(1000, windowHeight);
+        // The overlay the palette is in takes the window's height when it
+        // is next laid out.
+        QTRY_COMPARE(harness.palette()->parentItem()->height(), qreal(windowHeight));
+        const qreal room = windowHeight - paletteTop - 32 - 44 - 2 - footer->height();
+        const auto [shown, whole] = wholeRowsIn(harness.model, room);
+        if (shown == harness.model.rowCount()) continue;
+        const QString next = harness.model.rowDataAt(shown).value(QStringLiteral("kind")).toString();
+        // Where the heading fits by itself.
+        if (next == QStringLiteral("section") && whole + rowHeightFor(next, shown) <= room) ++headingsHeldBack;
+        QTRY_COMPARE(view->height(), whole);
+        // The last row in view is a result.
+        QString last;
+        for (int i = 0; i < harness.model.rowCount(); ++i) {
+            QQuickItem *row = harness.row(i);
+            if (row == nullptr || !row->isVisible() || row->height() <= 0) continue;
+            if (std::abs(sceneRect(row).bottom() - sceneRect(view).bottom()) < 0.5) {
+                last = harness.model.rowDataAt(i).value(QStringLiteral("kind")).toString();
+            }
+        }
+        QVERIFY2(last == QStringLiteral("item"),
+                 qPrintable(QStringLiteral("%1 px: the list ends on a %2 row").arg(windowHeight).arg(last)));
+        QTRY_VERIFY(harness.item(QStringLiteral("globalSearchScrollBar"))->isVisible());
+    }
+    QVERIFY2(headingsHeldBack > 0, "no window held a heading back");
 }
 
 void SearchPaletteTest::scrolledResultsTakeANewRowCountWithoutABindingLoop_data() {
@@ -1588,8 +2163,8 @@ void SearchPaletteTest::mouseSelectsAndActs() {
     QCOMPARE(menuSize.evaluate().toSizeF().toSize(), menuWindow->size());
     // Show in Library has the queue menu's icon.
     QQmlExpression showInLibraryIcon(qmlContext(harness.field()), harness.field(),
-                                     QStringLiteral("resultMenu.itemAt(2).text + '|' + resultMenu.itemAt(2).icon.name"));
-    QCOMPARE(showInLibraryIcon.evaluate().toString(), QStringLiteral("Show in Library|go-jump"));
+                                     QStringLiteral("resultMenu.itemAt(3).text + '|' + resultMenu.itemAt(3).icon.name"));
+    QCOMPARE(showInLibraryIcon.evaluate().toString(), QStringLiteral("Show in Library|view-list-tree"));
     QTest::keyClick(harness.window, Qt::Key_Escape);
     settle();
     QTRY_VERIFY(!menuOpened.evaluate().toBool());
@@ -1667,8 +2242,111 @@ void SearchPaletteTest::menuKeyOpensTheSelectedResultsMenu() {
     QVERIFY(harness.dialog->property("visible").toBool());
 }
 
+// The result's menu is one of the app's context menus: it names what it
+// acts on as the footer does, with the footer's keys, has the library's
+// icons, and groups Show in Library with the folder as the queue's does.
+void SearchPaletteTest::resultMenuNamesWhatItActsOn() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    SteppedAnimationDriver animations;
+    const auto settle = [&animations] { (void)animations.step(1000); };
+    QQmlExpression menuOpened(qmlContext(harness.field()), harness.field(), QStringLiteral("resultMenu.opened"));
+    QQmlExpression menuRows(qmlContext(harness.field()), harness.field(), QStringLiteral(R"JS((function() {
+        const rows = []
+        for (let i = 0; i < resultMenu.count; ++i) {
+            const item = resultMenu.itemAt(i)
+            rows.push(item.text === undefined ? "sep"
+                : item.text + "|" + (item.keyHint || "") + "|" + item.icon.name)
+        }
+        return rows.join("\n")
+    })())JS"));
+
+    const struct {
+        QString type;
+        QString play;
+        QString add;
+    } kinds[] = {
+        {QStringLiteral("artist"), QStringLiteral("Play Artist"), QStringLiteral("Add Artist to Queue")},
+        {QStringLiteral("album"), QStringLiteral("Play Album"), QStringLiteral("Add Album to Queue")},
+        {QStringLiteral("track"), QStringLiteral("Play Track"), QStringLiteral("Add Track to Queue")},
+    };
+    for (const auto &kind : kinds) {
+        const int index = harness.model.indexOfResult(kind.type, 0);
+        QVERIFY(QMetaObject::invokeMethod(harness.controller, "selectDisplayIndex", Q_ARG(QVariant, index)));
+        QTRY_VERIFY(harness.field()->hasActiveFocus());
+        QVERIFY(harness.hints().contains(QStringLiteral("Enter ") + kind.play));
+        QTest::keyClick(harness.window, Qt::Key_Menu);
+        settle();
+        QTRY_VERIFY(menuOpened.evaluate().toBool());
+        const QString rows = menuRows.evaluate().toString();
+        QVERIFY2(!menuRows.hasError(), qPrintable(menuRows.error().toString()));
+        QCOMPARE(rows.split(QLatin1Char('\n')),
+                 (QStringList{
+                     kind.play + QStringLiteral("|Enter|media-playback-start"),
+                     kind.add + QStringLiteral("|Ctrl+Enter|media-playlist-append"),
+                     QStringLiteral("sep"),
+                     QStringLiteral("Show in Library|Alt+Enter|view-list-tree"),
+                     kind.type == QStringLiteral("track") ? QStringLiteral("Open Containing Folder||folder-open")
+                                                          : QStringLiteral("Open Folder||folder-open"),
+                 }));
+        QTest::keyClick(harness.window, Qt::Key_Escape);
+        settle();
+        QTRY_VERIFY(!menuOpened.evaluate().toBool());
+    }
+}
+
 // Results kept from an earlier query, or shown while a newer one runs, do
 // nothing; a new query drops the selection and the pending expansion.
+// While a result's menu is open, which has the keys, its row has the
+// inactive selection, as a library or queue row under its menu does
+// (it kept the active one, as if the list still had the keys), and the
+// active one again once the menu has closed.
+void SearchPaletteTest::resultMenuLeavesItsRowTheInactiveSelection() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    SteppedAnimationDriver animations;
+    const auto settle = [&animations] { (void)animations.step(1000); };
+    QQmlExpression menuVisible(qmlContext(harness.field()), harness.field(), QStringLiteral("resultMenu.visible"));
+    QVERIFY(hex(harness.token("selection")) != hex(harness.token("selectionInactive")));
+    const auto tintOf = [&harness](int index) -> QString {
+        QQuickItem *tint = visibleChildNamed(harness.row(index), QStringLiteral("rowBackgroundTint"));
+        return tint == nullptr ? QString() : hex(colorOf(tint));
+    };
+    const int first = harness.selection();
+    QCOMPARE(tintOf(first), hex(harness.token("selection")));
+
+    // By the pointer, on another result: it is selected, inactive.
+    const int index = harness.model.indexOfResult(QStringLiteral("album"), 0);
+    QVERIFY(index != first);
+    QTest::mouseClick(harness.window, Qt::RightButton, Qt::NoModifier, sceneCentre(harness.row(index)));
+    settle();
+    QTRY_VERIFY(menuVisible.evaluate().toBool());
+    QCOMPARE(harness.selection(), index);
+    QCOMPARE(tintOf(index), hex(harness.token("selectionInactive")));
+    QTest::keyClick(harness.window, Qt::Key_Escape);
+    settle();
+    QTRY_VERIFY(!menuVisible.evaluate().toBool());
+    QCOMPARE(tintOf(index), hex(harness.token("selection")));
+
+    // By the Menu key.
+    QTest::keyClick(harness.window, Qt::Key_Menu);
+    settle();
+    QTRY_VERIFY(menuVisible.evaluate().toBool());
+    QCOMPARE(tintOf(index), hex(harness.token("selectionInactive")));
+    QTest::keyClick(harness.window, Qt::Key_Escape);
+    settle();
+    QTRY_VERIFY(!menuVisible.evaluate().toBool());
+    QCOMPARE(tintOf(index), hex(harness.token("selection")));
+}
+
 void SearchPaletteTest::staleAndBusyResultsDoNotAct() {
     Harness harness;
     QString errorText;
@@ -1677,8 +2355,22 @@ void SearchPaletteTest::staleAndBusyResultsDoNotAct() {
     harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 26});
     QTRY_VERIFY(harness.view()->isVisible());
     harness.bridge->setProperty("globalSearchBusy", true);
-    QCOMPARE(harness.view()->opacity(), 0.5);
-    QVERIFY(!harness.view()->isEnabled());
+    // The pointer neither selects nor acts on a row, nor scrolls the list.
+    QVERIFY(!harness.view()->property("interactive").toBool());
+    const int selected = harness.selection();
+    const int other = harness.model.indexOfResult(QStringLiteral("album"), 0);
+    QVERIFY(other >= 0 && other != selected);
+    const QPoint otherAt = sceneCentre(harness.row(other));
+    QTest::mouseClick(harness.window, Qt::LeftButton, Qt::NoModifier, otherAt);
+    QTest::mouseDClick(harness.window, Qt::LeftButton, Qt::NoModifier, otherAt);
+    QCOMPARE(harness.selection(), selected);
+    QVERIFY(harness.field()->hasActiveFocus());
+    // Nor do the list's own keys move the selection.
+    harness.view()->forceActiveFocus();
+    QTest::keyClick(harness.window, Qt::Key_End);
+    QTest::keyClick(harness.window, Qt::Key_Down);
+    QCOMPARE(harness.selection(), selected);
+    harness.field()->forceActiveFocus();
     QTest::keyClick(harness.window, Qt::Key_Return);
     QTest::keyClick(harness.window, Qt::Key_Return, Qt::ControlModifier);
     QTest::keyClick(harness.window, Qt::Key_Return, Qt::AltModifier);
@@ -1705,6 +2397,98 @@ void SearchPaletteTest::staleAndBusyResultsDoNotAct() {
     harness.field()->setProperty("text", QStringLiteral("other"));
     QVERIFY(!harness.controller->property("pendingExpansion").toMap().contains(QStringLiteral("rowType")));
     QCOMPARE(harness.strings("queries").last(), QStringLiteral("other"));
+}
+
+// While a newer query runs, the rows it replaces are drawn as they were:
+// at full contrast, glyphs too, with the bold runs of the query they were
+// found by (they dropped to half opacity and lost their bold runs on every
+// keystroke, a flash of about 57 ms).
+void SearchPaletteTest::typingKeepsTheResultsInPlaceAsTheyAre() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    harness.search(QStringLiteral("me"), meridianRows(harness.coverUrl), {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    const int track = harness.model.indexOfResult(QStringLiteral("track"), 0);
+    const auto emphasised = [&] {
+        QStringList texts;
+        for (QQuickItem *run : visibleNamed(harness.row(track), QStringLiteral("globalSearchResultTitle"))) {
+            if (run->property("font").value<QFont>().weight() == QFont::DemiBold) texts << run->property("text").toString();
+        }
+        return texts;
+    };
+    QCOMPARE(emphasised(), QStringList{QStringLiteral("Me")});
+    const auto drawnResults = [&] {
+        const QImage image = harness.window->grabWindow();
+        const qreal scale = static_cast<qreal>(image.width()) / harness.window->width();
+        const QRectF list = sceneRect(harness.view());
+        return image.copy(QRectF(list.topLeft() * scale, list.size() * scale).toAlignedRect());
+    };
+    // The selection stays on the first result, as the app keeps it.
+    const int first = harness.selection();
+    QVERIFY(first >= 0);
+    QImage before;
+    // Once the covers have loaded.
+    QTRY_VERIFY([&] {
+        const QImage last = before;
+        before = drawnResults();
+        return !last.isNull() && last == before;
+    }());
+
+    harness.bridge->setProperty("globalSearchBusy", true);
+    harness.field()->setProperty("text", QStringLiteral("mer"));
+    QVERIFY(QMetaObject::invokeMethod(harness.controller, "selectDisplayIndex", Q_ARG(QVariant, first)));
+    QCOMPARE(harness.view()->opacity(), 1.0);
+    QCOMPARE(emphasised(), QStringList{QStringLiteral("Me")});
+    QVERIFY2(drawnResults() == before, "the results changed as the query was typed");
+
+    // The new query's rows have its runs.
+    harness.model.presentSearchRows(meridianRows(harness.coverUrl), {1, 2, 4});
+    harness.bridge->setProperty("globalSearchBusy", false);
+    harness.settleRows();
+    QCOMPARE(emphasised(), QStringList{QStringLiteral("Mer")});
+}
+
+// The results dim only for a search still running 250 ms after its query,
+// the threshold of a busy indicator: each new query starts the wait again,
+// the dim fades in, and the results come back at once.
+void SearchPaletteTest::onlyASlowSearchDimsTheResults() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    harness.search(QStringLiteral("me"), meridianRows(harness.coverUrl), {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    QQuickItem *view = harness.view();
+
+    // The time of the last query, and of the first dim after it.
+    QElapsedTimer clock;
+    clock.start();
+    qint64 queried = 0;
+    qint64 dimmedAfter = -1;
+    const auto connection = QObject::connect(view, &QQuickItem::opacityChanged, view, [&] {
+        if (dimmedAfter < 0 && view->opacity() < 1.0) dimmedAfter = clock.elapsed() - queried;
+    });
+    const auto disconnect = qScopeGuard([&] { QObject::disconnect(connection); });
+
+    harness.bridge->setProperty("globalSearchBusy", true);
+    for (const QString &query : {QStringLiteral("mer"), QStringLiteral("meri"), QStringLiteral("merid")}) {
+        queried = clock.elapsed();
+        harness.field()->setProperty("text", query);
+        QCOMPARE(view->opacity(), 1.0);
+        if (query != QStringLiteral("merid")) QTest::qWait(100);
+    }
+    QTRY_VERIFY(dimmedAfter >= 0);
+    // Less what an animation may take of the frame it started in.
+    QVERIFY2(dimmedAfter >= 190, qPrintable(QStringLiteral("dimmed %1 ms after the last query").arg(dimmedAfter)));
+    QTRY_COMPARE(view->opacity(), 0.5);
+
+    // A query typed while it is dimmed keeps it so; the answer ends it at once.
+    harness.field()->setProperty("text", QStringLiteral("meridi"));
+    QCOMPARE(view->opacity(), 0.5);
+    harness.bridge->setProperty("globalSearchBusy", false);
+    QCOMPARE(view->opacity(), 1.0);
 }
 
 // Reopened with the text it kept, the palette searches it again before it
@@ -1882,9 +2666,10 @@ void SearchPaletteTest::clearUsesTheBreezeIconAndNoTextGlyphs() {
     QQmlExpression helpIcon(qmlContext(help), help, QStringLiteral("icon.name"));
     QCOMPARE(helpIcon.evaluate().toString(), QStringLiteral("question"));
     QCOMPARE(clear->property("display").toInt(), 0); // AbstractButton.IconOnly
-    // Quiet glyphs, as the field's: the secondary text colour.
-    QQmlExpression clearColor(qmlContext(clear), clear, QStringLiteral("icon.color"));
-    QCOMPARE(hex(clearColor.evaluate().value<QColor>()), hex(harness.token("textSecondary")));
+    // Quiet glyphs: help's in the field's secondary text colour, the solid
+    // clear's under it (clearGlyphIsQuietUntilPointedAt).
+    QQmlExpression helpColor(qmlContext(help), help, QStringLiteral("icon.color"));
+    QCOMPARE(hex(helpColor.evaluate().value<QColor>()), hex(harness.token("textSecondary")));
     QCOMPARE(QAccessible::queryAccessibleInterface(clear)->text(QAccessible::Name), QStringLiteral("Clear"));
     // No text glyphs drawn as icons.
     visit(harness.palette(), [&](QQuickItem *item) {
@@ -1948,10 +2733,10 @@ void SearchPaletteTest::textMeetsItsContrastAsDrawn() {
                           name == QStringLiteral("globalSearchSectionHeading") ? view : background, 4.5);
                 }
             }
-            for (const QString &name : {QStringLiteral("globalSearchArtistGlyph"), QStringLiteral("globalSearchCoverPlaceholder")}) {
-                if (QQuickItem *glyph = visibleChildNamed(row, name)) {
-                    check(QStringLiteral("%1 of row %2").arg(name).arg(i), colorOf(glyph), background, 3.0);
-                }
+            // The no-cover tile's mark is checked on its own floor
+            // (noCoverTileIsTheLibrarys).
+            if (QQuickItem *glyph = visibleChildNamed(row, QStringLiteral("globalSearchArtistGlyph"))) {
+                check(QStringLiteral("artist glyph of row %1").arg(i), colorOf(glyph), background, 3.0);
             }
             // The amber glyph on its scrim over a mid cover.
             if (QQuickItem *glyph = visibleChildNamed(row, QStringLiteral("globalSearchNowGlyph"))) {
@@ -2042,7 +2827,7 @@ void SearchPaletteTest::largeFontRowsAndFooterHoldTheirText() {
              qPrintable(QString::number(harness.field()->height())));
 
     // Every row in view holds its texts, centred in it; each heading holds
-    // its text and the 5 px under it.
+    // its text and the 4 px under it.
     int rows = 0;
     int headings = 0;
     qreal titleLeft = -1;
@@ -2132,6 +2917,114 @@ void SearchPaletteTest::largeFontRowsAndFooterHoldTheirText() {
     QVERIFY(frame.bottom() <= harness.window->height() - 32.0);
 }
 
+void SearchPaletteTest::shortWindowPaletteShowsFiveResults_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("windowWidth");
+    QTest::addColumn<int>("windowHeight");
+    QTest::addColumn<int>("transportHeight");
+    QTest::addColumn<QString>("place");
+    QTest::addColumn<int>("hintCount");
+    QTest::addColumn<int>("footerLines");
+    // The app's band at 24 pt: the transport ends 190 px down, so the
+    // palette's top was at 223 and showed three results.
+    QTest::newRow("24 pt, 1000x720") << 24.0 << 1000 << 720 << 138 << QStringLiteral("risen") << 4 << 2;
+    QTest::newRow("24 pt, 1000x560") << 24.0 << 1000 << 560 << 138 << QStringLiteral("menu bar") << 4 << 2;
+    QTest::newRow("24 pt, 1180x720") << 24.0 << 1180 << 720 << 138 << QStringLiteral("risen") << 3 << 1;
+    QTest::newRow("24 pt, 1600x1000") << 24.0 << 1600 << 1000 << 138 << QStringLiteral("transport") << 4 << 1;
+    QTest::newRow("default font, 1000x720") << 0.0 << 1000 << 720 << 48 << QStringLiteral("transport") << 4 << 1;
+    QTest::newRow("default font, 1600x1000") << 0.0 << 1600 << 1000 << 48 << QStringLiteral("transport") << 4 << 1;
+}
+
+// At a large font in a short window, the palette 32 px under the transport
+// showed three results. Its top, chosen as it opens, rises as far as the
+// field, the footer, two headings and five results need, but stays 8 px
+// under the menu bar, and with room for them it stays under the
+// transport; it doesn't move while typing. Where the footer's pairs would
+// wrap with Esc but fit one line without it, Esc is left out; it stays
+// where it fits, where the pairs wrap anyway, and with no result.
+void SearchPaletteTest::shortWindowPaletteShowsFiveResults() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, windowWidth);
+    QFETCH(int, windowHeight);
+    QFETCH(int, transportHeight);
+    QFETCH(QString, place);
+    QFETCH(int, hintCount);
+    QFETCH(int, footerLines);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText, windowWidth, windowHeight, true, transportHeight),
+             qPrintable(errorText));
+    QVERIFY(harness.open());
+    QQuickItem *menuBar = harness.item(QStringLiteral("harnessMenuBar"));
+    QVERIFY(menuBar != nullptr);
+    const qreal menuBarBottom = sceneRect(menuBar).bottom();
+    const qreal underTransport = sceneRect(harness.root->property("transport").value<QQuickItem *>()).bottom() + 1 + 32;
+    QCOMPARE(underTransport, menuBarBottom + transportHeight + 33);
+    const qreal top = sceneRect(harness.palette()).top();
+    if (place == QStringLiteral("transport")) {
+        QCOMPARE(top, underTransport);
+    } else if (place == QStringLiteral("menu bar")) {
+        QCOMPARE(top, std::ceil(menuBarBottom) + 8);
+    } else {
+        QVERIFY2(top > menuBarBottom + 8 && top < underTransport, qPrintable(QString::number(top)));
+    }
+
+    harness.search(QStringLiteral("mer"), merRows(harness.coverUrl), {1, 4, 8});
+    QTRY_VERIFY(harness.view()->isVisible());
+    QQuickItem *view = harness.view();
+    const QRectF frame = sceneRect(harness.palette());
+    QCOMPARE(frame.top(), top);
+    QVERIFY(frame.bottom() <= windowHeight - 32.0);
+    // The results in view, whole.
+    int results = 0;
+    for (int i = 0; i < harness.model.rowCount(); ++i) {
+        QQuickItem *row = harness.row(i);
+        if (row == nullptr || !row->isVisible() || row->height() <= 0) continue;
+        const QRectF rect = sceneRect(row);
+        if (harness.model.rowDataAt(i).value(QStringLiteral("kind")).toString() == QStringLiteral("item")
+            && rect.top() >= sceneRect(view).top() - 0.5 && rect.bottom() <= sceneRect(view).bottom() + 0.5) {
+            ++results;
+        }
+    }
+    if (place == QStringLiteral("menu bar")) {
+        QVERIFY2(results >= 1 && results < 5, qPrintable(QString::number(results)));
+    } else {
+        QVERIFY2(results >= 5, qPrintable(QStringLiteral("%1 results at %2").arg(results).arg(top)));
+    }
+    if (place == QStringLiteral("risen")) {
+        // No higher than five results need: one more line of them would
+        // fit only under the menu bar's margin.
+        QCOMPARE(frame.bottom(), windowHeight - 32.0);
+    }
+
+    // The footer: its pairs on as many lines as they need.
+    QQuickItem *footer = harness.item(QStringLiteral("globalSearchFooter"));
+    QCOMPARE(harness.hints().size(), hintCount);
+    QCOMPARE(harness.hints().contains(QStringLiteral("Esc Close")), hintCount == 4);
+    QList<qreal> lineTops;
+    for (QQuickItem *hint : visibleNamed(footer, QStringLiteral("globalSearchKeyHint"))) {
+        QVERIFY(within(sceneRect(hint), sceneRect(footer)));
+        if (!lineTops.contains(sceneRect(hint).top())) lineTops << sceneRect(hint).top();
+    }
+    QCOMPARE(int(lineTops.size()), footerLines);
+
+    // Typing on and clearing the field don't move it; with no query, Esc
+    // is the footer's one pair.
+    harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    QCOMPARE(sceneRect(harness.palette()).top(), top);
+    harness.search(QString(), {});
+    QTRY_COMPARE(harness.hints(), QStringList{QStringLiteral("Esc Close")});
+    QCOMPARE(sceneRect(harness.palette()).top(), top);
+}
+
 void SearchPaletteTest::glyphsTargetsAndThumbnailsFollowTheFont_data() {
     QTest::addColumn<qreal>("pointSize");
     QTest::newRow("default font") << 0.0;
@@ -2183,7 +3076,10 @@ void SearchPaletteTest::glyphsTargetsAndThumbnailsFollowTheFont() {
     QQuickItem *icon = harness.item(QStringLiteral("globalSearchFieldIcon"));
     QCOMPARE(icon->width(), glyph);
     QCOMPARE(icon->height(), glyph);
-    QCOMPARE(sceneRect(icon).left() - frame.left(), 16.0);
+    // The field's glyph centres on the results' lead column, on one axis
+    // with the artists' glyphs and the covers below it (at 16 px from the
+    // edge it stood left of them, 4 px at the default font and 5 at 24 pt).
+    QCOMPARE(sceneRect(icon).center().x() - frame.left(), 16.0 + lead / 2);
     QVERIFY(std::abs(sceneRect(icon).center().y() - sceneRect(harness.field()).center().y()) <= 0.5);
     QCOMPARE(sceneRect(harness.field()).left() - frame.left(), 16.0 + lead + 12.0);
     QQuickItem *clear = harness.item(QStringLiteral("globalSearchClearButton"));
@@ -2221,7 +3117,10 @@ void SearchPaletteTest::glyphsTargetsAndThumbnailsFollowTheFont() {
         for (const QString &name : {QStringLiteral("globalSearchArtistGlyph"), QStringLiteral("globalSearchCoverPlaceholder")}) {
             if (QQuickItem *leadGlyph = visibleChildNamed(row, name)) {
                 ++glyphs;
-                QCOMPARE(leadGlyph->width(), glyph);
+                // The no-cover tile is as large as a cover.
+                QCOMPARE(leadGlyph->width(), name == QStringLiteral("globalSearchArtistGlyph")
+                                                 ? std::min(glyph, 2 * std::round(lead * 0.75 / 2))
+                                                 : lead);
                 QCOMPARE(sceneRect(leadGlyph).center().x() - frame.left(), 16.0 + lead / 2);
             }
         }
@@ -2251,6 +3150,7 @@ void SearchPaletteTest::rowColumnsNeverMeet_data() {
     QTest::newRow("24 pt") << 24.0 << 1600;
     QTest::newRow("24 pt, 1000 px") << 24.0 << 1000;
     QTest::newRow("24 pt, narrow") << 24.0 << 560;
+    QTest::newRow("24 pt, 1920 px") << 24.0 << 1920;
 }
 
 // A track's length holds its text whole at the right, and the title and
@@ -2322,8 +3222,414 @@ void SearchPaletteTest::rowColumnsNeverMeet() {
     if (pointSize == 0.0 && windowWidth == 1600) {
         // The design's sizes with the usual font.
         QCOMPARE(harness.dialog->property("lengthWidth").toReal(), 44.0);
-        QCOMPARE(harness.dialog->property("titleWidth").toReal(), 300.0);
+        QCOMPARE(harness.dialog->property("titleWidth").toReal(), 380.0);
     }
+    if (pointSize == 24.0 && windowWidth == 1920) {
+        QCOMPARE(harness.dialog->property("titleWidth").toReal(), std::round(380.0 * 2.4));
+    }
+    // The title grows only into room the context can spare: the context
+    // keeps 276 px, scaled, or where it had less beside a title of up to
+    // 300 px, all of that.
+    const qreal scale = pointSize > 0 ? pointSize / 10.0 : 1.0;
+    const qreal title = harness.dialog->property("titleWidth").toReal();
+    const qreal room = frame.width() - 16 - 8 - harness.dialog->property("lengthWidth").toReal() - 2 * gap
+        - harness.dialog->property("titleX").toReal();
+    const qreal before = std::min(std::round(300.0 * scale), std::round(room * 0.6));
+    QVERIFY2(room - title >= std::min(room - before, std::round(276.0 * scale)) - 1,
+             qPrintable(QStringLiteral("a title of %1 leaves the context %2").arg(title).arg(room - title)));
+    QVERIFY(title >= before);
+}
+
+void SearchPaletteTest::headingsStartTheirSections_data() {
+    QTest::addColumn<qreal>("points");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("14 pt") << 14.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// A heading groups with its section: at least 1.7 times the space above its
+// text as under it, whether a result or a Show all link ends the section
+// before (the headings sat some 30 px from the rows either side, less than
+// the step between two results, so the sections ran on as one list). The
+// first has no section to part from.
+void SearchPaletteTest::headingsStartTheirSections() {
+    QFETCH(qreal, points);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(points);
+    QGuiApplication::setFont(font);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText, 1600, 1600), qPrintable(errorText));
+    QVERIFY(harness.open());
+    // More albums than show: that section ends in a link.
+    auto rows = meridianRows(harness.coverUrl);
+    rows[1].score = 0.5f;
+    harness.search(QStringLiteral("meridian"), rows, {1, 9, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+
+    const auto textBox = [](QQuickItem *text) {
+        const QRectF box = sceneRect(text);
+        const qreal lines = text->property("contentHeight").toReal();
+        const qreal top = text->property("verticalAlignment").toInt() == int(Qt::AlignBottom)
+            ? box.bottom() - text->property("bottomPadding").toReal() - lines
+            : box.center().y() - lines / 2;
+        return QRectF(box.left(), top, box.width(), lines);
+    };
+    const auto mainText = [&](int index) -> QQuickItem * {
+        QQuickItem *row = harness.row(index);
+        if (row == nullptr) return nullptr;
+        for (const char *name : {"globalSearchResultTitle", "globalSearchMoreLink", "globalSearchSectionHeading"}) {
+            if (QQuickItem *text = visibleChildNamed(row, QString::fromLatin1(name))) return text;
+        }
+        return nullptr;
+    };
+    int parted = 0;
+    QStringList before;
+    for (int i = 1; i + 1 < harness.model.rowCount(); ++i) {
+        if (harness.model.rowDataAt(i).value(QStringLiteral("kind")) != QStringLiteral("section")) continue;
+        QQuickItem *previous = mainText(i - 1);
+        QQuickItem *heading = mainText(i);
+        QQuickItem *next = mainText(i + 1);
+        QVERIFY(previous != nullptr && heading != nullptr && next != nullptr);
+        before << harness.model.rowDataAt(i - 1).value(QStringLiteral("kind")).toString();
+        const qreal above = textBox(heading).top() - textBox(previous).bottom();
+        const qreal below = textBox(next).top() - textBox(heading).bottom();
+        QVERIFY2(above >= 1.7 * below,
+                 qPrintable(QStringLiteral("%1 px above row %2's heading, %3 under it").arg(above).arg(i).arg(below)));
+        QVERIFY(textBox(heading).top() >= sceneRect(harness.row(i)).top());
+        ++parted;
+    }
+    QCOMPARE(parted, 2);
+    QVERIFY(before.contains(QStringLiteral("more")) && before.contains(QStringLiteral("item")));
+}
+
+void SearchPaletteTest::tooltipStaysOffTheOtherResults_data() {
+    QTest::addColumn<int>("width");
+    QTest::addColumn<int>("height");
+    QTest::addColumn<qreal>("points");
+    QTest::addColumn<int>("extraTracks");
+    QTest::addColumn<QString>("place");
+    const QString beside = QStringLiteral("beside");
+    const QString below = QStringLiteral("below");
+    const QString inside = QStringLiteral("clear");
+    QTest::newRow("1600, many") << 1600 << 1000 << 10.0 << 22 << beside;
+    QTest::newRow("1600, few") << 1600 << 1000 << 10.0 << 0 << beside;
+    QTest::newRow("1000, few, room under the palette") << 1000 << 720 << 10.0 << 0 << below;
+    QTest::newRow("1000, many") << 1000 << 600 << 10.0 << 22 << inside;
+    QTest::newRow("1000 at 24 pt") << 1000 << 720 << 24.0 << 22 << inside;
+    QTest::newRow("1600 at 24 pt") << 1600 << 1000 << 24.0 << 22 << inside;
+    QTest::newRow("1280, wrapped beside") << 1280 << 800 << 10.0 << 22 << beside;
+}
+
+// A result's tooltip leaves the results around it readable where the
+// window has room outside the palette: beside it, level with the row, or
+// under it (it covered the next two results, often to add only the
+// genre). Without that room it is clear of its own row, the query field and
+// the footer.
+void SearchPaletteTest::tooltipStaysOffTheOtherResults() {
+    QFETCH(int, width);
+    QFETCH(int, height);
+    QFETCH(qreal, points);
+    QFETCH(int, extraTracks);
+    QFETCH(QString, place);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(points);
+    QGuiApplication::setFont(font);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText, width, height), qPrintable(errorText));
+    QVERIFY(harness.open());
+    auto rows = meridianRows(harness.coverUrl);
+    for (int i = 0; i < extraTracks; ++i) {
+        Row extra = result(QStringLiteral("track"), QStringLiteral("Extra %1").arg(i), 5.0f);
+        extra.trackPath = QStringLiteral("/fixture/extra%1.flac").arg(i);
+        rows << extra;
+    }
+    for (Row &row : rows) row.genre = QStringLiteral("Ambient");
+    harness.search(QStringLiteral("meridian"), rows);
+    QTRY_VERIFY(harness.view()->isVisible());
+    QObject *toolTip = harness.root->findChild<QObject *>(QStringLiteral("globalSearchResultToolTip"));
+    QVERIFY(toolTip != nullptr);
+    toolTip->setProperty("delay", 0);
+    auto *content = toolTip->property("contentItem").value<QQuickItem *>();
+    QVERIFY(content != nullptr);
+
+    const QRectF frame = sceneRect(harness.palette());
+    const QRectF view = sceneRect(harness.view());
+    const QRectF field = sceneRect(harness.item(QStringLiteral("globalSearchQueryField")));
+    const QRectF footer = sceneRect(harness.item(QStringLiteral("globalSearchFooter")));
+    int hovered = 0;
+    for (int i = 0; i < harness.model.rowCount(); ++i) {
+        if (harness.model.rowDataAt(i).value(QStringLiteral("kind")) != QStringLiteral("item")) continue;
+        QQuickItem *row = harness.row(i);
+        if (row == nullptr || sceneRect(row).bottom() > view.bottom() + 0.5) continue;
+        QTest::mouseMove(harness.window, sceneCentre(row));
+        QTRY_COMPARE(harness.dialog->property("toolTipRow").value<QQuickItem *>(), row);
+        QTRY_VERIFY(toolTip->property("opened").toBool());
+        QCoreApplication::processEvents();
+        const QRectF tip = sceneRect(content->parentItem());
+        const QRectF rowRect = sceneRect(row);
+        const QByteArray at = QStringLiteral("row %1: the tooltip at %2,%3 %4x%5")
+                                  .arg(i).arg(tip.left()).arg(tip.top()).arg(tip.width()).arg(tip.height()).toUtf8();
+        QVERIFY2(tip.top() >= 0 && tip.bottom() <= height && tip.left() >= 0 && tip.right() <= width, at.constData());
+        if (place == QStringLiteral("beside")) {
+            QVERIFY2(tip.left() >= frame.right(), at.constData());
+            QVERIFY2(std::abs(tip.center().y() - rowRect.center().y()) <= 1.0, at.constData());
+        } else if (place == QStringLiteral("below")) {
+            QVERIFY2(tip.top() >= frame.bottom(), at.constData());
+        }
+        QVERIFY2(!tip.intersects(rowRect.adjusted(1, 1, -1, -1)), at.constData());
+        QVERIFY2(!tip.intersects(field.adjusted(1, 1, -1, -1)), at.constData());
+        QVERIFY2(!tip.intersects(footer.adjusted(1, 1, -1, -1)), at.constData());
+        ++hovered;
+    }
+    QVERIFY(hovered >= 3);
+}
+
+// As the rows change under it and the palette shrinks, the tooltip fades
+// where it was, beside the palette and under it.
+void SearchPaletteTest::tooltipFadesWhereItWasAsTheRowsChange() {
+    for (const int width : {1600, 1000}) {
+        Harness harness;
+        QString errorText;
+        QVERIFY2(harness.load(kBreezeLight, &errorText, width, 720), qPrintable(errorText));
+        QVERIFY(harness.open());
+        auto rows = meridianRows(harness.coverUrl);
+        for (Row &row : rows) row.genre = QStringLiteral("Ambient");
+        harness.search(QStringLiteral("meridian"), rows);
+        QTRY_VERIFY(harness.view()->isVisible());
+        QObject *toolTip = harness.root->findChild<QObject *>(QStringLiteral("globalSearchResultToolTip"));
+        QVERIFY(toolTip != nullptr);
+        toolTip->setProperty("delay", 0);
+        auto *content = toolTip->property("contentItem").value<QQuickItem *>();
+        QVERIFY(content != nullptr);
+        QQuickItem *row = harness.row(harness.model.indexOfResult(QStringLiteral("album"), 1));
+        QVERIFY(row != nullptr);
+        QTest::mouseMove(harness.window, sceneCentre(row));
+        QTRY_VERIFY(toolTip->property("opened").toBool());
+        const QPointF shownAt(toolTip->property("x").toReal(), toolTip->property("y").toReal());
+        const qreal height = harness.palette()->height();
+
+        // Typed on: the results, and with them the palette, shrink.
+        harness.bridge->setProperty("globalSearchBusy", true);
+        harness.field()->setProperty("text", QStringLiteral("meridian l"));
+        harness.model.presentSearchRows(rows.mid(0, 2), {1, 1, 0}, true);
+        QCoreApplication::processEvents();
+        QVERIFY(harness.palette()->height() < height);
+        QCOMPARE(QPointF(toolTip->property("x").toReal(), toolTip->property("y").toReal()), shownAt);
+        // And over nothing the window keeps clear, as drawn.
+        QVERIFY(!sceneRect(content->parentItem())
+                     .intersects(sceneRect(harness.item(QStringLiteral("globalSearchQueryField")))));
+    }
+}
+
+void SearchPaletteTest::clearGlyphIsQuietUntilPointedAt_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("dark") << true;
+    QTest::newRow("light") << false;
+}
+
+// Clear's solid glyph is quieter at rest than the line glyphs beside it,
+// and still 3:1 on the view (in their colour it was the field row's
+// heaviest mark); under the pointer and with the keyboard's focus it takes
+// their colour.
+void SearchPaletteTest::clearGlyphIsQuietUntilPointedAt() {
+    QFETCH(bool, dark);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(dark ? kBreezeDark : kBreezeLight, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl));
+    QQuickItem *clear = harness.item(QStringLiteral("globalSearchClearButton"));
+    QVERIFY(clear != nullptr && clear->isVisible());
+    QTest::mouseMove(harness.window, QPoint(2, 2));
+    QQmlExpression iconColor(qmlContext(clear), clear, QStringLiteral("icon.color"));
+    const auto drawnIn = [&iconColor] { return iconColor.evaluate().value<QColor>(); };
+    const QColor view = harness.token("view");
+    const QColor pointedAt = harness.token("textSecondary");
+    const double atRest = contrastRatio(drawnIn(), view);
+    QVERIFY2(atRest >= 3.0, qPrintable(describeContrast(QStringLiteral("clear"), drawnIn(), view)));
+    QVERIFY2(atRest <= 0.65 * contrastRatio(pointedAt, view),
+             qPrintable(describeContrast(QStringLiteral("clear"), drawnIn(), view)));
+    const QColor rest = drawnIn();
+    // Breeze's style turns hover effects off without a desktop session.
+    QVERIFY(clear->setProperty("hoverEnabled", true));
+    QTest::mouseMove(harness.window, sceneCentre(clear));
+    QTRY_VERIFY(channelDistance(drawnIn(), pointedAt) <= 1);
+    QTest::mouseMove(harness.window, QPoint(2, 2));
+    QTRY_VERIFY(channelDistance(drawnIn(), rest) <= 1);
+    clear->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(channelDistance(drawnIn(), pointedAt) <= 1);
+}
+
+// Typing across the point where the results scroll, every frame: the
+// selection and hover tints end at the scrollbar's lane while it shows (the
+// thumb cut a pale piece out of the selected row) and at the edge without
+// it, and nothing moves sideways: the field, the lengths and the context's
+// room, which the lane took 8 px of as it appeared.
+void SearchPaletteTest::tintsEndAtTheScrollbarsLaneAndTheTextStaysPut() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    const QVector<Row> few = meridianRows(harness.coverUrl);
+    QVector<Row> many = few;
+    for (int i = 0; i < 24; ++i) {
+        Row extra = result(QStringLiteral("track"), QStringLiteral("Extra %1").arg(i), 5.0f);
+        extra.artist = QStringLiteral("The Quiet Meridian");
+        extra.lengthText = QStringLiteral("1:23");
+        extra.trackPath = QStringLiteral("/fixture/extra%1.flac").arg(i);
+        many << extra;
+    }
+    harness.search(QStringLiteral("m"), few);
+    QTRY_VERIFY(harness.view()->isVisible());
+    QQuickItem *view = harness.view();
+    QQuickItem *scrollBar = harness.item(QStringLiteral("globalSearchScrollBar"));
+    QVERIFY(scrollBar != nullptr && !scrollBar->isVisible());
+    QQuickItem *selected = harness.row(harness.selection());
+    QVERIFY(selected != nullptr);
+    QQuickItem *length = visibleChildNamed(selected, QStringLiteral("globalSearchResultLength"));
+    QVERIFY(length != nullptr);
+    const qreal lengthRight = sceneRect(length).right();
+    const qreal contextRight = contextBoxOf(selected).right();
+    const QRectF field = sceneRect(harness.field());
+
+    QStringList problems;
+    int withBar = 0;
+    int without = 0;
+    const auto check = [&] {
+        if (!view->isVisible()) return;
+        const bool bar = scrollBar->isVisible();
+        (bar ? withBar : without) += 1;
+        const qreal end = sceneRect(view).right() - (bar ? 8 : 0);
+        for (const char *name : {"rowBackgroundTint", "rowBackgroundHover"}) {
+            for (QQuickItem *tint : visibleNamed(view, QString::fromLatin1(name))) {
+                if (std::abs(sceneRect(tint).right() - end) > 0.5) {
+                    problems << QStringLiteral("%1 to %2, not %3").arg(QLatin1String(name)).arg(sceneRect(tint).right()).arg(end);
+                }
+            }
+        }
+        for (QQuickItem *text : visibleNamed(view, QStringLiteral("globalSearchResultLength"))) {
+            if (std::abs(sceneRect(text).right() - lengthRight) > 0.5) {
+                problems << QStringLiteral("a length to %1, not %2").arg(sceneRect(text).right()).arg(lengthRight);
+            }
+            const qreal context = contextBoxOf(text->parentItem()).right();
+            // A length of an hour or more is wider; these are not.
+            if (std::abs(context - contextRight) > 0.5) {
+                problems << QStringLiteral("a context to %1, not %2").arg(context).arg(contextRight);
+            }
+        }
+        if (sceneRect(harness.field()) != field) problems << QStringLiteral("the field moved");
+    };
+    FrameSampler sampler(harness.window, check);
+    // A pointer over another result, for the hover tint too.
+    QQuickItem *other = harness.row(harness.selection() + 1);
+    QVERIFY(other != nullptr);
+    QTest::mouseMove(harness.window, sceneCentre(other));
+    QTRY_VERIFY(visibleChildNamed(other, QStringLiteral("rowBackgroundHover")) != nullptr);
+    check();
+    harness.search(QStringLiteral("me"), many);
+    QTRY_VERIFY(scrollBar->isVisible());
+    QTest::qWait(50);
+    check();
+    harness.search(QStringLiteral("mer"), few);
+    QTRY_VERIFY(!scrollBar->isVisible());
+    QTest::qWait(50);
+    check();
+    sampler.stop();
+    QVERIFY2(problems.isEmpty(), qPrintable(problems.mid(0, 4).join(QStringLiteral("; "))));
+    QVERIFY(withBar > 0 && without > 0);
+}
+
+void SearchPaletteTest::noCoverTileIsTheLibrarys_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::addColumn<qreal>("points");
+    QTest::newRow("dark, 10 pt") << true << 10.0;
+    QTest::newRow("light, 10 pt") << false << 10.0;
+    QTest::newRow("dark, 24 pt") << true << 24.0;
+    QTest::newRow("light, 24 pt") << false << 24.0;
+}
+
+// An album or a track without a cover has the library's tile in a cover's
+// place, at its size: the floor, its edge and the quiet mark, as drawn, so
+// it reads at 24 pt too (the track's glyph became a grey blob there, the
+// album's a green one). In a light theme the tile is light indigo with a
+// darker rim and mark, as the library's. While its track plays it has the
+// amber glyph over a scrim, as a cover has.
+void SearchPaletteTest::noCoverTileIsTheLibrarys() {
+    QFETCH(bool, dark);
+    QFETCH(qreal, points);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(points);
+    QGuiApplication::setFont(font);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(dark ? kBreezeDark : kBreezeLight, &errorText, 1600, 1600), qPrintable(errorText));
+    QVERIFY(harness.open());
+    auto rows = meridianRows(harness.coverUrl);
+    rows[1].coverUrl.clear();
+    harness.search(QStringLiteral("meridian"), rows);
+    QTRY_VERIFY(harness.view()->isVisible());
+    QTest::mouseMove(harness.window, QPoint(2, 2));
+
+    const qreal lead = harness.dialog->property("leadSize").toReal();
+    const QColor floor = harness.token("noCoverTile");
+    const QColor edge = harness.token("noCoverTileEdge");
+    QCOMPARE(hex(floor), dark ? hex(harness.token("plotFloor")) : QStringLiteral("#ffebe7f4"));
+    QCOMPARE(hex(edge), dark ? hex(harness.token("plotFloorEdge")) : QStringLiteral("#ffc9c2dc"));
+    const QColor mark = dark ? QColor::fromRgb(0x8c, 0x82, 0xa3) : QColor::fromRgb(0x57, 0x4a, 0x7a);
+    QVERIFY2(contrastRatio(mark, floor) >= 4.5, qPrintable(describeContrast(QStringLiteral("mark"), mark, floor)));
+    QStringList types;
+    QQuickItem *trackRow = nullptr;
+    for (int i = 0; i < harness.model.rowCount(); ++i) {
+        const QVariantMap data = harness.model.rowDataAt(i);
+        QQuickItem *row = harness.row(i);
+        if (row == nullptr) continue;
+        QQuickItem *tile = visibleChildNamed(row, QStringLiteral("globalSearchCoverPlaceholder"));
+        if (tile == nullptr) continue;
+        types << data.value(QStringLiteral("rowType")).toString();
+        if (types.last() == QStringLiteral("track")) trackRow = row;
+        const QRectF box = sceneRect(tile);
+        QCOMPARE(box.size(), QSizeF(lead, lead));
+        QCOMPARE(box.left() - sceneRect(harness.palette()).left(), 16.0);
+        QCOMPARE(tile->property("radius").toReal(), 2.0);
+        QCOMPARE(hex(colorOf(tile)), hex(floor));
+        QCOMPARE(hex(tile->property("border").value<QObject *>()->property("color").value<QColor>()), hex(edge));
+        const auto problem = [&]() -> QString {
+            const QImage image = harness.window->grabWindow();
+            const qreal scale = qreal(image.width()) / harness.window->width();
+            int marked = 0;
+            for (qreal y = 2.5; y < lead - 2; ++y) {
+                for (qreal x = 2.5; x < lead - 2; ++x) {
+                    const QColor pixel = image.pixelColor(((box.topLeft() + QPointF(x, y)) * scale).toPoint());
+                    marked += channelDistance(pixel, mark) <= 12 ? 1 : 0;
+                }
+            }
+            return marked >= lead ? QString() : QStringLiteral("%1 pixels of the mark").arg(marked);
+        };
+        QTRY_VERIFY2(problem().isEmpty(), qPrintable(problem()));
+    }
+    types.sort();
+    QCOMPARE(types, (QStringList{QStringLiteral("album"), QStringLiteral("track")}));
+    QVERIFY(trackRow != nullptr);
+
+    harness.bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/lantern.flac"));
+    harness.bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QQuickItem *tile = visibleChildNamed(trackRow, QStringLiteral("globalSearchCoverPlaceholder"));
+    QQuickItem *scrim = visibleChildNamed(trackRow, QStringLiteral("globalSearchNowScrim"));
+    QQuickItem *now = visibleChildNamed(trackRow, QStringLiteral("globalSearchNowGlyph"));
+    QVERIFY(tile != nullptr && scrim != nullptr && now != nullptr);
+    QCOMPARE(sceneRect(scrim), sceneRect(tile));
+    QVERIFY(std::abs(sceneRect(now).center().x() - sceneRect(tile).center().x()) <= 0.5);
+    QVERIFY2(contrastRatio(colorOf(now), drawnOver(colorOf(scrim), mark)) >= 3.0,
+             qPrintable(describeContrast(QStringLiteral("playing glyph"), colorOf(now),
+                                         drawnOver(colorOf(scrim), mark))));
 }
 
 int main(int argc, char **argv) {
@@ -2358,6 +3664,148 @@ int main(int argc, char **argv) {
     FerrousLocalization::registerQmlTypes();
     SearchPaletteTest test;
     return QTest::qExec(&test, argc, argv);
+}
+
+void SearchPaletteTest::glyphsDrawAtTheirOwnSize_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The field's glyph, the lead column's glyphs (an artist's, a recent
+// search's) and the playing glyph draw at the size the font gives them, not
+// rounded down to an icon size: at 24 pt the field's 38 px glyph drew at
+// 32 px, smaller than the text beside it. The lead column's glyphs are
+// about 3/4 of the lead at a large font, and 16 px at the default one.
+void SearchPaletteTest::glyphsDrawAtTheirOwnSize() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    harness.bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/line.flac"));
+    harness.bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+
+    const qreal glyph = harness.dialog->property("glyphSize").toReal();
+    const qreal lead = harness.dialog->property("leadSize").toReal();
+    const qreal leadGlyph = harness.dialog->property("leadGlyphSize").toReal();
+    if (pointSize > 0) {
+        QCOMPARE(glyph, 38.0);
+        QVERIFY2(std::abs(leadGlyph - lead * 0.75) <= 1, qPrintable(QStringLiteral("%1 in %2").arg(leadGlyph).arg(lead)));
+    } else {
+        QCOMPARE(glyph, 16.0);
+        QCOMPARE(leadGlyph, 16.0);
+    }
+
+    QQuickItem *field = harness.item(QStringLiteral("globalSearchFieldIcon"));
+    QQuickItem *artist = harness.drawn(QStringLiteral("globalSearchArtistGlyph"));
+    QQuickItem *now = harness.drawn(QStringLiteral("globalSearchNowGlyph"));
+    QVERIFY(field != nullptr && artist != nullptr && now != nullptr);
+    QCOMPARE(artist->width(), leadGlyph);
+    for (QQuickItem *icon : {field, artist, now}) {
+        QVERIFY2(!icon->property("roundToIconSize").toBool(), qPrintable(icon->objectName()));
+    }
+    // As drawn: Breeze's magnifier fills 3/4 of its box; rounded down to
+    // 32 px at 24 pt it filled 5/8 of it.
+    const auto inkHeight = [&](QQuickItem *icon) {
+        const QImage image = harness.window->grabWindow();
+        const qreal scale = static_cast<qreal>(image.width()) / harness.window->width();
+        const QRect box = QRectF(sceneRect(icon).topLeft() * scale, sceneRect(icon).size() * scale).toAlignedRect();
+        const QColor background = harness.token("view");
+        int top = box.bottom();
+        int bottom = box.top() - 1;
+        for (int y = box.top(); y <= box.bottom(); ++y) {
+            for (int x = box.left(); x <= box.right(); ++x) {
+                const QColor pixel = image.pixelColor(x, y);
+                if (std::abs(pixel.red() - background.red()) + std::abs(pixel.green() - background.green())
+                        + std::abs(pixel.blue() - background.blue())
+                    > 60) {
+                    top = std::min(top, y);
+                    bottom = std::max(bottom, y);
+                }
+            }
+        }
+        return (bottom - top + 1) / scale;
+    };
+    const qreal fieldInk = inkHeight(field);
+    QVERIFY2(fieldInk >= 0.72 * glyph, qPrintable(QStringLiteral("%1 of %2").arg(fieldInk).arg(glyph)));
+
+    // The recent searches' glyphs.
+    harness.field()->setProperty("text", QString());
+    harness.controller->setProperty("recentQueries", QStringList{QStringLiteral("meridian")});
+    QTRY_VERIFY(harness.drawn(QStringLiteral("globalSearchAuxGlyph")) != nullptr);
+    QQuickItem *recent = harness.drawn(QStringLiteral("globalSearchAuxGlyph"));
+    QCOMPARE(recent->width(), leadGlyph);
+    QVERIFY(!recent->property("roundToIconSize").toBool());
+}
+
+// A cover that has not loaded yet has the library's loading tint in its
+// place (the lead was empty until it loaded), and none once it shows; one
+// that fails to load has the no-cover tile, as in the library.
+void SearchPaletteTest::thumbnailsHaveTheLoadingTintUntilTheirCoversLoad() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    const QColor hover = harness.token("hover");
+    const auto thumbnails = [&harness] {
+        QList<QQuickItem *> items;
+        for (int i = 0; i < harness.model.rowCount(); ++i) {
+            if (QQuickItem *row = harness.row(i)) items += visibleNamed(row, QStringLiteral("globalSearchThumbnail"));
+        }
+        return items;
+    };
+    QVERIFY(thumbnails().size() >= 2);
+    for (QQuickItem *thumbnail : thumbnails()) {
+        QTRY_COMPARE(thumbnail->property("status").toInt(), 1); // Image.Ready
+        QCOMPARE(colorOf(thumbnail).alpha(), 0);
+    }
+
+    // A cover that takes a moment to load: the rows take it as the
+    // results change, and have the tint until it is ready.
+    QImage large(2400, 2400, QImage::Format_RGB32);
+    for (int y = 0; y < large.height(); ++y) {
+        for (int x = 0; x < large.width(); ++x) large.setPixel(x, y, qRgb(x % 251, y % 241, (x * y) % 239));
+    }
+    const QString largePath = harness.covers.filePath(QStringLiteral("large.png"));
+    QVERIFY(large.save(largePath));
+    harness.model.presentSearchRows(meridianRows(QUrl::fromLocalFile(largePath).toString()), {1, 2, 4}, true);
+    int loading = 0;
+    for (QQuickItem *thumbnail : thumbnails()) {
+        if (thumbnail->property("status").toInt() != 2) continue; // Image.Loading
+        ++loading;
+        QCOMPARE(hex(colorOf(thumbnail)), hex(hover));
+        QCOMPARE(colorOf(thumbnail).alpha(), hover.alpha());
+    }
+    QVERIFY(loading >= 2);
+    for (QQuickItem *thumbnail : thumbnails()) {
+        QTRY_COMPARE_WITH_TIMEOUT(thumbnail->property("status").toInt(), 1, 10000);
+        QCOMPARE(colorOf(thumbnail).alpha(), 0);
+        QVERIFY(visibleChildNamed(thumbnail->parentItem(), QStringLiteral("globalSearchCoverPlaceholder")) == nullptr);
+    }
+
+    // A cover that fails: the no-cover tile, and no tint over it.
+    harness.model.presentSearchRows(meridianRows(QUrl::fromLocalFile(harness.covers.filePath(QStringLiteral("gone.png"))).toString()),
+                                    {1, 2, 4}, true);
+    harness.settleRows();
+    for (QQuickItem *thumbnail : thumbnails()) {
+        QTRY_COMPARE(thumbnail->property("status").toInt(), 3); // Image.Error
+        QCOMPARE(colorOf(thumbnail).alpha(), 0);
+        QTRY_VERIFY(visibleChildNamed(thumbnail->parentItem(), QStringLiteral("globalSearchCoverPlaceholder")) != nullptr);
+    }
+    // The image's own warnings, one for each row.
+    dropCapturedMessagesMatching(QRegularExpression(QStringLiteral("Cannot open: .*gone\\.png")));
 }
 
 #include "tst_search_palette.moc"

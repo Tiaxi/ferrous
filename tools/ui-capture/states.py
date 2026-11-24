@@ -91,6 +91,12 @@ TARGETS = {
                      "if(p.y>=q.y+2*it.height&&p.y+it.height<=q.y+v.height)o.push([p.y,it])}var c=it.children;"
                      "for(var i=0;i<c.length;i++)s.push(c[i]);}o.sort(function(a,b){return a[0]-b[0]});"
                      "return o.length?o[0][1]:null})()",
+    # The top search result that has a tooltip: one only where it adds to the row (toolTipAdds), where the app says so.
+    "tooltipResultRow": "(function(){var o=[];var s=[root.Overlay.overlay.parent];while(s.length){var it=s.shift();"
+                        "if(!it.visible||it.opacity===0)continue;if(typeof it.toolTipText==='function'&&it.isResult&&"
+                        "(typeof it.toolTipAdds!=='function'||it.toolTipAdds()))o.push([it.mapToItem(null,0,0).y,it]);"
+                        "var c=it.children;for(var i=0;i<c.length;i++)s.push(c[i]);}o.sort(function(a,b){return a[0]-b[0]});"
+                        "return o.length?o[0][1]:null})()",
 }
 
 TARGETS_PLAIN = TARGETS["plainQueueRow"]
@@ -137,9 +143,9 @@ def itunes_status(kind, n=5):
         if m:
             return m.group(1 if n == 1 else 2).replace("%1", str(n))
     else:
-        pat = {"empty": r'"(No iTunes artwork suggestions found\.)"', "searching": r'"(Searching iTunes[^"]*)"',
+        pat = {"empty": r'"(iTunes has no suggestions for this album\.)"', "searching": r'"(Searching iTunes[^"]*)"',
                "failed": r'"(iTunes search failed: %1)"'}[kind]
-        m = re.search(r'i18nc\("@info:status",\s*' + pat, txt)
+        m = re.search(r'i18nc\("@info:status[^"]*",\s*' + pat, txt)
         if m:  # a failed search: Qt's own wording for a host lookup that fails, as with no network
             return m.group(1).replace("%1", "Host itunes.apple.com not found")
     raise LookupError(f"itunes: no '{kind}' status string in {q}")
@@ -254,7 +260,7 @@ def put_fixture(path, data):
 
 @one_at_a_time
 def m_tagsavefail(r, arg):
-    """tagsavefail: Tag Editor Details with real content: two fixture tracks copied into this run's own TMPDIR,
+    """tagsavefail: Tag Change Details with real content: two fixture tracks copied into this run's own TMPDIR,
     one in a folder it cannot write to (the app writes atomically: a read-only file alone would still be replaced),
     opened in Edit Tags, a comment set on both, saved: one saved, one failed; the folder made writable again after."""
     import shutil
@@ -754,14 +760,23 @@ def m_onetoone(r, arg):
     bgc = np.median(ia.reshape(-1, 3), axis=0)
     rows_ink = np.nonzero((np.abs(ia - bgc).sum(axis=2) > 60).any(axis=1))[0]
     info_c = info.crop((0, 0, info.width, min(info.height, int(rows_ink.max()) + 16 if len(rows_ink) else info.height)))
-    qh = min(que.height, 230)
-    que_c = que.crop((0, 0, min(que.width, b_w), qh))
     seam_c = seam.crop((0, 0, min(seam.width, W - 2 * P), seam.height))
     col_a = [("Now playing (the whole block)", np_), ("Library: its header and first rows", lib.crop((0, 0, lib.width, min(lib.height, 250))))]
+
+    def sheet_height(qh_):
+        col_b_ = thirds + [("", info_c), ("", que.crop((0, 0, min(que.width, b_w), qh_)))]
+        top_ = max(sum(LH + c.height + GAP for _, c in col_a), sum(LH + c.height + GAP for _, c in col_b_))
+        return 44 + top_ + LH + seam_c.height + GAP
+    # the queue's crop gives way to the transport's thirds (the band grew in H31-H34): as many of its rows as the
+    # sheet's 1.15 MP leaves room for, at least its header and three rows (the queue's rows are on the full shot)
+    qh = min(que.height, 230)
+    while qh > 110 and (W + 28) * (sheet_height(qh) + 64) > 1.15e6:
+        qh -= 1
+    que_c = que.crop((0, 0, min(que.width, b_w), qh))
     col_b = thirds + [("Album art viewer (windowed): its info column", info_c),
                       ("Queue: its header and first rows (left part)", que_c)]
+    H = sheet_height(qh)
     top_h = max(sum(LH + c.height + GAP for _, c in col_a), sum(LH + c.height + GAP for _, c in col_b))
-    H = 44 + top_h + LH + seam_c.height + GAP
     if (W + 28) * (H + 64) > 1.15e6:  # as its sheet will be (a title above, a margin around)
         raise RuntimeError(f"onetoone: {W}x{H} is over 1.15 MP on its sheet")
     S = Image.new("RGB", (W, H), (78, 82, 88))
@@ -1019,9 +1034,9 @@ def m_rowdetail(r, arg):
         row = (pane[0], gy - 8, pane[2], gh + 16)
         zoom = (gx - 6, gy - 6, gw + 12, gh + 12)
     elif arg == "ring":
-        # the row background that draws the focus ring (RowBackground: focused, with a focusRingLane), shown
+        # the row background that draws the focus ring (RowBackground: focused, with a scrollbarLane), shown
         v = r.s.ev(f"(function(){{var s=[{FIND}('libraryView')];while(s.length){{var it=s.shift();if(!it||!it.visible)continue;"
-                   "if(it.focusRingLane!==undefined&&it.focused===true){var p=it.mapToItem(null,0,0);"
+                   "if(it.scrollbarLane!==undefined&&it.focused===true){var p=it.mapToItem(null,0,0);"
                    "if(p.y>=0&&p.y<root.height)return JSON.stringify([p.x,p.y,it.width,it.height])}"
                    "var c=it.children;for(var i=0;i<c.length;i++)s.push(c[i]);}return ''})()")
         if not v:
@@ -1772,7 +1787,7 @@ PRIVATE_ITEMS = []  # (none whole: at the neutral paths the log names no home fo
 def private_sidecar(r, file):
     """After every dialog, viewer and search grab (runner): what names this machine's home folder in the
     windows the image shows, as boxes in the image for pack.py to paint over (shots/FILE.redact.json): PRIVATE_ITEMS
-    whole (the diagnostics log's body); in a text edit (TextArea: Tag Editor Details' save errors) the exact boxes of
+    whole (the diagnostics log's body); in a text edit (TextArea: Tag Change Details' save errors) the exact boxes of
     the home-folder characters, line by line (positionToRectangle), its name listed as `precise`; any other item whose
     text names it (a label, a tooltip, which the layout's 60 recorded characters can miss) whole. The windows answer
     in logical px, scaled to the image's device px (#666). Windows: a dialog capture's own window at its image offset
@@ -1968,13 +1983,13 @@ def m_queuegeom(r, arg):
           "var ch=v.contentItem.children;for(var i=0;i<ch.length;i++){var it=ch[i];"
           "if(!it||it.objectName!=='queueRow'||!it.visible)continue;var p=it.mapToItem(null,0,0);"
           "if(p.y<vp.y-0.5||p.y+it.height>vp.y+v.height+0.5)continue;var bg=null;var k=it.children;"
-          "for(var j=0;j<k.length;j++)if(k[j].focusRingLane!==undefined)bg=k[j];"
+          "for(var j=0;j<k.length;j++)if(k[j].scrollbarLane!==undefined)bg=k[j];"
           "var tint=bg?find(bg,'rowBackgroundTint'):null;var cells={};"
           "['indicator','order','title','artist','album','length'].forEach(function(n){var c=find(it,'queueCell_'+n);"
           "if(c&&c.visible&&c.width>0)cells[n]=rc(c)});"
           "rows.push({i:it.queueRowIndex,r:rc(it),now:it.isNow,cur:it.isCurrentQueueRow,sel:it.rowSelected,"
           "ring:it.rowCurrent,hov:bg?bg.hovered:false,unr:it.unreadable,tint:tint&&tint.visible?rc(tint):null,"
-          "bw:tint?tint.border.width:0,lane:bg?bg.ringLane:0,cells:cells})}"
+          "bw:tint?tint.border.width:0,lane:bg?bg.scrollbarLane:0,cells:cells})}"
           "var sb=" + FIND_ANY + "('queueScrollBar');var th=sb?find(sb,'laneScrollBarThumb'):null;"
           "return JSON.stringify({rows:rows,active:v.activeFocus,state:root.uiBridge.playbackState,"
           "sb:sb&&sb.visible?rc(sb):null,thumb:th&&sb&&sb.visible?rc(th):null,ringc:String(root.uiPalette.focusRing)})})()")
@@ -6049,7 +6064,7 @@ STATES = [
         ("transport", "transport", f"{name}-pressed",
          f"press transportButton_{name} | wait 0.25", f"Transport: {name} held down (released off the button after)"),
         ("transport", "transport", f"{name}-focus",
-         f"dmove xy:900,500 | release xy:900,500 | away | focus transportButton_{name}",
+         f"dmove xy:900,500 | release xy:900,500 | away | focus transportButton_{name} | wait 1.0",
          f"Transport: {name} with keyboard focus (tooltip shows on focus)"),
     )
 ] + [
@@ -6117,12 +6132,12 @@ STATES = [
      f"js {FIND}('playlistView').positionViewAtIndex(25, ListView.Beginning) | wait 0.3 | away | unfocus | "
      "macro queuefocus unselected - | wait 0.3 | macro queuegeom ring-unselected",
      "Queue scrolled to row 26: keyboard focus by a real Tab alone, the ring on row 26, nothing selected; the thumb lower down"),
-    # a column resize handle hovered, then focused (from the list, one more real Tab: the handles follow the rows)
+    # a column resize handle hovered, then focused (from the list, one real Shift+Tab: the handles come before the rows)
     ("queue", "queue", "handle-hover", f"js {FIND}('playlistView').positionViewAtBeginning() | unfocus | "
      "hover queueColumnHandle_album 0.6", "Queue header: the Album column's resize handle hovered"),
-    ("queue", "queue", "handle-focus", "away | unfocus | macro queuefocus handle - | key Tab | wait 0.3 | "
+    ("queue", "queue", "handle-focus", "away | unfocus | macro queuefocus handle - | key Backtab shift | wait 0.3 | "
      f"until ['artist','album','length'].some(function(c){{return {FIND_ANY}('queueColumnHandle_'+c).activeFocus}})",
-     "Queue header: a column resize handle with keyboard focus (real Tab from the list)"),
+     "Queue header: a column resize handle with keyboard focus (real Shift+Tab from the list)"),
     ("queue", "queue", "drop-indicator",
      f"away | unfocus | js (function(){{var a={FIND}('playlistDropArea');var i={FIND_ANY}('queueDropIndicator');"
      f"var v={FIND}('playlistView');var w={FIND}('{QRow}');"
@@ -6186,7 +6201,7 @@ STATES = [
      "Last.fm indicator menu (Shift+F10)"),
     ("statusbar", "_", "_lastfm-off", '''esc | macro lastfm {"lastFmShowScrobbleProgress":false}''', ""),
     ("statusbar", "statusbar", "issues-new",
-     "away | js errorController.report(1, 1, '/music/Some Artist/Some Album/01 - Missing.flac', 'The file could not be opened: No such file or directory') | js errorController.report(2, 0, 'Fixtures', 'Could not read 2 files during the scan') | wait 0.8",
+     "away | js errorController.report(1, 1, '/music/Some Artist/Some Album/01 - Missing.flac', 'The file couldn\\u2019t be opened', 'No such file or directory') | js errorController.report(2, 0, 'Fixtures', 'Could not read 2 files during the scan') | wait 0.8",
      "Status bar: two new (unseen) issues"),
     ("statusbar", "statusbar", "issues-hover", "hover statusBarErrorsButton 1.4", "Issues button hovered (tooltip)"),
     # opened as a user does: a pointer click on the status bar's issues button (its focus as opened in dlg-*)
@@ -6205,7 +6220,7 @@ STATES = [
     ("statusbar", "statusbar", "backend-disconnected", 'macro fakebridge statusBar {"connected":false}',
      "Status bar while the backend is not connected (injected; status bar only)"),
     ("statusbar", "statusbar", "backend-stopped",
-     'macro fakebridge statusBar {"backendFailure":"The playback backend stopped unexpectedly (exit code 101)."}',
+     'macro fakebridge statusBar {"backendFailure":"The playback engine stopped unexpectedly (exit code 101)."}',
      "Status bar after the backend stopped (injected; status bar only, the main-window message is not shown)"),
     ("statusbar", "_", "_bridge-reset", "macro fakebridge statusBar reset", ""),
     # a scan's label arriving, counting and leaving in the status bar: the scan state injected step by step (a real
@@ -6241,9 +6256,10 @@ STATES = [
     ("menus", "search", "help-hover", "hover globalSearchHelpButton 1.3", "Search palette: help button hovered"),
     ("menus", "search", "results", "away | type mer | wait 0.8", "Search palette: 'mer' with results"),
     ("menus", "search", "results-keyboard", "key Down | key Down | key Down | wait 0.4", "Search palette: keyboard selection down three rows"),
-    ("menus", "search", "result-hover", "hover globalSearchResultTitle#2 1.6", "Search palette: pointer over a result, its tooltip shown"),
+    # (a row whose tooltip adds to it: the first result's may say nothing more than the row, and then shows none)
+    ("menus", "search", "result-hover", "hover @tooltipResultRow@0.15,0.5 1.6", "Search palette: pointer over a result, its tooltip shown"),
     ("menus", "menu", "context-search-result", "rclick globalSearchResultTitle#2",
-     "Search result context menu (right click; it opens at the click point; the palette takes no Menu key)"),
+     "Search result context menu (right click; it opens at the click point; from the keyboard: context-search-result-keyboard)"),
     ("menus", "search", "results-many", "esc 1 | away | key Backspace | key Backspace | key Backspace | type l | wait 0.8",
      "Search palette: 'l' (many results, truncated groups)"),
     ("menus", "search", "no-results", "key Backspace | type zzqx | wait 0.8", "Search palette: no results"),
@@ -6264,7 +6280,7 @@ STATES = [
     ("dialogs", "dialog", "preferences-default-focus", "focusdefault",
      f"Preferences ({PREF_PAGES[-1][0]} page) with keyboard focus on its default button"),
     ("dialogs", "dialog", f"preferences-{PREF_PAGES[1][1]}-tabbed",
-     f"esc | macro openprefs {PREF_PAGES[1][0]} | settle 1 | key Tab | key Tab | wait 0.3",
+     f"esc | macro openprefs {PREF_PAGES[1][0]} | settle 1 | window preferencesDialog | key Tab | key Tab | wait 0.3 | window",
      f"Preferences: {PREF_PAGES[1][0]} page after two Tab presses"),
     ("dialogs", "dialog", "confirm-remove-library-root",
      "esc | macro openprefs Library | settle 1 | click libraryRootRow@0.5,0.5 | click libraryRootRemoveButton | "
@@ -6298,8 +6314,8 @@ STATES = [
      "d.giveBindings(stopAction,d.withKey(d.bindingsOf(stopAction),0,'Space'));return true})() | settle 1 | wait 0.6",
      "Shortcut Conflict: a key Play/Pause has, for Stop (over Configure Keyboard Shortcuts)"),
     ("dialogs", "dialog", "quit-save-failed",
-     "esc 2 | js root.showQuitSaveFailedDialog('Settings could not be saved: Permission denied (os error 13)') | settle 0.9",
-     "Quit: saving the state failed (opened directly with a sample message)"),
+     "esc 2 | js root.showQuitSaveFailedDialog({settings:true,queue:true,scrobbles:false,cause:'permission',detail:'failed to create a temporary file for /home/user/.config/ferrous/settings.txt: Permission denied (os error 13)\\nfailed to create a temporary file for /home/user/.config/ferrous/session.txt: Permission denied (os error 13)'}) | settle 0.9",
+     "Quit: saving the state failed (opened directly with a sample failure)"),
     ("dialogs", "dialog", "quit-save-failed-default-focus", "focusdefault", "Quit save failed, default focus"),
     ("dialogs", "dialog", "tag-editor", "esc | macro tagedit 4 | away", "Edit Tags: four tracks of one album"),
     ("dialogs", "dialog", "tag-editor-all-selected", "js root.tagEditorApi.selectAllRows() | wait 0.5", "Edit Tags: all rows selected (bulk fields)"),
@@ -6309,11 +6325,15 @@ STATES = [
      "Edit Tags: the typed title committed with a real Tab (its row's unsaved-change mark)"),
     ("dialogs", "dialog", "tag-editor-auto-number", "macro open_child tagEditorDialog AutoNumberDialog", "Edit Tags > Auto Number"),
     ("dialogs", "dialog", "tag-editor-auto-number-default-focus", "focusdefault", "Auto Number, default focus"),
+    ("dialogs", "dialog", "tag-editor-batch", "esc | macro renamebatch | wait 0.4 | away",
+     "Edit Tags: the twelve-file batch, all selected, its new titles not yet saved"),
     ("dialogs", "dialog", "tag-editor-rename-preview",
-     "esc | macro renamebatch | js tagEditorDialog.triggerRename() | waitpopup RenamePreviewDialog 2",
+     "js tagEditorDialog.triggerRename() | waitpopup RenamePreviewDialog 2",
      "Edit Tags > Rename Files preview: twelve files (the rename batch), seven renamed, five keeping their names"),
     ("dialogs", "dialog", "tag-editor-rename-preview-default-focus", "focusdefault", "Rename preview, default focus"),
-    ("dialogs", "dialog", "tag-editor-status-details", "esc | macro tagsavefail | macro open_child tagEditorDialog TagEditorStatusDetailsDialog",
+    ("dialogs", "dialog", "tag-editor-save-failed", "esc | macro tagsavefail | away",
+     "Edit Tags after a real save with one folder not writable: its status, Details and the failed row"),
+    ("dialogs", "dialog", "tag-editor-status-details", "macro open_child tagEditorDialog TagEditorStatusDetailsDialog",
      "Edit Tags > Details after a real save with one folder not writable (one file saved, one failed)"),
     ("dialogs", "dialog", "tag-editor-quit-wait", "esc | macro quitwait",
      "Edit Tags: 'finishing tag changes' quit wait, two files (the list injected), with Keep Waiting and Quit Anyway"),
@@ -6358,7 +6378,7 @@ STATES = [
            ("viewers", "viewer", f"spectrogram-{mname}-zoomed",
             ("window spectrogramFullscreenWindow | " if mode else "") + "wheel xy:700,450 120 4 | wait 1.2 | move xy:700,450 | wait 0.6",
             f"Spectrogram viewer, {mname}, zoomed 4 notches: zoom readout + Reset Zoom")]
-        + ([("viewers", "viewer", "spectrogram-windowed-reset-hover", "move xy:700,450 | wait 0.5 | hover plotZoomResetButton 1.3",
+        + ([("viewers", "viewer", "spectrogram-windowed-reset-hover", "move xy:700,450 | wait 0.5 | hover viewerResetButton 1.3",
              "Windowed viewer: Reset Zoom hovered (tooltip)"),
             ("viewers", "viewer", "spectrogram-windowed-meter",
              "js root.uiBridge.setShowLevelMeter(true) | wait 0.5 | move xy:700,450 | wait 0.6",
@@ -6383,7 +6403,7 @@ STATES = [
             f"Album art viewer, {mname}, file info pane"),
            ("viewers", "menu", f"context-albumart-viewer-{mname}",
             "js viewerController.toggleAlbumArtInfoVisible(function(){}) | " + ("window albumArtFullscreenWindow | " if mode else "") + ("key Menu | settle 0.8" if mode else "rclick xy:500,400"),
-            f"Album art viewer context menu ({mname}" + (", Menu key)" if mode else ", right click: the windowed viewer takes no Menu key)")),
+            f"Album art viewer context menu ({mname}" + (", Menu key)" if mode else ", right click; the Menu key and Shift+F10 open it too, at the art's centre)")),
            ("viewers", "_", f"_close-{mname}", ("window albumArtFullscreenWindow | " if mode else "") + "esc | js viewerController.closeAlbumArtViewer() | settle 1", "")]
     )
 ] + [
@@ -6395,7 +6415,7 @@ STATES = [
     # the walk with the status bar's indicators shown (Last.fm listening, one new issue), so they are in it
     ("focus", "_", "_setup", "queue | play Small_Hours 30 2 | js root.uiBridge.pause() | "
      '''macro lastfm {"lastFmScrobbleListenedMs":60000} | '''
-     "js errorController.report(1, 1, '/music/A/B/01 - Missing.flac', 'The file could not be opened') | away | unfocus", ""),
+     "js errorController.report(1, 1, '/music/A/B/01 - Missing.flac', 'The file couldn\\u2019t be opened', 'No such file or directory') | away | unfocus", ""),
 ] + [
     ("focus", "focus", f"tab-{i:02d}", f"macro tab {i}", "Focus walk") for i in range(1, 25)
 ] + [
@@ -6484,8 +6504,8 @@ STATES = [
     ("motion", "motion", "play-pause-glyph-resume", "strip 0.5 0.1 0,26,420,50 :: js root.uiBridge.play()", "Play/Pause glyph on resume"),
     ("motion", "motion", "seek-tooltip", "strip 1.6 0.1 0,0,1600,110 :: hover seekSlider@0.62,0.5 0.7 ; move xy:900,500",
      "Seek bar hover: hover line + time box appearing, then fading on leave"),
-    ("motion", "motion", "spectrogram-zoom", "strip 2.0 0.1 spectrogramPane :: wheel spectrogramPaneItem@0.5,0.4 120 3 ; wait 0.8 ; js resetZoomAction.trigger()",
-     "Spectrogram zoom in (3 notches) and Reset Zoom: rescale and backdrop layers"),
+    ("motion", "motion", "spectrogram-zoom", "hover spectrogramPaneItem@0.5,0.4 0.4 | strip 2.0 0.1 spectrogramPane :: wheel spectrogramPaneItem@0.5,0.4 120 3 ; wait 0.8 ; js resetZoomAction.trigger()",
+     "Spectrogram zoom in (3 notches) and Reset Zoom with the pointer resting on the plot: rescale, backdrop layers and the zoom readout"),
     ("motion", "motion", "visualization-mode-switch", "away | strip 1.2 0.1 spectrogramPane :: js viewerController.setVisualizationMode(1)",
      "Visualization mode switch, spectrogram to waveform"),
     ("motion", "motion", "visualization-mode-switch-back", "strip 1.2 0.1 spectrogramPane :: js viewerController.setVisualizationMode(0)",
@@ -6615,7 +6635,7 @@ STATES = [
     ("motion-ui", "motion", "search-typing", "js globalSearchController.openDialog() | settle 0.6 | strip 1.2 0.1 - :: type mer",
      "Search palette results appearing while typing"),
     ("motion-ui", "motion", "issue-indicator-appears",
-     "esc | strip 0.6 0.1 statusBar :: js errorController.report(1, 1, '/music/A/B/01 - X.flac', 'The file could not be opened')",
+     "esc | strip 0.6 0.1 statusBar :: js errorController.report(1, 1, '/music/A/B/01 - X.flac', 'The file couldn\\u2019t be opened', 'No such file or directory')",
      "Status bar issues indicator appearing"),
     ("motion-ui", "motion", "scrobble-ring-fill",
      'strip 3.4 0.1 statusBar:0.8,0,0.2,1 :: macro lastfm {"lastFmScrobbleListenedMs":0} ; wait 0.4 ; '
@@ -6646,6 +6666,8 @@ STATES = [
     ("narrow", "dialog", f"preferences-{PREF_PAGES[1][1]}", f"esc | macro openprefs {PREF_PAGES[1][0]} | settle 1.1",
      f"Narrow window: Preferences, {PREF_PAGES[1][0]} page"),
     ("narrow", "dialog", "tag-editor", "esc | macro tagedit 4", "Narrow window: Edit Tags"),
+    ("narrow", "dialog", "tag-editor-batch", "macro renamebatch | wait 0.4 | away",
+     "Narrow window: Edit Tags, the twelve-file batch, all selected, its new titles not yet saved"),
     ("narrow", "menu", "view", "js tagEditorDialog.closeEditor() | wait 0.5 | menu 2", "Narrow window: View menu"),
     ("narrow", "_", "_close", "esc", ""),
     # art to none and back in the narrow window (1000x720): the slot cross-fades, nothing else moves
@@ -6726,7 +6748,7 @@ STATES = [
     ("bigfont", "statusbar", "lastfm-listening-half", 'macro lastfm {"lastFmScrobbleListenedMs":60000} | hover scrobbleIndicator 1.4',
      "Large font: Last.fm indicator hovered (injected)"),
     ("bigfont", "statusbar", "issues-new",
-     "away | macro lastfm {\"lastFmShowScrobbleProgress\":false} | js errorController.report(1, 1, '/music/A/B/01 - Missing.flac', 'The file could not be opened') | wait 0.3",
+     "away | macro lastfm {\"lastFmShowScrobbleProgress\":false} | js errorController.report(1, 1, '/music/A/B/01 - Missing.flac', 'The file couldn\\u2019t be opened', 'No such file or directory') | wait 0.3",
      "Large font: status bar with a new issue"),
     ("bigfont", "statusbar", "scanning-known",
      'macro fakebridge statusBar {"libraryScanInProgress":true,"libraryScanProcessed":57,"libraryScanTotal":180}',
@@ -6754,7 +6776,7 @@ STATES = [
     ("bigfont", "dialog", "confirm-clear-diagnostics", "macro open_child diagnosticsDialog ConfirmDialog",
      "Large font: confirmation to clear the diagnostics log"),
     ("bigfont", "dialog", "quit-save-failed",
-     "esc 2 | js root.showQuitSaveFailedDialog('Settings could not be saved: Permission denied (os error 13)') | settle 0.9",
+     "esc 2 | js root.showQuitSaveFailedDialog({settings:true,queue:true,scrobbles:false,cause:'permission',detail:'failed to create a temporary file for /home/user/.config/ferrous/settings.txt: Permission denied (os error 13)\\nfailed to create a temporary file for /home/user/.config/ferrous/session.txt: Permission denied (os error 13)'}) | settle 0.9",
      "Large font: quit, saving the state failed"),
     ("bigfont", "dialog", "recent-errors", "esc | macro opendialog recentErrorsDialog | settle 1", "Large font: Recent Issues"),
     ("bigfont", "dialog", "tag-editor-auto-number", "esc | macro tagedit 4 | macro open_child tagEditorDialog AutoNumberDialog",
@@ -6781,7 +6803,7 @@ STATES = [
     # one esc (the preview): a second would ask about the batch's unsaved edits
     ("bigfont", "dialog", "tag-editor-quit-wait", "esc | macro tagedit 4 | macro quitwait", "Large font: Finishing Tag Changes, two files"),
     ("bigfont", "dialog", "tag-editor-status-details", "esc | macro tagsavefail | macro open_child tagEditorDialog TagEditorStatusDetailsDialog",
-     "Large font: Tag Editor Details after a real save with one folder not writable"),
+     "Large font: Tag Change Details after a real save with one folder not writable"),
     ("bigfont", "_", "_dialogs24b-close", "esc | js tagEditorDialog.closeEditor() | wait 0.5", ""),
     ("bigfont", "dialog", "itunes-error", "js root.openItunesArtworkDialog() | settle 1 | macro itunesfail",
      "Large font: Replace from iTunes, a real failed search"),
@@ -6816,9 +6838,10 @@ STATES = [
      "Large font (24 pt), 1920x1200: track change from a track without album art back to one with it: the now-playing column"),
 ] + [
     ("bigfont", "viewer", "spectrogram-windowed",
-     "esc | away | js root.uiBridge.play() | js root.uiBridge.setViewerFullscreenMode(0) | js root.uiBridge.setShowFullscreenTitleStrip(true) | "
+     "esc | away | js errorController.clear() | js root.uiBridge.play() | js root.uiBridge.setViewerFullscreenMode(0) | "
+     "js root.uiBridge.setShowFullscreenTitleStrip(true) | "
      "js viewerController.openSpectrogramViewer() | settle 1 | ready 3 | move xy:700,450 | wait 0.5",
-     "Large font: spectrogram viewer, windowed, pointer over the plot"),
+     "Large font: spectrogram viewer, windowed, pointer over the plot (the session's staged issues cleared first)"),
     ("bigfont", "viewer", "spectrogram-fullscreen",
      "js viewerController.closeSpectrogramViewer() | settle 1 | js root.uiBridge.setViewerFullscreenMode(1) | "
      "js viewerController.openSpectrogramViewer() | settle 1 | ready 3 | window spectrogramFullscreenWindow | move xy:700,450 | wait 0.5",
@@ -6830,7 +6853,8 @@ STATES = [
      "Large font: album art viewer, windowed, with the file info pane"),
     ("bigfont", "viewer", "albumart-fullscreen",
      "js viewerController.closeAlbumArtViewer() | settle 1 | js root.uiBridge.setViewerFullscreenMode(1) | "
-     "js viewerController.openAlbumArtViewer() | settle 2 | wait 0.4 | window albumArtFullscreenWindow",
+     "js viewerController.openAlbumArtViewer() | settle 2 | wait 0.4 | window albumArtFullscreenWindow | "
+     "move xy:800,500 | wait 0.3 | js viewerController.toggleAlbumArtInfoVisible(function(){}) | wait 0.4",
      "Large font: album art viewer, fullscreen, with the file info pane"),
     ("bigfont", "_", "_viewers-close", "window albumArtFullscreenWindow | esc | window  | js viewerController.closeAlbumArtViewer() | settle 1", ""),
     # (Last.fm on, as in the 10 pt walk's setup: its indicator is a Tab stop)
@@ -7005,9 +7029,10 @@ NOT_CAPTURED = [
     ("Context menus at the pointer", "Context menus are opened from the keyboard (the Menu key, or Shift+F10) wherever "
                                      "the view takes it: library, queue, the scrobble indicator and the fullscreen "
                                      "album art viewer; they open on the selected row or control. The windowed album "
-                                     "art viewer takes no Menu key: its right-click menu opens with popup() at the "
-                                     "pointer, which the probe's synthetic events do not move in the compositor, so "
-                                     "it shows at the window's top-left corner."),
+                                     "art viewer and the search palette take those keys as shortcuts, which the "
+                                     "probe's keys go past: the viewer's menu is shot from a right click (at the "
+                                     "click point; from the keys it opens at the art's centre), the palette's from a "
+                                     "right click and from a real Menu key."),
     ("Dialog windows' open and close animation", "Configure and About are real windows (DialogWindow): KWin animates "
                                                  "their opening and closing as a compositor effect, which the app's own "
                                                  "frame readback cannot see; their strips show the client window only "
@@ -7048,6 +7073,8 @@ STRIP_VIEW = {
     "preferences-open": (329, 191, 942, 618),
     "search-open": (370, 77, 860, 646), "search-close": (370, 77, 860, 646),
     "search-typing": (370, 77, 860, 646),
+    # the plot, both lanes and the time on the bottom one, not a thumbnail of the window (the pans' band: vi-moves-band)
+    "vi-pan-waveform": "spectrogramPane", "vi-pan-spectrogram": "spectrogramPane",
     "first-scan": (0, 75, 820, 470),
     "animoff-dialog-open": (420, 240, 760, 540),
     "animoff-search-open": (370, 77, 860, 646),
@@ -7132,12 +7159,12 @@ _DIALOG_EXPECT = {
     "library-root-name-rename": ("Rename Library Folder", "Without a name, the library shows the folder"),
     "library-root-name-add": ("Add Library Folder", "Without a name, the library shows the folder"),
     "confirm-clear-diagnostics": ("Delete Diagnostics Log", "Delete the diagnostics log?"),
-    "quit-save-failed": ("Couldn’t Save Before Quitting", "could not be saved"),
-    "tag-editor-auto-number": ("Auto Number", "Number the selected rows"),
+    "quit-save-failed": ("Couldn’t Save Before Quitting", "couldn’t save its settings"),
+    "tag-editor-auto-number": ("Auto Number", "Number tracks in the table"),
     "tag-editor-rename-preview": ("Rename Files", "will be renamed"),
-    "tag-editor-status-details": ("Tag Editor Details", None),
-    "tag-editor-quit-wait": ("Finishing Tag Changes", "Ferrous quits once the tag editor"),
-    "tag-editor-close-confirm": ("Unsaved Changes", "Save changes before closing the tag editor?"),
+    "tag-editor-status-details": ("Tag Change Details", None),
+    "tag-editor-quit-wait": ("Finishing Tag Changes", "Ferrous quits once it has written"),
+    "tag-editor-close-confirm": ("Unsaved Changes", "Save tag changes before closing?"),
     "confirm-replace-cover": ("Replace Album Art", "Replace the album art of"),  # (its heading, set by applySuggestion)
     "tag-editor-editing": ("Edit Tags", None),
     "itunes-error": ("Replace", "search iTunes"),  # (the app's failed state, "Couldn’t search iTunes")
@@ -7210,7 +7237,12 @@ CUSTOM_SHEETS = [
     ("details-1to1", "Details at 1:1: the Last.fm glyph's centre line, the search field at 24 pt, the mode switch hovered "
      "without focus (3x, dark and light) and its plate during a click (3x)", "dark",
      [[("details", "statusbar-glyph", None, "Status bar, dark")],
-      [("details", "searchfield24pt", None, "Search field at 24 pt (1600x1000), dark", dict(variant="font24"))],
+      # (the field is as wide as the window at 24 pt, over the reviewers' 1568 px with the sheet's margins: its two
+      # ends, the glyph and the query, then the buttons; only its plain middle is left out)
+      [("details", "searchfield24pt", None, "Search field at 24 pt (1600x1000), dark: its left end",
+        dict(variant="font24", part=(0, 0, 0.42, 1))),
+       ("details", "searchfield24pt", None, "Its right end (the plain middle left out)",
+        dict(variant="font24", part=(0.75, 0, 0.25, 1)))],
       [("details", "modeswitch-hover", None, "Mode switch hovered without focus, dark"),
        ("details", "modeswitch-hover", None, "light", dict(theme="light"))],
       [dict(strip="mode-switch-lane", item="visualizationModeSwitch", times=[-17, 17, 34, 67, 150], zoom=3,
@@ -7430,16 +7462,24 @@ MOTION_FOCUS = {
     # visualization interaction: the perceived rows show the plot that moves (a 380 px stretch of its upper lane), not
     # the plates that fade beside it (recording coordinates: its crop starts at the transport's top)
     **{n: dict(rect=(741, 518, 380, 215), b_lines=1, band=360)
-       for n in ("vi-pan-waveform", "vi-follow-waveform", "vi-pan-spectrogram", "vi-follow-spectrogram", "vi-autoscroll",
-                 "vi-seek-plot", "vi-seek-bar")},
+       for n in ("vi-follow-waveform", "vi-follow-spectrogram", "vi-autoscroll", "vi-seek-plot", "vi-seek-bar")},
+    # (a pan's: also whether the crosshair is at one x in every lane of every frame)
+    **{n: dict(rect=(741, 518, 380, 215), b_lines=1, band=360, lanes="spectrogramPane")
+       for n in ("vi-pan-waveform", "vi-pan-spectrogram")},
     # the queue's first rows where the playing row moves (rows 1-3, the number and title columns); the first scan:
     # the status bar's right half (the scan label arriving and leaving)
+    # a wheel zoom and Reset with the pointer resting on the plot: whether the crosshair stays in every frame (h21:
+    # it is drawn into the plot's texture, so no text or opacity measure saw it vanish for ~215 ms per notch)
+    **{n: dict(presence="spectrogramPane") for n in ("spectrogram-zoom", "vi-zoom-waveform")},
     "queue-now-move": dict(rect="mainQueuePane:0,0.06,0.55,0.18", rows="all", b_lines=1),
     "first-scan": dict(rect="statusBar:0.4,0,0.6,1", rows="all", b_lines=1),
     "scan-large": dict(rect="statusBar:0.4,0,0.6,1", rows="all", b_lines=1),
     "scan-injected": dict(rect="statusBar:0.4,0,0.6,1", rows="all", b_lines=1),
     "mute-toggle": dict(rows="all", b_lines=1),
     "seek-drag-box": dict(rows="all", b_lines=1),
+    # the field and the first rows under it, where each keystroke's result shows (the perceived rows); one 16.7 ms
+    # line, so the key frames, which have the moving footer, are not thumbnails
+    "search-typing": dict(rect=(402, 107, 300, 260), b_lines=1, band=400, max_frames=6),
     # the top-right corner; perceived rows for the reveal and the hide
     "viewer-strip-show-fullscreen": dict(rect=(1700, 0, 300, 110), rows="all", b_lines=1, max_frames=6),
     "viewer-autohide-fullscreen": dict(rect=(1700, 0, 300, 110), segment="last", rows="all", b_lines=1, zoom_graphs=True, band=360, max_frames=6),
@@ -7463,6 +7503,9 @@ MOTION_FOCUS = {
     "albumart-autohide-fullscreen": dict(rect=(1500, 0, 500, 110), segment="last", rows="all", b_lines=1, zoom_graphs=True,
                                          band=360, max_frames=6),
     "seek-tooltip": dict(rows="all", b_lines=1),  # the time box fading in on hover, and out on leave
+    # a windowed viewer's popup cross-fades with the main window under it: against the mix of the two ends
+    **{n: dict(cross_fade=True) for n in ("viewer-open-windowed", "viewer-close-windowed",
+                                          "albumart-open-windowed", "albumart-close-windowed")},
     # the column: the sidebar as the app lays it out, from its top down 510 px
     "first-play-from-idle": dict(rect="sidebarPane:0,0,1,0.567", max_h=180, b_lines=1, band=400, pursuit=_HEADER_PURSUIT),
     "plates-reveal": dict(b_lines=1, band=360),
@@ -7580,11 +7623,11 @@ _insert_after("dialogs", "itunes-results", [
      "Replace from iTunes: a result's Preview pressed (held)"),
     ("dialogs", "_", "_itunes-unpress", "release itunesArtworkResultsHeading | wait 0.3 | away", "")])
 _insert_after("dialogs", "tag-editor-modified", [
-    ("dialogs", "dialog", "tag-editor-revert-hover", "hover tagEditorRevert_title 0.6", "Edit Tags: the Title field's revert glyph hovered"),
+    ("dialogs", "dialog", "tag-editor-revert-hover", "hover tagEditorRevert_title 1.0", "Edit Tags: the Title field's revert glyph hovered"),
     ("dialogs", "dialog", "tag-editor-revert-pressed", "press tagEditorRevert_title | wait 0.3",
      "Edit Tags: the Title field's revert glyph pressed (held)"),
     ("dialogs", "_", "_revert-unpress", "release tagEditorLabel_title | wait 0.3", ""),
-    ("dialogs", "dialog", "tag-editor-column-revert-hover", "hover tagEditorColumnRevert_title 0.6",
+    ("dialogs", "dialog", "tag-editor-column-revert-hover", "hover tagEditorColumnRevert_title 1.0",
      "Edit Tags: the Title column's revert glyph hovered")])
 _insert_after("statusbar", "recent-errors", [
     ("statusbar", "dialog", "recent-errors-link-hover", "hover errorHistoryActionButton 0.6", "Recent Issues: an action link hovered"),
@@ -7689,8 +7732,10 @@ _insert_after("dialogs", "keyboard-shortcuts-default-focus", [
     ("dialogs", "dialog", "keyboard-shortcuts-filter",
      "click keyboardShortcutsSearchField | wait 0.3 | window keyboardShortcutsDialog | type play | wait 0.6 | window | away",
      "Configure Keyboard Shortcuts: the list filtered by \u201cplay\u201d, typed in its search field"),
+    # (the pointer out of the dialog too: left on the search field, its tooltip covered the columns in the later
+    # states, which are compared with the one at rest)
     ("dialogs", "_", "_shortcuts-unfilter",
-     "window keyboardShortcutsDialog | key Backspace | key Backspace | key Backspace | key Backspace | wait 0.4 | window ", "")])
+     "window keyboardShortcutsDialog | leave | key Backspace | key Backspace | key Backspace | key Backspace | wait 0.4 | window ", "")])
 _insert_after("bigfont", "quit-save-failed", [  # (the next state's Escape closes it)
     ("bigfont", "dialog", "keyboard-shortcuts", "esc | macro opendialog keyboardShortcutsDialog | settle 1.2 | away",
      "Large font: Configure Keyboard Shortcuts")])
@@ -7751,6 +7796,12 @@ STATES += [
      f"leave ; wait 0.9 ; move {_VW}@0.5,0.5 ; mclick {_VW}@0.5,0.5",
      "Autoscroll from a middle click: the pointer a little right of the click (slow), at the window's edge (fast), "
      "outside the window (going on), then a second middle click stopping it"),
+    # (after the autoscroll, which starts from the zoomed view _autoscroll-from leaves)
+    ("viz-interaction", "motion", "vi-zoom-waveform",
+     f"key F | js resetZoomAction.trigger() | wait 0.6 | hover {_VW}@0.5,0.4 0.4 | strip 2.0 0.1 spectrogramPane :: "
+     f"wheel {_VW}@0.5,0.4 120 3 ; wait 0.8 ; js resetZoomAction.trigger()",
+     "Waveform zoom in (3 notches) and Reset Zoom with the pointer resting on the plot: the crosshair, its readouts "
+     "and the zoom readout"),
     ("viz-interaction", "_", "_to-spectrogram",
      "wait 0.3 | key F | js resetZoomAction.trigger() | js viewerController.setVisualizationMode(0) | "
      "js root.uiBridge.setSpectrogramDisplayMode(1) | click seekSlider@0.3,0.5 | ready 3 | away", ""),
@@ -7782,7 +7833,7 @@ DLG_FACTS = {("dialogs", st) for st in (
            "about", "about-kde", "library-root-name-add", "library-root-name-rename", "confirm-remove-library-root",
            "confirm-clear-diagnostics", "quit-save-failed", "diagnostics", "recent-errors", "tag-editor", "tag-editor-auto-number",
            "tag-editor-rename-preview", "tag-editor-batch", "itunes-results-loading", "tag-editor-quit-wait", "tag-editor-status-details", "itunes-error", "itunes-empty",
-           "confirm-replace-cover", "preferences-library", "preferences-general", "preferences-lastfm")], ("narrow", f"preferences-{PREF_PAGES[1][1]}")}
+           "confirm-replace-cover", "preferences-library", "preferences-general", "preferences-lastfm")], ("narrow", f"preferences-{PREF_PAGES[1][1]}"), ("narrow", "tag-editor")}
 # the viewer's corner plate or strip as grabbed (shown, or auto-hidden after the pointer stopped): its fact
 # for the sheets' labels, recorded as the state's last step
 PLATE_FACTS = {("viewers", "albumart-windowed-info"): ("albumArtPopupControls", "corner plate"),

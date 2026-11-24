@@ -28,6 +28,8 @@ class LibraryTreeModel : public QAbstractListModel {
     Q_PROPERTY(bool selectionActionable READ selectionActionable NOTIFY selectionChanged)
     // Whether revealKey is waiting for the backend to load the rows.
     Q_PROPERTY(bool revealPending READ revealPending NOTIFY revealPendingChanged)
+    // Whether a row shows expanded, which Collapse All would close.
+    Q_PROPERTY(bool hasExpandedRows READ hasExpandedRows NOTIFY hasExpandedRowsChanged)
 
 public:
     enum Roles {
@@ -62,6 +64,7 @@ public:
     int selectionCount() const;
     bool selectionActionable() const;
     bool revealPending() const;
+    bool hasExpandedRows() const;
 
     Q_INVOKABLE void setLibraryTreeFromBinary(const QByteArray &treeBytes);
     Q_INVOKABLE void setExpandedKeys(const QStringList &keys);
@@ -72,6 +75,9 @@ public:
     Q_INVOKABLE void toggleAlbum(const QString &albumKey);
     Q_INVOKABLE bool hasSelectionKey(const QString &selectionKey) const;
     Q_INVOKABLE int indexForSelectionKey(const QString &selectionKey) const;
+    // The selection keys of the shown row of `selectionKey` and of the rows
+    // that hold it, outermost first; empty when the row is not shown.
+    Q_INVOKABLE QStringList selectionKeyPath(const QString &selectionKey) const;
     Q_INVOKABLE int sourceIndexForRow(int row) const;
     Q_INVOKABLE QString selectionKeyForRow(int row) const;
     Q_INVOKABLE int findArtistRowByPrefix(const QString &prefix, int startRow) const;
@@ -115,6 +121,7 @@ signals:
     void nodeExpansionRequested(const QString &key, bool expanded);
     void selectionChanged();
     void revealPendingChanged();
+    void hasExpandedRowsChanged();
     void revealFinished(const QString &selectionKey, int row);
 
 private:
@@ -227,6 +234,7 @@ private:
     // The keys whose rows the pending reveal asked the backend for.
     QSet<QString> m_revealAskedKeys;
     bool m_hasTree{false};
+    bool m_hasExpandedRows{false};
     QString m_searchLower;
     QFutureWatcher<QVector<TreeNode>> m_parseWatcher;
     int m_parseGeneration{0};

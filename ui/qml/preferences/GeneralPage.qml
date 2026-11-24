@@ -9,8 +9,9 @@ import "../components" as Components
 import "." as Preferences
 
 // The General page: the fullscreen viewers, and Plasma's media controls.
-// Two groups apart by the room between them, as on Last.fm, with "Plasma:"
-// naming the second: only a page of three or more groups, Visualization,
+// Two groups apart by the room between them, as on Last.fm, with "Media
+// controls:" naming the second by what it sets (it was "Plasma:", the
+// desktop's name): only a page of three or more groups, Visualization,
 // heads them (one heading over a single check box that its label already
 // named).
 Preferences.PreferencesPage {
@@ -55,8 +56,14 @@ Preferences.PreferencesPage {
     CheckBox {
         id: mediaCheckBox
         objectName: "systemMediaControlsCheckBox"
-        Kirigami.FormData.label: I18n.i18nc("@label", "Plasma:")
-        text: I18n.i18nc("@option:check", "Show in the media controls and answer media keys")
+        Kirigami.FormData.label: I18n.i18nc("@label", "Media controls:")
+        // It says where Ferrous shows ("Show Ferrous" alone left that open, and "Appear in media
+        // controls" repeated the label); a
+        // screen reader hears the label and the box, the box alone.
+        text: I18n.i18nc("@option:check after the label Media controls",
+            "Show Ferrous in Plasma and answer media keys")
+        Accessible.name: I18n.i18nc("@option:check accessible name; it contains the check box's text",
+            "Media controls: Show Ferrous in Plasma and answer media keys")
         checked: root.settings.value("systemMediaControlsEnabled")
         onToggled: root.settings.setValue("systemMediaControlsEnabled", checked)
     }
@@ -64,7 +71,7 @@ Preferences.PreferencesPage {
     Components.FormHelpText {
         objectName: "systemMediaControlsHelp"
         uiPalette: root.uiPalette
-        indent: mediaCheckBox.contentItem.x
+        checkBox: mediaCheckBox
         text: I18n.i18nc("@info", "Ferrous appears in Plasma’s media controls and answers the Play/Pause, "
             + "Previous, Next and Stop keys. The volume keys always set the system volume, not "
             + "Ferrous’s.")

@@ -101,6 +101,10 @@ class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Cli
     Q_PROPERTY(QColor readoutPlateColor READ readoutPlateColor WRITE setReadoutPlateColor NOTIFY readoutColorsChanged)
     Q_PROPERTY(QColor readoutPlateEdgeColor READ readoutPlateEdgeColor WRITE setReadoutPlateEdgeColor NOTIFY readoutColorsChanged)
     Q_PROPERTY(QColor readoutTextColor READ readoutTextColor WRITE setReadoutTextColor NOTIFY readoutColorsChanged)
+    // How much larger than the window's the readout's text is: in a viewer
+    // over the whole screen, its strip's type scale
+    // (UiPalette.fullscreenTextScale), as its lane heads'; 1 elsewhere.
+    Q_PROPERTY(double textScale READ textScale WRITE setTextScale NOTIFY textScaleChanged)
     // Whether the playhead is drawn: the plot going out under another as
     // the visualization mode switches draws none, so only one shows.
     Q_PROPERTY(bool playheadVisible READ playheadVisible WRITE setPlayheadVisible NOTIFY playheadVisibleChanged)
@@ -127,6 +131,26 @@ class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Cli
     // seek other than the plot's own, a track change or a reset of the zoom.
     // A view gliding back to the playhead is not.
     Q_PROPERTY(bool detached READ detached NOTIFY detachedChanged)
+    // Whether autoscroll runs: told before detached as it starts, and after
+    // it as following again ends it (see publishDetached).
+    Q_PROPERTY(bool autoscrolling READ autoscrolling NOTIFY autoscrollingChanged)
+    // Whether a middle-drag pans the view: from the drag distance to the
+    // release. The surface shows a closed hand meanwhile.
+    Q_PROPERTY(bool panning READ panning NOTIFY panningChanged)
+    // Whether a middle press holds the view, which leads to a pan or to
+    // autoscroll: from the press to its release. The lanes' heads open on
+    // no hover meanwhile.
+    Q_PROPERTY(bool panPressed READ panPressed NOTIFY panPressedChanged)
+    // Where, in the scene, that press was, and once it is released, where
+    // it was let go: the pointer's last place the plot knows, as hover goes
+    // to no one while the button is held.
+    Q_PROPERTY(QPointF panScenePosition READ panScenePosition NOTIFY panPressedChanged)
+    // Whether the pointer is on the plot: over it, out to its last pixel
+    // column, or holding a button it pressed on it, through a pan and out
+    // past its edges until the release. The crosshair shows while it is;
+    // the plot layer's corner row takes it for the pointer on the pane, so
+    // that the two show and hide together.
+    Q_PROPERTY(bool pointerOn READ pointerOn NOTIFY pointerOnChanged)
     // The part of the track the view shows, in seconds, from its left edge
     // to its right: following the playhead, where a middle-drag panned it
     // or gliding back, at the zoom it shows. Taken at each frame of the
@@ -213,10 +237,17 @@ public:
     void setReadoutPlateEdgeColor(const QColor &value);
     QColor readoutTextColor() const;
     void setReadoutTextColor(const QColor &value);
+    double textScale() const;
+    void setTextScale(double value);
     bool playheadVisible() const;
     void setPlayheadVisible(bool value);
 
     bool detached() const { return m_detached; }
+    bool autoscrolling() const { return m_autoscrollingShown; }
+    bool panning() const { return m_panning; }
+    bool panPressed() const { return m_panPressed; }
+    QPointF panScenePosition() const { return m_panScenePosition; }
+    bool pointerOn() const { return m_pointerOnShown; }
     double visibleStartSeconds() const { return m_visibleStartSeconds; }
     double visibleEndSeconds() const { return m_visibleEndSeconds; }
 
@@ -254,11 +285,26 @@ signals:
     void samplePointsVisibleChanged();
     void colorsChanged();
     void readoutColorsChanged();
+    void textScaleChanged();
     void playheadVisibleChanged();
     void pictureReadyChanged();
     void markerSecondsChanged();
     void markerXChanged();
+    // The view the user moved follows the playhead again in the same track,
+    // where it showed `fromStartSeconds` to `fromEndSeconds`: by Follow
+    // Playhead or a seek other than its own, not by a track change, a
+    // gapless successor or Repeat-One, nor as playback reaches it. Told
+    // after visibleRangeChanged tells where it is now, before
+    // detachedChanged, in the order SpectrogramItem tells them.
+    void followedAgain(double fromStartSeconds, double fromEndSeconds);
     void detachedChanged();
+    void autoscrollingChanged();
+    void panningChanged();
+    void panPressedChanged();
+    // A wheel zoomed the plot at `scenePosition`: the pointer acted there,
+    // as when it moves, though it rests where it is.
+    void wheelZoomed(QPointF scenePosition);
+    void pointerOnChanged();
     void visibleRangeChanged();
     void seekRequested(double seconds);
 
@@ -427,6 +473,8 @@ private:
     // The readout's plates: the spectrogram's plot colours until set.
     CrosshairReadout::Colors m_readoutColors{
         QColor(20, 20, 20, 224), QColor(0xec, 0xec, 0xec), QColor(255, 255, 255, 36)};
+    // textScale, under the state mutex.
+    double m_textScale{1.0};
 
     // What the workers that make playback tiles share with the item: they
     // hand a tile over only while the item lives, and only for the tiles
@@ -534,9 +582,13 @@ private:
     void armReattachLocked(qint64 nowNs);
     // The view follows the playhead again.
     void reattachLocked();
+    // A middle press that held the view leads to nothing: it follows the
+    // playhead again.
+    void releasePressHold();
     // Autoscroll, the plot's second way to move its view, beside the
     // middle-drag: a middle click that did not drag, at `position`, starts
     // it on a zoomed view, which it detaches where it is.
+    void setPanPressed(bool pressed);
     void startAutoscroll(QPointF position);
     // Moves the detached view by `viewsPerSecond` of its width a second for
     // `seconds`, held within the track: whether it moved.
@@ -545,14 +597,15 @@ private:
     // of a drag.
     void autoscrollStopped();
     // Follows detached, and the visible range with it, on the GUI thread,
-    // after the state has changed.
-    void publishDetached();
+    // after the state has changed; `sameTrack` for a view brought back to
+    // the playhead in its track, which followedAgain tells.
+    void publishDetached(bool sameTrack = false);
     // Follows visibleStartSeconds and visibleEndSeconds on the GUI thread:
     // at each frame, and as the view is moved.
     void publishVisibleRange();
     // Asks for what a view that moved by the user's hand needs: its detail,
     // a cache for it and a frame.
-    void viewMoved();
+    void viewMoved(bool sameTrack = false);
     std::pair<double, double> visibleRangeLocked(qint64 nowNs) const;
     std::pair<double, double> visibleRangeLocked() const;
     std::pair<double, double> detailRequestVisibleRangeLocked() const;
@@ -716,12 +769,6 @@ private:
         QPainter &painter, const QLineF &line,
         const QColor &foreground, const QColor &contrast);
     static QPainterPath buildSamplePath(const QPolygonF &samples);
-    // The crosshair's time, "1:46.0", with `decimals` decimals, 1 to 3.
-    static QString formatCrosshairTime(double seconds, int decimals);
-    // Its decimals: one at the default zoom, as the spectrogram's; zoomed
-    // in, as many as tell a column of `secondsPerColumn` from the next,
-    // up to milliseconds.
-    static int crosshairTimeDecimals(double secondsPerColumn, double zoomLevel);
     // The lowest lane's label and buttons, in a plot `height` tall of
     // `lanes` lanes.
     QRect lowestLaneHeadLocked(int height, int lanes) const;
@@ -730,7 +777,7 @@ private:
         int valueTextWidth, int timeTextWidth, int textHeight,
         const QSizeF &reservedCorner = QSizeF(), const QRect &laneHead = QRect(),
         int widestValueTextWidth = 0, int widestTimeTextWidth = 0,
-        const CrosshairReadout::Colors &colors = CrosshairReadout::Colors());
+        const CrosshairReadout::Colors &colors = CrosshairReadout::Colors(), double textScale = 1.0);
     // These draw in the painter's pixels, pixelScale to a logical pixel
     // and deviceScale device pixels to one of the painter's.
     void drawOverviewLocked(QPainter &painter, int width, int height,
@@ -782,8 +829,11 @@ private:
     std::shared_ptr<const DetailWindow> detailSnapshotLocked(
         double startSeconds, double endSeconds) const;
     LaneStyle laneStyleLocked() const;
+    // With the playhead drawn at `playheadX`, the crosshair's vertical line
+    // gives way to it within 2 px of it (see CrosshairReadout::kYieldsWithin).
     void drawCrosshair(QPainter &painter, int width, int height,
-                       double visibleStart, double visibleEnd);
+                       double visibleStart, double visibleEnd,
+                       double playheadX = std::numeric_limits<double>::quiet_NaN());
     // The width of the widest level the readout shows, in its font (see
     // CrosshairReadout::plateRects).
     int crosshairWidestLevelWidthLocked();
@@ -831,11 +881,20 @@ private:
     // enough to pan, where it was pressed, and where the pan last
     // started from, as the view's unrounded start and the pointer's x.
     bool m_panPressed{false};
+    QPointF m_panScenePosition;
     bool m_panning{false};
     QPointF m_panPressPosition;
     // Whether the press stopped autoscroll, so that its release starts
     // none.
     bool m_panStopsAutoscroll{false};
+    // Whether a middle press holds a view that followed the playhead where
+    // it was, for the pan or the autoscroll it leads to: the time under the
+    // pointer stays from the press, not only from the drag distance (it
+    // moved on by a tenth meanwhile, H20). Detached in all but name, as
+    // nothing moved it yet: the plot says it is moved once a pan or
+    // autoscroll moves it, so that a click to autoscroll says nothing
+    // (#655). Under the state mutex.
+    bool m_pressHolds{false};
     double m_panOriginStart{0.0};
     double m_panOriginX{0.0};
     // Whether autoscroll moves the view (see m_autoscroll): nothing glides
@@ -843,6 +902,8 @@ private:
     bool m_autoscrolling{false};
     // detached, on the GUI thread, and as frames compare it.
     bool m_detached{false};
+    // The autoscrolling last told, on the GUI thread.
+    bool m_autoscrollingShown{false};
     std::atomic_bool m_detachedShown{false};
     std::atomic_bool m_detachedCheckPending{false};
     bool m_zoomOutHandoffPending{false};
@@ -869,7 +930,16 @@ private:
     int m_channelCount{0};
     int m_sampleRateHz{0};
     bool m_hoverActive{false};
+    // Whether a button pressed on the plot is held: the item has the
+    // pointer's grab, and no hover, until the release.
+    bool m_pointerHeld{false};
     QPointF m_hoverPosition;
+    bool pointerOnLocked() const { return m_hoverActive || m_pointerHeld; }
+    // pointerOn as last told, on the GUI thread; publishPointerOn tells a
+    // change.
+    bool m_pointerOnShown{false};
+    void publishPointerOn();
+    void setPointerHeld(bool held);
     DetailWindow m_detail;
     // Changes when the detail may hold other data for the same frames,
     // such as another file's: a sample chunk built from one window holds

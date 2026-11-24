@@ -22,14 +22,18 @@ _VAR = (os.environ.get("SHOT_ICON_VARIANT_NAMES") or "variant").split(",")[0]
 _LEFT, _RIGHT = (0, 0, 330 / 1239, 1), (1 - 170 / 1239, 0, 170 / 1239, 1)  # the pane's left and right parts
 _R560 = (1 - 520 / 1239, 0, 520 / 1239, 1)  # the pane's right 520 px: the meter and the mode switch
 
-# the 24 pt dialog tiles (the 1600x1000 session at 24 pt) and the iTunes searching -> failed frames: the
-# status block of the 920x604 Replace window (the spinner and its text, then the warning and its two lines). The
-# search starts about 3 ms after the action; the busy indicator's running goes false -> true as the real bridge is
-# given (it was the stand-in's), so its fade-in starts over: a trial run drew one frame (+19 ms) of the text alone
-# before the failure (+36 ms), as a search started from rest does
+# the 24 pt dialog tiles (the 1600x1000 session at 24 pt)
 B24 = dict(variant="1600x1000_font24", lh=16, gap=6)
-ITUNES_FAIL_BAND = (300, 200, 320, 125)
-ITUNES_FAIL_TIMES = [-10, 22, 40, 150]
+# Configure Keyboard Shortcuts below its title bar: at rest, filtered and refused at this one crop, so that what
+# moves between them (the columns, the list's end, the editor) can be compared
+KEYS_CROP = dict(part=(0, 0.04, 1, 0.96), fit=(640, 740), lh=16, gap=6)  # (828 px tall: two at 1:1 are over 1.15 MP)
+# the iTunes searching -> failed frames: cropped to what changes in the recording and the current album art's
+# Preview, which must hold still at the top right as the search ends. The search starts about 3 ms after the action;
+# the busy indicator's running goes false -> true as the real bridge is given (it was the stand-in's), so its
+# fade-in starts over: a trial run drew one frame (+19 ms) of the text alone before the failure (+36 ms), as a
+# search started from rest does
+ITUNES_FAIL_WITH = ("dialog", "itunes-error", "itunesArtworkCurrentPreviewButton")
+ITUNES_FAIL_TIMES = [-10, 22, 150]  # (the last: settled, whatever the run's latency)
 
 _PANE = (0.2256, 0.544, 0.7744, 0.431)  # the pane's place in a 1600x1000 window (fractions)
 
@@ -142,6 +146,10 @@ SCOPES = {
                       ("centered-scroll", "dark", "The centred spectrogram scrolling (0.5 s)"),
                       ("meter-motion-spectrogram", "dark", "The level meter moving on music-like levels, spectrogram"),
                       ("plates-reveal", "dark", "The pointer entering the pane: the plates revealed")],
+        # (h24: a reviewer read the fixtures' fades at an unzoomed waveform's ends as the drawing tapering)
+        notes=["The test tracks fade in over their first 0.5 s and out over their last 1.5 s. At 100 % zoom the "
+               "waveform's first and last columns are the track's start and end, so the narrowing there is the audio, "
+               "drawn at its true size, not the drawing tapering at the pane's edges."],
         floors=None,  # (every floor region measured)
         a11y_labels=[],
         # CONTRAST.md rows quoted under each focus sheet (by element-name fragment, case ignored)
@@ -209,7 +217,7 @@ SCOPES = {
             # the transport: the left part (the buttons) and the right part (seek bar, volume), 1:1
             ("focus-transport-buttons", "The transport's buttons at 1:1: play states; hover, press, "
              "keyboard focus, with tooltips; dark beside light", "dark",
-             [[("transport", st, (0, 0.026, 0.22, 0.078), f"{lb}, {th}", dict(theme=th, lh=16, gap=6))
+             [[("transport", st, (0, 0.026, 0.22, 0.098), f"{lb}, {th}", dict(theme=th, lh=16, gap=6))
                for st, lb in row for th in ("dark", "light")]
               for row in ((("playing", "Playing"), ("paused", "Paused")),
                           (("stopped", "Stopped"), ("previous-hover-tooltip", "Previous hovered")),
@@ -217,7 +225,8 @@ SCOPES = {
                           (("next-focus", "Next focused"),))]),
             ("focus-transport-seek", "The seek bar and volume at 1:1: hover and its time box, drag, "
              "focus; mute and volume states; dark", "dark",
-             [[("seek", st, (0.094, 0, 0.906, 0.074), lb, dict(lh=16, gap=6))]
+             # (the time box has its own lane above the bar since H31 ZA1: the band, and these tiles, are taller)
+             [[("seek", st, (0.094, 0, 0.906, 0.095), lb, dict(lh=16, gap=6))]
               for st, lb in (("hover", "Seek bar hovered at 62 %: the time box"), ("hover-start", "Hovered near its start"),
                              ("dragging", "Dragged"), ("focus", "Keyboard focus"))]
              + [[("volume", st, (0.82, 0, 0.18, 0.1), lb, dict(lh=16, gap=6)) for st, lb in row]
@@ -235,7 +244,7 @@ SCOPES = {
                ("transport", "at-rest", "subject", "right",
                 dict(variant="1600x1000_font24", theme=th, part=(0.5, 0, 0.5, 1), lh=16, gap=6))] for th in ("dark", "light")]
              + [[("transport", "at-rest", "subject", "Narrow (1000x720), 10 pt, dark", dict(variant="1000x720", lh=16, gap=6))],
-                [("main", "playing-spectrogram-centered", (0, 0.07, 1, 0.11), "Narrow (1000x720), 24 pt, dark",
+                [("main", "playing-spectrogram-centered", (0, 0.03, 1, 0.25), "Narrow (1000x720), 24 pt, dark",
                   dict(variant="1000x720_font24", lh=16, gap=6))]]),
             # the status bar: its right half (the indicators) per state, dark beside light
             ("focus-statusbar", "The status bar at 1:1, its left and right ends, per state: dark, then the "
@@ -336,114 +345,126 @@ SCOPES = {
     # with its title bar and a margin of its parent ("inner"); main-window popups (search, Recent Issues): "popup".
     "dialogs": dict(
         title="Dialogs",
-        sessions=["dialogs", "statusbar", "roots", "bigfont", "narrow", "motion-ui"],
+        sessions=["dialogs", "statusbar", "roots", "bigfont", "narrow", "narrow-bigfont", "motion-ui"],
         sheets=[
-            # the 10 pt sheets: four (Configure, confirmations, Edit Tags, iTunes with its controls); the
-            # large font on ten (every dialog at 24 pt at 1:1, cropped to regions where it is large; Recent Issues dark and light)
+            # the 10 pt sheets: seven (Configure on two, confirmations, Edit Tags, iTunes, the shortcuts on two); the
+            # large font on seven (the dialogs at 24 pt at 1:1, cropped to regions where it is large; Recent Issues dark and light)
             ("dlg-configure-a", "Configure, 1:1: Library, three named folders, the third hovered (light, top 56 %); Last.fm "
-             "connected (a stand-in: no network; top 40 %); General (top 41 %)", "light",
+             "connected (a stand-in: no network; top 40 %); Last.fm unavailable (whole, fitted)", "light",
              [[("dialog", "preferences-library-three-roots-hover", None, "Library: three named folders, the third hovered, light",
                 dict(theme="light", part=(0, 0, 1, 0.56), lh=16, gap=6))],
               [("dialog", "preferences-lastfm-account", None, "Last.fm, connected (stand-in), dark",
                 dict(theme="dark", part=(0, 0, 1, 0.4), lh=16, gap=6))],
-              [("dialog", "preferences-general", None, "General, dark", dict(theme="dark", part=(0, 0, 1, 0.41), lh=16, gap=6))]]),
-            ("dlg-confirmations", "Confirmations as they open, 1:1, over their parents; the folder list's "
-             "menu in Configure (Menu key)", "dark",
-             [[("dialog", "confirm-clear-diagnostics", "inner", f"Delete diagnostics log, {th}", dict(theme=th, margin=16, lh=16, gap=6))
-               for th in ("dark", "light")],
-              [("dialog", "confirm-replace-cover", "inner", "Replace album art, dark", dict(margin=16, lh=16, gap=6)),
-               ("dialog", "preferences-library-root-menu", (0.39, 0.09, 0.547, 0.295), "Configure: a folder's menu (Menu key), dark",
-                dict(lh=16, gap=6))],
-              [("dialog", "tag-editor-close-confirm", "inner", f"Unsaved tag changes, {th}", dict(theme=th, margin=16, lh=16, gap=6))
-               for th in ("dark", "light")],
+              [("dialog", "preferences-lastfm", None, "Last.fm in a build without it, dark, whole",
+                dict(theme="dark", fit=(330, 292), lh=16, gap=6))]]),
+            # (the longest page whole; beside it the flat controls' states, which no other sheet has room for)
+            ("dlg-configure-visualization", "Configure's Visualization page at 1:1; the small flat controls in other "
+             "dialogs, each state; dark", "dark",
+             [[("dialog", "preferences-visualization", None, "Configure: Visualization",
+                dict(part=(0, 0.035, 1, 0.965), lh=16, gap=6)),
+               [("dialog", st, (0.06, 0.08, 0.25, 0.17), lb, dict(lh=16, gap=6))
+                for st, lb in (("tag-editor-revert-hover", "Edit Tags: a field's revert hovered"),
+                               ("tag-editor-revert-pressed", "Pressed"))]
+               # (the Title column is right of File Name)
+               + [("dialog", "tag-editor-column-revert-hover", (0.28, 0.08, 0.25, 0.17), "A column's revert hovered",
+                   dict(lh=16, gap=6))]
+               # Tab lands on the second entry's link (Show in Library); the pointer states are the first's
+               + [("dialog", st, "popup", lb, dict(part=(0, 0.3, 0.6, 0.2), lh=16, gap=6))
+                  for st, lb in (("recent-errors", "Recent Issues' link at rest"), ("recent-errors-link-hover", "Hovered"),
+                                 ("recent-errors-link-pressed", "Pressed"))]
+               + [("dialog", "recent-errors-link-focus", "popup", "Tab: the next link focused",
+                   dict(part=(0, 0.66, 0.6, 0.2), lh=16, gap=6))]]]),
+            ("dlg-confirmations", "Confirmations as they open, 1:1, over their parents; the folder list's menu in "
+             "Configure (Menu key); Recent Issues whole", "dark",
+             [[("dialog", "confirm-clear-diagnostics", "inner", "Delete diagnostics log, dark", dict(margin=16, lh=16, gap=6)),
+               ("dialog", "tag-editor-close-confirm", "inner", "Unsaved tag changes, dark", dict(margin=16, lh=16, gap=6))],
               [("dialog", "quit-save-failed", None, "Couldn't save before quitting, dark", dict(lh=16, gap=6)),
                ("dialog", "confirm-remove-library-root", "inner", "Remove Library Folder, light",
-                dict(theme="light", margin=16, lh=16, gap=6))]]),
-            ("dlg-tag-editor", "Edit Tags, 1:1 (its left 70 %): four tracks at rest (light); one edit typed with real keys in "
-             "the Title field, then committed with Tab (its marked row); the last two their top 38 %", "dark",
-             [[("dialog", "tag-editor", None, "At rest, light", dict(theme="light", part=(0, 0, 0.7, 1), lh=16, gap=6))],
-              [("dialog", "tag-editor-editing", None, "\u201c (Live)\u201d typed in the Title field", dict(part=(0, 0, 0.7, 0.38), lh=16, gap=6))],
-              [("dialog", "tag-editor-modified", None, "The same edit committed with Tab", dict(part=(0, 0, 0.7, 0.38), lh=16, gap=6))]]),
+                dict(theme="light", margin=16, lh=16, gap=6))],
+              [("dialog", "recent-errors", "popup", "Recent Issues, whole, dark", dict(lh=16, gap=6)),
+               ("dialog", "preferences-library-root-menu", (0.39, 0.09, 0.547, 0.295), "Configure: a folder's menu (Menu key), dark",
+                dict(lh=16, gap=6))]]),
+            ("dlg-tag-editor", "Edit Tags, 1:1: a twelve-file edit from a 1000 px main window; from a 1600 px one, its top "
+             "left: an edit typed with real keys", "dark",
+             [[("dialog", "tag-editor-batch", None, "Twelve files edited, not yet saved, from a 1000 px main window, dark",
+                dict(variant="1000x720", lh=16, gap=6))],
+              # (the committed-with-Tab crop went when the batch opened at its fitted width: a typed and a committed
+              # value now look the same in the table, and the sheet had no room for both)
+              [("dialog", "tag-editor-editing", None, "\u201c (Live)\u201d typed in the Title field", dict(part=(0, 0, 0.7, 0.38), lh=16, gap=6))]]),
             # the 10 pt search sheet is left out (the palette has its own shots in shots/)
-            # the searching -> failed recording (a real failed search; its frames at 1:1 around the status) with the
-            # results and the controls' states; the failed window as a whole is in shots/ (dialog_itunes-error_*)
-            ("dlg-itunes-controls", "Replace from iTunes, dark, 1:1: searching, then the real failed search, frame by frame "
-             "(the status, from the recording); results (stand-ins, top 55 %); Preview/Apply at rest, hovered, pressed; "
-             "Edit Tags' revert glyphs; Recent Issues links at rest, hovered, pressed; Tab focus on one", "dark",
-             [[dict(strip="itunes-search-fails", item=ITUNES_FAIL_BAND, times=ITUNES_FAIL_TIMES, zoom=1, pad=0, lh=16, gap=6,
-                    label="Searching -> failed: ms after the action (the search starts at about +3 ms)")],
-              [("dialog", "itunes-results", None, "Results, top 55 %", dict(part=(0, 0, 1, 0.55), lh=16, gap=6)),
+            # the searching -> failed recording (a real failed search; its frames around all that changes and Preview)
+            # with the results and the controls' states; the failed window as a whole is in shots/ (dialog_itunes-error_*)
+            ("dlg-itunes-controls", "Replace from iTunes, dark: searching, then the real failed search, from the "
+             "recording; results (stand-ins) and nothing found, whole; the replace question; Preview and Apply in each state", "dark",
+             [[dict(strip="itunes-search-fails", item="changed", include=ITUNES_FAIL_WITH, times=ITUNES_FAIL_TIMES,
+                    fit=(430, 300), zoom=1, pad=8, lh=16, gap=6,
+                    label="Searching -> failed (ms after the action): all that changes, and Preview at the top right")],
+              [("dialog", "itunes-results", None, "Results, whole", dict(fit=(300, 208), lh=16, gap=6)),
+               ("dialog", "itunes-empty", None, "Nothing found, whole", dict(fit=(300, 208), lh=16, gap=6)),
+               ("dialog", "confirm-replace-cover", "inner", "Replace album art, with the choice (1:1)",
+                dict(margin=4, lh=16, gap=6)),
                [("dialog", st, (0.68, 0.27, 0.32, 0.1), lb, dict(lh=16, gap=6))
                 for st, lb in (("itunes-results", "Preview, Apply at rest"), ("itunes-apply-hover", "Apply hovered"),
-                               ("itunes-preview-pressed", "Preview pressed"))]],
-              [("dialog", st, (0.06, 0.08, 0.25, 0.17), lb, dict(lh=16, gap=6))
-               for st, lb in (("tag-editor-revert-hover", "Field revert hovered"), ("tag-editor-revert-pressed", "Field revert pressed"),
-                              ("tag-editor-column-revert-hover", "Column revert hovered"))],
-              # Tab lands on the second entry's link (Show in Library); the pointer states are the first's
-              [("dialog", st, "popup", lb, dict(part=(0, 0.3, 0.6, 0.2), lh=16, gap=6))
-               for st, lb in (("recent-errors", "Library Settings… at rest"), ("recent-errors-link-hover", "Hovered"),
-                              ("recent-errors-link-pressed", "Pressed"))]
-              + [("dialog", "recent-errors-link-focus", "popup", "Tab: Show in Library focused",
-                  dict(part=(0, 0.66, 0.6, 0.2), lh=16, gap=6))]]),
+                               ("itunes-preview-pressed", "Preview pressed"))]]]),
             # 24 pt, 1:1: the dialogs now follow the font, so Configure and Diagnostics open at
-            # 1964x1392 and About, About KDE, Rename Files and Tag Editor Details wider; crops of the regions the fix
+            # 1964x1392 and About, About KDE, Rename Files and Tag Change Details wider; crops of the regions the fix
             # changed (the folder row and its glyph, the headers, the footers) in place of whole windows
-            ("dlg24-library", "At 24 pt, dark: Configure's Library page (fitted); its footer and iTunes' count "
-             "line (1:1)", "dark",
-             [[("dialog", "preferences-library", None, "Library page: heading, folder list, buttons",
-                dict(B24, part=(0.13, 0.025, 0.84, 0.215), fit=(1500, 400)))],
-              [("dialog", "preferences-library", None, "Footer, left", dict(B24, part=(0, 0.935, 0.1, 0.065))),
-               ("dialog", "preferences-library", None, "Footer, right", dict(B24, part=(0.78, 0.935, 0.22, 0.065)))],
+            # (Configure and Diagnostics in one sheet: each a long line of text and a row of buttons at 24 pt)
+            ("dlg24-windows", "At 24 pt, dark: Configure's Library page from a 1000 px main window and Diagnostics, "
+             "whole (fitted); iTunes' count line (1:1)", "dark",
+             [[("dialog", "preferences-library", None, "Library, from a 1000 px main window, whole",
+                dict(B24, variant="1000x720_font24", fit=(700, 520))),
+               ("dialog", "diagnostics", None, "Diagnostics, whole", dict(B24, fit=(734, 520)))],
               [("dialog", "itunes-results", None, "Replace from iTunes: the count line (16-26 % down)",
                 dict(B24, part=(0, 0.16, 1, 0.1)))]]),
-            # Settings › Configure Keyboard Shortcuts (#700, #701): the list, filtered, and a shortcut being changed
-            ("dlg-shortcuts", "Configure Keyboard Shortcuts, 1:1: at rest (dark, whole); the list filtered by \u201cplay\u201d typed "
-             "in its search field (light, top 60 %)", "dark",
-             [[("dialog", "keyboard-shortcuts", None, "At rest, dark", dict(lh=16, gap=6))],
-              [("dialog", "keyboard-shortcuts-filter", None, "Filtered by \u201cplay\u201d, light", dict(theme="light", part=(0, 0, 1, 0.6), lh=16, gap=6))]]),
-            ("dlg-shortcuts-edit", "Changing a shortcut, 1:1 (the dialog's lower part); Shortcut Conflict; dark", "dark",
-             [[("dialog", "keyboard-shortcuts-custom", None, "Stop: keys of its own, not yet applied", dict(part=(0, 0.6, 1, 0.4), lh=16, gap=6)),
-               ("dialog", "keyboard-shortcuts-refused", None, "Next: a key the queue keeps, refused", dict(part=(0, 0.6, 1, 0.4), lh=16, gap=6))],
-              [("dialog", "keyboard-shortcuts-typed-key", None, "Follow Playhead: F, with its note", dict(part=(0, 0.6, 1, 0.4), lh=16, gap=6)),
-               ("dialog", "keyboard-shortcuts-reassign", "inner", "Shortcut Conflict", dict(margin=16, lh=16, gap=6))]]),
+            # Settings › Configure Keyboard Shortcuts (#700, #701): at rest, refused and filtered at one crop
+            ("dlg-shortcuts", "Configure Keyboard Shortcuts, 1:1, dark, at one crop: at rest; a key the queue keeps, "
+             "refused", "dark",
+             [[("dialog", "keyboard-shortcuts", None, "At rest", KEYS_CROP),
+               ("dialog", "keyboard-shortcuts-refused", None, "Next: Del refused", KEYS_CROP)]]),
+            ("dlg-shortcuts-edit", "Configure Keyboard Shortcuts, 1:1: filtered, at the same crop (light); changing a "
+             "shortcut (dark)", "dark",
+             [[("dialog", "keyboard-shortcuts-filter", None, "Filtered by \u201cplay\u201d, light",
+                dict(KEYS_CROP, theme="light")),
+               [("dialog", "keyboard-shortcuts-custom", None, "Stop: keys of its own, not yet applied",
+                 dict(part=(0, 0.69, 1, 0.235), lh=16, gap=6)),
+                ("dialog", "keyboard-shortcuts-typed-key", None, "Follow Playhead: F, with its note",
+                 dict(part=(0, 0.69, 1, 0.235), lh=16, gap=6)),
+                ("dialog", "keyboard-shortcuts-reassign", "inner", "Shortcut Conflict", dict(margin=8, lh=16, gap=6))]]]),
             # the small 24 pt windows together: the folder dialogs and the quit ones
-            ("dlg24-small", "At 24 pt, dark, 1:1: Add Library Folder; Finishing Tag Changes", "dark",
-             [[("dialog", "library-root-name-add", None, "Add Library Folder", B24)],
-              [("dialog", "tag-editor-quit-wait", "inner", "Finishing Tag Changes", dict(B24, margin=4))]]),
-            ("dlg24-about", "At 24 pt, 1:1: About's header (icon, name, version, tabs), dark and light; About KDE's "
-             "header; both footers' ends (dark)", "dark",
-             [[("dialog", "about", None, "About: header and tabs", dict(B24, part=(0, 0.06, 0.75, 0.4)))],
-              [("dialog", "about", None, "About: header and tabs, light", dict(B24, theme="light", part=(0, 0.06, 0.75, 0.4)))],
-              [("dialog", "about-kde", None, "About KDE: header and first lines", dict(B24, part=(0, 0.035, 1, 0.16)))],
-              [("dialog", "about", None, "About: footer, left", dict(B24, part=(0, 0.83, 0.4, 0.17))),
-               ("dialog", "about", None, "About: Close", dict(B24, part=(0.85, 0.83, 0.15, 0.17))),
-               ("dialog", "about-kde", None, "About KDE: Close", dict(B24, part=(0.85, 0.91, 0.15, 0.09)))]]),
-            ("dlg24-diagnostics", "At 24 pt, dark, 1:1: Diagnostics' top (left, then right); Delete "
-             "Diagnostics Log over it", "dark",
-             [[("dialog", "diagnostics", None, "Diagnostics: log file line and toolbar, left", dict(B24, part=(0, 0.025, 0.47, 0.095)))],
-              [("dialog", "diagnostics", None, "The same, right", dict(B24, part=(0.53, 0.025, 0.47, 0.095)))],
-              [("dialog", "confirm-clear-diagnostics", "inner", "Delete Diagnostics Log", dict(B24, margin=4)),
-               ("dialog", "diagnostics", None, "Diagnostics: Close", dict(B24, part=(0.85, 0.93, 0.15, 0.07)))]]),
-            # Rename Files with the twelve-file batch (RENAME_BATCH): at 24 pt its window is about 1.4 MP, so it
-            # is shown whole fitted (its width against its content; the scale in the label) and 1:1 in part; 10 pt whole
-            ("dlg24-rename", "Rename Files, twelve files, dark: 24 pt whole (fitted); 10 pt whole, 1:1; 24 pt, 1:1: its top "
-             "rows and its buttons", "dark",
-             [[("dialog", "tag-editor-rename-preview", "inner", "24 pt, whole", dict(B24, margin=4, fit=(760, 340))),
-               ("dialog", "tag-editor-rename-preview", "inner", "10 pt, whole, 1:1", dict(margin=4, lh=16, gap=6))],
-              [("dialog", "tag-editor-rename-preview", "inner", "24 pt, 1:1: the top-left 1000 x 205 px",
-                dict(B24, margin=4, box=(0, 0, 1000, 205))),
-               ("dialog", "tag-editor-rename-preview", None, "24 pt, 1:1: its buttons",
-                dict(B24, items=["renamePreviewRenameButton", "renamePreviewCancelButton"]))]]),
-            ("dlg24-details", "At 24 pt, dark: Tag Editor Details after a failed save (fitted); an iTunes result "
-             "loading its artwork (1:1)", "dark",
-             [[("dialog", "tag-editor-status-details", "inner", "Tag Editor Details", dict(B24, margin=4, fit=(1520, 540)))],
-              [("dialog", "itunes-results-loading", None, "Replace from iTunes: the first result, its full-size image loading",
-                dict(B24, items=["itunesArtworkResultTitle", "itunesArtworkResultDetails", "itunesArtworkPreviewButton",
-                                 "itunesArtworkApplyButton"], first=True, margin=4, grow=(130, 0, 0, 0)))]]),
-            ("dlg24-tag-tools", "At 24 pt, dark, 1:1: Auto Number; Configure Keyboard Shortcuts' editor", "dark",
-             [[("dialog", "tag-editor-auto-number", "inner", "Auto Number", dict(B24, margin=4))],
-              [("dialog", "keyboard-shortcuts", None, "Configure Keyboard Shortcuts: its lower left",
-                dict(B24, part=(0, 0.72, 0.565, 0.28)))]]),
+            ("dlg24-small", "At 24 pt, dark: Add Library Folder (1:1); Finishing Tag Changes (fitted)", "dark",
+             [[("dialog", "library-root-name-add", None, "Add Library Folder, below its title bar", dict(B24, part=(0, 0.11, 1, 0.89)))],
+              [("dialog", "tag-editor-quit-wait", "inner", "Finishing Tag Changes (fitted: the dialogs' 24 pt inset made the pair too big at 1:1)",
+                dict(B24, margin=4, fit=(880, 500)))]]),
+            # the small windows whole at 10 pt, so their size can be judged against what they hold (About at 24 pt,
+            # which had a sheet of its own, is in shots/)
+            ("dlg-windows", "Whole windows at 10 pt, dark: About, Auto Number, Tag Change Details at 1:1; Diagnostics "
+             "fitted", "dark",
+             [[("dialog", "about", None, "About", dict(lh=16, gap=6)),
+               ("dialog", "tag-editor-auto-number", "inner", "Auto Number", dict(margin=4, lh=16, gap=6))],
+              [("dialog", "tag-editor-status-details", "inner", "Tag Change Details, after a failed save",
+                dict(margin=4, lh=16, gap=6)),
+               ("dialog", "diagnostics", None, "Diagnostics, fitted", dict(fit=(556, 407), lh=16, gap=6))]]),
+            # Rename Files with the twelve-file batch (RENAME_BATCH): at 24 pt its window is about 1.4 MP, so it is
+            # shown 1:1 in part, beside the whole of it at 10 pt
+            ("dlg24-rename", "Rename Files, twelve files, 1:1, dark: 10 pt whole; 24 pt: its top rows and its buttons", "dark",
+             [[("dialog", "tag-editor-rename-preview", "inner", "10 pt, whole", dict(margin=4, lh=16, gap=6)),
+               ("dialog", "tag-editor-rename-preview", None, "24 pt: its buttons",
+                dict(B24, items=["renamePreviewRenameButton", "renamePreviewCancelButton"]))],
+              [("dialog", "tag-editor-rename-preview", "inner", "24 pt: the top-left 1230 x 205 px",
+                dict(B24, margin=4, box=(0, 0, 1230, 205)))]]),
+            ("dlg-tag-editor-whole", "Edit Tags, 1:1, dark: twelve files edited, whole, from a 1600 px main window; the "
+             "footer after a save that failed for one file", "dark",
+             [[("dialog", "tag-editor-batch", None, "Twelve files edited, not yet saved", dict(lh=16, gap=6))],
+              [("dialog", "tag-editor-save-failed", None, "After a failed save: the footer, left",
+                dict(part=(0, 0.84, 0.46, 0.16), lh=16, gap=6)),
+               ("dialog", "tag-editor-save-failed", None, "The same, right",
+                dict(part=(0.54, 0.84, 0.46, 0.16), lh=16, gap=6))]]),
+            ("dlg-general-batch24", "Configure's General page whole, 1:1; at 24 pt, Edit Tags with twelve files edited "
+             "(fitted); dark", "dark",
+             [[("dialog", "preferences-general", None, "Configure: General", dict(lh=16, gap=6))],
+              [("dialog", "tag-editor-batch", None, "24 pt: twelve files edited, not yet saved",
+                dict(B24, fit=(620, 325)))]]),
             # 24 pt, light: Recent Issues dark above light (the whole popup: its width, the severity glyph)
             ("dlg24-light", "At 24 pt, 1:1: Recent Issues, dark above light (the whole popup over the status bar); Edit "
              "Tags' Track and Disc, both mixed (dark)", "light",
@@ -455,33 +476,39 @@ SCOPES = {
                                                "tagEditorOf_discNo"], grow=(0, 0, 150, 0)))]]),
         ],
         images=[
-            ("sheet", "dlg-configure-a", "light", "Configure 1:1: Library with three named folders (light); Last.fm; General",
+            ("sheet", "dlg-configure-a", "light", "Configure 1:1: Library with three named folders (light); Last.fm connected and unavailable",
              "the folder list's columns; the pages as drawn"),
-            ("sheet", "dlg-confirmations", "dark", "Confirmations, the quit failure, Remove Folder; Configure's folder menu",
+            ("sheet", "dlg-configure-visualization", "dark", "Configure's Visualization page; revert glyphs and Recent "
+             "Issues' links in each state, incl. Tab focus", "the groups, each help line under its control; the flat "
+             "controls' states"),
+            ("sheet", "dlg-confirmations", "dark", "Confirmations, the quit failure, Remove Folder; Recent Issues whole; Configure's folder menu",
              "which button is the default and has focus; the wording"),
-            ("sheet", "dlg-tag-editor", "dark", "Edit Tags: at rest, one typed edit, committed", "the fields, the table, the mark"),
-            ("sheet", "dlg-itunes-controls", "dark", "iTunes searching -> failed frames; results; Preview/Apply, revert glyphs, "
-             "Recent Issues links incl. Tab focus", "the failed state as it arrives; the flat controls' states"),
-            ("sheet", "dlg24-library", "dark", "24 pt: Library page's folder row, buttons; Configure's footer; iTunes' count line",
-             "the folder glyph and full path; the footer"),
-            ("sheet", "dlg-shortcuts", "dark", "Configure Keyboard Shortcuts: at rest; filtered", "the list's groups, columns and "
-             "keys; the search field; what the filter keeps"),
-            ("sheet", "dlg-shortcuts-edit", "dark", "Changing a shortcut: custom keys, a refusal, a typed key's note, a conflict",
-             "the editor's wording and states; the conflict's choice"),
+            ("sheet", "dlg-tag-editor", "dark", "Edit Tags: twelve files edited from a 1000 px main window; from 1600 px, one typed edit, committed",
+             "what still identifies a row at 1000 px; the fields, the table, the mark"),
+            ("sheet", "dlg-itunes-controls", "dark", "iTunes searching -> failed frames, Preview in them; results; "
+             "Preview/Apply in each state", "the failed state as it arrives, what moves (Preview at the top right); the "
+             "flat controls' states"),
+            ("sheet", "dlg-shortcuts", "dark", "Configure Keyboard Shortcuts at rest and with a refused key, one crop",
+             "whether the list, the columns and the editor hold still as the note comes; the refusal's wording"),
+            ("sheet", "dlg-shortcuts-edit", "dark", "The shortcuts filtered (the same crop); custom keys, a typed key's "
+             "note, a conflict", "the columns' place against at rest; what the filter keeps; the editor; the conflict's choice"),
+            ("sheet", "dlg24-windows", "dark", "24 pt: Library from a narrow window and Diagnostics, whole; iTunes' count "
+             "line", "the paths in the narrow window; the records' wrap; the toolbar and footer uncut"),
             ("sheet", "dlg24-small", "dark", "24 pt: Add Library Folder; Finishing Tag Changes", "the field, the wrap, the buttons"),
-            ("sheet", "dlg24-about", "dark", "24 pt: About's header dark and light; About KDE's header; the footers", "the icon, the tabs, the footers"),
-            ("sheet", "dlg24-diagnostics", "dark", "24 pt: Diagnostics' log file line, toolbar and Close; Delete Diagnostics Log",
-             "the toolbar; the confirmation"),
-            ("sheet", "dlg24-rename", "dark", "Rename Files, twelve files: 24 pt whole (fitted) and in part; 10 pt whole",
-             "the preview's width against its content; the arrows"),
-            ("sheet", "dlg24-details", "dark", "24 pt: Tag Editor Details; an iTunes result loading its artwork",
-             "the details' width and wrap; the loading line uncut"),
-            ("sheet", "dlg24-tag-tools", "dark", "24 pt: Auto Number; the shortcuts editor", "the check boxes' edge; the forms"),
+            ("sheet", "dlg-windows", "dark", "Whole windows at 10 pt: About, Auto Number, Tag Change Details, Diagnostics",
+             "each window's size against what it holds; what leads in it"),
+            ("sheet", "dlg24-rename", "dark", "Rename Files, twelve files: 10 pt whole; 24 pt in part, 1:1",
+             "the preview's columns and arrows; the rows at 24 pt"),
+            ("sheet", "dlg-tag-editor-whole", "dark", "Edit Tags whole: a twelve-file edit; the footer after a failed save",
+             "whether the new values can be checked before Save; the status and Details"),
+            ("sheet", "dlg-general-batch24", "dark", "Configure's General page whole; 24 pt: Edit Tags' twelve-file edit",
+             "the page's groups and their help; the changed values at a large font"),
             ("sheet", "dlg24-light", "light", "24 pt: Recent Issues dark and light; Edit Tags' Track and Disc placeholders",
              "the popup's width, the glyph; the placeholders uncut"),
         ],
         facts=["dlg-", "screen-", "itunes-failed-", "tagsave-", "renamebatch-", "recent-issues-opened",
                "fill-about", "fill-itunes", "fill-recent-errors", "fill-tag-editor", "fill-preferences"],
+        facts_skip=["dlg-empty", "dlg-results", "dlg-no-results"],  # (the search palette's, out of the dialogs' scope)
         fact_table=True,  # one row per image at the top of FOCUS-FACTS
         # what Replace Album Art does, stated from the backend; the pack fails if these phrases leave the code
         source_notes=[("src/artwork/mod.rs",
@@ -491,7 +518,7 @@ SCOPES = {
                        "JPEG). If the track's folder shows an image as its cover, the art goes to a folder image: an image "
                        "with a recognised cover name (such as cover.jpg) is overwritten in its own format, otherwise a new "
                        "cover.<ext> is written and the folder's other images stay; no track file changes. If the folder has "
-                       "no cover image, the art is embedded as the front cover of every track in the folder with the "
+                       "no JPEG or PNG image, the art is embedded as the front cover of every track in the folder with the "
                        "track's album tag (their other embedded pictures kept), and nothing is written unless every one of "
                        "those tracks can take it")],
         notes=["Paths: the app runs in a private mount namespace where the capture's work folder is at /mnt/ferrous "
@@ -505,6 +532,8 @@ SCOPES = {
                "Details shows a real save with one folder not writable; Finishing Tag Changes is given two loaded files' "
                "names (a save here takes milliseconds) and its second stage. Searching and the stand-in results are "
                "injected (no network).",
+               "Keyboard focus and hover can be in two places: after the Tab in the typed edit (F04) focus is on "
+               "Artist while the pointer still rests over Title.",
                "Recordings are the app's own frames: KWin's window animations (a dialog window opening and closing) are not "
                "in them; a new window's first frame is drawn whole."],
         facts_strips=[("dialog-open-close", "dark", "A dialog (About) opening and closing"),
@@ -616,6 +645,16 @@ _VI_MOVES = [("vi-pan-waveform", "Middle-drag", [-20, 300, 700]), ("vi-follow-wa
              ("vi-seek-plot", "Right click on the plot: the view stays", [-20, 150]),
              ("vi-seek-bar", "Click on the seek bar: the view follows", [-20, 150])]
 _VI_TIMES = [-20, 300, 700, 1100, 1500, 1900, 2300, 2700, 3100]
+# a pan's frames at 1:1: the stretch of the plot the drag crosses (from 70 % to 30 % of it, the time box around each
+# end), through both lanes to the time on the bottom edge (the top 2 % left out, to fit 1.15 MP)
+_VI_PAN = "spectrogramPane:0.275,0.02,0.45,0.98"
+
+
+def _vi_pan(name, what):
+    return (f"{name}-frames", f"A middle-drag of the zoomed {what}, 1:1: both lanes and the time, in four frames", "dark",
+            [[dict(strip=name, item=_VI_PAN, times=ts, zoom=1, pad=0, lh=16, gap=4, label=lb)]
+             for ts, lb in (([80, 300], "Pressed, then dragged left (ms after the press; the drag ends at about +680 ms)"),
+                            ([500, 1100], "Dragged further, then released"))])
 
 
 def _vi_band(st, lb, th="dark"):
@@ -664,6 +703,8 @@ SCOPES.update({
              # (the recording's crop starts at the transport's top: item is in its coordinates)
              [[dict(strip="vi-autoscroll", item=(152, 4, 1240, 40), times=[t], zoom=1, pad=0, lh=16, gap=4,
                     label=f"{t:+d} ms after the middle click")] for t in _VI_TIMES]),
+            _vi_pan("vi-pan-waveform", "waveform"),
+            _vi_pan("vi-pan-spectrogram", "centred spectrogram"),
         ],
         images=[
             ("sheet", "vi-band", "dark", "The seek bar's view band in every state of the zoomed view, 1:1",
@@ -676,12 +717,14 @@ SCOPES.update({
              "slow near the click, faster at the edge, going on outside the window, then stopping"),
             ("sheet", "vi-moves-band", "dark", "The band through a drag, F and the two seeks, frame by frame, 1:1",
              "the band moving with the drag; coming back on F and a seek-bar click; staying for a seek on the plot"),
-            ("strip", "vi-pan-waveform", "dark", "A middle-drag of the zoomed waveform, the seek bar with it",
-             "the time grabbed staying under the pointer; the band following; no jump at the release"),
+            ("sheet", "vi-pan-waveform-frames", "dark", "A middle-drag of the zoomed waveform: both lanes and the time, 1:1",
+             "one crosshair through both lanes (its fact below); the time grabbed staying under the pointer, its label "
+             "holding still; no jump at the release", dict(recording="vi-pan-waveform")),
             ("strip", "vi-follow-waveform", "dark", "Follow Playhead (F) after a drag: the view back on the playhead",
              "how the view returns (a cut or a glide); the band with it"),
-            ("strip", "vi-pan-spectrogram", "dark", "A middle-drag of the zoomed centred spectrogram, then 1.2 s",
-             "the moved view's columns filling in; the old canvas as the backdrop meanwhile"),
+            ("sheet", "vi-pan-spectrogram-frames", "dark", "A middle-drag of the zoomed centred spectrogram: both lanes "
+             "and the time, 1:1", "one crosshair through both lanes (its fact below); the label's time holding still; "
+             "the moved view's columns filling in", dict(recording="vi-pan-spectrogram")),
             ("strip", "vi-autoscroll", "dark", "Autoscroll: slow, fast at the edge, outside the window, stopped",
              "the speed rising with the distance; no stall when the pointer leaves"),
             ("strip", "vi-seek-plot", "dark", "A right click on the moved waveform: a seek that keeps the view",
@@ -690,12 +733,16 @@ SCOPES.update({
              "the playhead's jump and the view's"),
             ("strip", "spectrogram-zoom", "dark", "The wheel zooming the spectrogram 3 notches, then Reset Zoom",
              "each notch's step; the readout; the reset"),
+            ("strip", "vi-zoom-waveform", "dark", "The wheel zooming the waveform 3 notches, then Reset Zoom",
+             "the crosshair and its readouts through each notch and the reset; the zoom readout"),
         ],
         facts=["plates-"],
         facts_strips=[("vi-follow-spectrogram", "dark", "Follow Playhead (F) after a drag of the centred spectrogram"),
                       ("zoom-notch-lane", "dark", "One wheel notch on a lane"), ("zoom-reset-lane", "dark", "Reset Zoom on a lane")],
         notes=["The pointer's cursor is not in the grabs or recordings (KWin draws it). Autoscroll shows a horizontal "
                "resize cursor while it runs.",
+               "Each pan's facts begin with whether all lanes' crosshair x agree in every frame: each lane's dashed "
+               "line found in every recorded frame's pixels, not only in the four frames shown.",
                "\u201cOutside the window\u201d is the window told the pointer left (a Leave event, as KWin sends it), after a "
                "last move at its right edge: the app keeps the speed it had there (#662)."],
         floors=[],
@@ -705,7 +752,7 @@ SCOPES.update({
     # The library, the search palette and the menus
     "library-search": dict(
         title="The library, search and the menus",
-        sessions=["main", "menus", "roots", "density", "bigfont", "wide-bigfont", "narrow-bigfont", "hidpi", "motion-ui", "contrast"],
+        sessions=["main", "menus", "roots", "density", "bigfont", "wide-bigfont", "narrow-bigfont", "hidpi", "motion-ui", "contrast", "empty"],
         sheets=[
             ("lib-states", "The library's row states at 1:1 (the pane's top): hover, click, keys; dark", "dark",
              [[("library", st, "subject", lb, dict(part=(0, 0, 1, pt), lh=16, gap=6)) for st, lb, pt in row]
@@ -717,6 +764,7 @@ SCOPES.update({
              [[("library", st, "subject", f"{lb}, {th}", dict(theme=th, part=(0, 0, 1, 0.94), lh=16, gap=6)) for st, lb in
                (("collapsed-holding-playing", "Collapsed, a track inside playing"), ("follows-playing", "Marking the playing track"),
                 ("expanded-playing", "Expanded to it (Show in Library)"))] for th in ("dark", "light")]),
+            # (density-scrolled also holds a focused row beside the scrollbar: its ring, tint and the thumb's lane)
             ("lib-density", "Density and folders at 1:1; 24 pt at 1920x1200", "dark",
              [[("library", "density-scrolled", "subject", "320 artists, dark", dict(part=(0, 0, 1, 0.56), lh=16, gap=6)),
                ("library", "density-scrolled", "subject", "Light", dict(theme="light", part=(0, 0, 1, 0.56), lh=16, gap=6)),
@@ -728,7 +776,11 @@ SCOPES.update({
              "artist, a library folder's root row; dark", "dark",
              [[("menu", st, "popup", lb, dict(margin=40, lh=16, gap=6)) for st, lb in row]
               for row in ((("context-library-track", "On a track"), ("context-library-album", "On an album")),
-                          (("context-library-artist", "On an artist"), ("context-library-root", "On a folder's root row")))]),
+                          (("context-library-artist", "On an artist"), ("context-library-root", "On a folder's root row")))]
+             # (the pane with no library folder yet: the queue beside it holds the first-run prompt, in the full shot)
+             + [[("main", "first-run-empty-library", (0, 0.075, 0.23, 0.45),
+                  "No library folder yet (first run)",
+                  dict(lh=16, gap=6))]]),
             ("search-states", "The search palette (Ctrl+F) at 1:1; dark", "dark",
              [[("search", "empty", "popup", "Empty (its footer keys)", dict(margin=4, lh=16, gap=6))],
               [("search", "results", "popup", "\u201cmer\u201d: results", dict(margin=4, lh=16, gap=6))],
@@ -737,7 +789,8 @@ SCOPES.update({
                 dict(margin=4, part=(0, 0, 1, 0.5), lh=16, gap=6))]]),
             ("search-more", "The search palette at 1:1: many results, hover, help, non-ASCII; light", "light",
              [[("search", "results-many", "popup", "Many results (\u201cl\u201d): the groups cut", dict(margin=4, lh=16, gap=6))],
-              [("search", "result-hover", "popup", "A result hovered: its tooltip (the top)", dict(margin=4, part=(0, 0, 1, 0.3), lh=16, gap=6))],
+              # (down to under the hovered row, where its tooltip shows so as to leave the field clear)
+              [("search", "result-hover", "popup", "A result hovered (the top; its tooltip shows beside the palette: shots/search_result-hover_light_1x_1600x1000.png)", dict(margin=4, part=(0, 0, 1, 0.41), lh=16, gap=6))],
               [("search", "help-hover", (0.24, 0.076, 0.555, 0.115), "Help hovered: its tooltip", dict(lh=16, gap=6))],
               [("search", "results-unicode", "popup", "\u201c\u00f8rn\u201d (the top)", dict(margin=4, part=(0, 0, 1, 0.3), lh=16, gap=6))]]),
             ("search-24pt", "The search palette at 24 pt, 1:1; dark", "dark",
@@ -771,9 +824,11 @@ SCOPES.update({
              "the rows' rhythm and indent; hover and selection; the disclosure glyphs"),
             ("sheet", "lib-now", "dark", "The playing track's mark: collapsed, in the tree, expanded to it; both themes",
              "the amber mark at each depth; Show in Library's result"),
-            ("sheet", "lib-density", "dark", "320 artists; two folders; 24 pt at 1920x1200", "density and scanning; the root rows"),
-            ("sheet", "lib-menus", "dark", "The library's keyboard menus on a track, album, artist and root row",
-             "where each opens against its row; the items and their order"),
+            ("sheet", "lib-density", "dark", "320 artists, a row focused beside the scrollbar; two folders; 24 pt at 1920x1200",
+             "density and scanning; the root rows; the focused row's right edge against the scrollbar's lane"),
+            ("sheet", "lib-menus", "dark", "The library's keyboard menus on a track, album, artist and root row; the empty library",
+             "where each opens against its row; the items and their order; what the empty pane says (the queue's first-run "
+             "prompt beside it: shots/main_first-run-empty-library_dark_1x_1600x1000.png)"),
             ("strip", "pair:library-expand-collapse", "dark", "An artist expanded (left) and collapsed (right) with the keyboard",
              "the rows' motion; content cuts"),
             ("sheet", "search-states", "dark", "The search palette: empty, results, keyboard selection, no results",
@@ -781,6 +836,8 @@ SCOPES.update({
             ("sheet", "search-more", "light", "Many results, a hovered result, help, a non-ASCII query (light)",
              "truncated groups; the tooltips; the match's weight"),
             ("sheet", "search-24pt", "dark", "The search palette at 24 pt, wide and narrow", "the palette's width and rows at 24 pt"),
+            ("strip", "search-typing", "dark", "Typing in the search palette: results arriving and replaced",
+             "the list through each keystroke (the blink per changed item, shaded in the graph); the field holding still"),
             ("strip", "pair:search", "light", "The search palette opening (left) and closing (right)", "the fade; content cuts"),
             ("sheet", "menus-edit", "dark", "File and Edit while playing; Edit with Undo, then with Redo, disabled; a search result's menu",
              "the items' wording (Undo Remove from Queue, Redo), shortcuts and icons"),
@@ -791,7 +848,6 @@ SCOPES.update({
         ],
         facts=["dlg-empty", "dlg-results", "dlg-no-results"],
         facts_strips=[("menu-open-close", "dark", "A menu opening and closing"),
-                      ("search-typing", "dark", "Typing in the search palette"),
                       ("library-expand", "light", "An artist expanded with the keyboard, light"),
                       ("library-collapse", "light", "The artist collapsed, light")],
         floors=[],
@@ -802,7 +858,7 @@ SCOPES.update({
     # The viewers: album art and the visualization, windowed and fullscreen
     "viewers": dict(
         title="The viewers: album art and the visualization, windowed and fullscreen",
-        sessions=["viewers", "bigfont", "narrow", "motion"],
+        sessions=["viewers", "bigfont", "narrow", "motion", "playing", "dialogs"],
         sheets=[
             ("vw-albumart", "The album art viewer, fitted: windowed with its info column; fullscreen at rest", "dark",
              [[("viewer", "albumart-windowed-info", None, "Windowed, with its info column", dict(fit=(740, 520), lh=16, gap=6)),
@@ -846,6 +902,20 @@ SCOPES.update({
              [[("viewer", st, None, lb, dict(variant="font24", fit=(580, 406), lh=16, gap=6)) for st, lb in row]
               for row in ((("spectrogram-windowed", "Spectrogram, windowed"), ("spectrogram-fullscreen", "Fullscreen")),
                           (("albumart-windowed", "Album art, windowed"), ("albumart-fullscreen", "Fullscreen")))]),
+            # the left corners, which the corner sheet has no room for, and 5.1, where the lane heads are a column
+            ("vw-rest-lanes", "The fullscreen viewers' left: with the controls hidden, and shown; 5.1's lane heads; dark",
+             "dark",
+             [[("viewer", "spectrogram-fullscreen-auto-hidden", None, "Auto-hidden, whole", dict(fit=(590, 413), lh=16, gap=6)),
+               ("viewer", "5.1-fullscreen", None, "5.1, fullscreen", dict(fit=(590, 413), lh=16, gap=6))],
+              [("viewer", st, (0, 0, 0.19, 0.075), lb, dict(lh=16, gap=6)) for st, lb in
+               (("spectrogram-fullscreen-auto-hidden", "Auto-hidden, 1:1"), ("spectrogram-fullscreen-title-strip", "Shown, 1:1"),
+                ("5.1-fullscreen", "5.1's first lane, 1:1"))]]),
+            ("vw-light-preview", "The viewers in light; the album art viewer's preview of an iTunes suggestion", "light",
+             [[("viewer", "waveform-fullscreen", None, "Waveform, fullscreen, light", dict(theme="light", fit=(590, 413), lh=16, gap=6)),
+               ("viewer", "itunes-preview", None, "iTunes preview, dark", dict(theme="dark", fit=(590, 413), lh=16, gap=6))],
+              [("viewer", "waveform-windowed", (0.75, 0, 0.25, 0.075), "Windowed corner, light",
+                dict(theme="light", lh=16, gap=6)),
+               ("viewer", "waveform-fullscreen", (0.78, 0, 0.22, 0.06), "Its strip, light", dict(theme="light", lh=16, gap=6))]]),
         ],
         images=[
             ("sheet", "vw-albumart", "dark", "The album art viewer windowed with its info, and fullscreen (fitted)",
@@ -861,6 +931,10 @@ SCOPES.update({
             ("sheet", "vw-spectrogram-controls", "dark", "The viewers' corners at 1:1: plate, strip, hidden",
              "hover, focus, the readout; what stays when the controls hide"),
             ("sheet", "vw-24pt", "dark", "The viewers at 24 pt (fitted)", "the strip, plate and info at a large font"),
+            ("sheet", "vw-rest-lanes", "dark", "Fullscreen: the left with the controls hidden and shown; 5.1's lane heads",
+             "where the first label rests; the heads as one column"),
+            ("sheet", "vw-light-preview", "light", "The viewers in light; the iTunes preview in the album art viewer",
+             "the plate and strip in light; the preview's column and footer"),
             ("strip", "viewer-open-windowed", "dark", "The spectrogram viewer opening, windowed", "the first frame; blink"),
             ("strip", "viewer-close-windowed", "dark", "The spectrogram viewer closing, windowed", "the last frames; blink"),
             ("strip", "viewer-autohide-fullscreen", "dark", "The fullscreen viewer's controls hiding", "the hide's fade; what stays"),

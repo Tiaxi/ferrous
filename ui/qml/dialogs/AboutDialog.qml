@@ -42,10 +42,16 @@ Components.DialogWindow {
 
     objectName: "aboutDialog"
     title: I18n.i18nc("@title:window", "About Ferrous")
-    // The content's inset from the window's edges.
-    readonly property real contentPadding: Kirigami.Units.gridUnit
-    // The pages' inset within their frame.
-    readonly property real pageInset: Kirigami.Units.largeSpacing
+    // The pages' inset within their frame: 12 px with the default font,
+    // and as much larger as a larger one (a fixed 8 px stayed under 32 px
+    // text at 24 pt, which touched the frame).
+    readonly property real pageInset: root.uiPalette.scaledSize(Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing)
+    // 48 px with the default font, and larger with a larger one, beside the
+    // name and version it heads.
+    readonly property real iconSize: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.large)
+    // The icon's drawing starts where the pages' text does: Breeze's icons
+    // of this size, and Ferrous's, keep a twelfth of it clear on each side.
+    readonly property real headingInset: Math.max(0, Math.round(root.pageInset - root.iconSize / 12))
     // The room between the pages' frame and the buttons.
     readonly property real pageBottomGap: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
     // The pages' width, from the window's: their text wraps to it, so their
@@ -161,15 +167,13 @@ Components.DialogWindow {
 
         RowLayout {
             id: aboutHeading
-            Layout.leftMargin: Kirigami.Units.smallSpacing
+            Layout.leftMargin: root.headingInset
             spacing: Kirigami.Units.gridUnit - 2
 
             Kirigami.Icon {
                 objectName: "aboutIcon"
-                // 48 px with the default font, and larger with a larger
-                // one, beside the name and version it heads.
-                implicitWidth: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.large)
-                implicitHeight: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.large)
+                implicitWidth: root.iconSize
+                implicitHeight: root.iconSize
                 // The built-in drawing, which shows whether the icon is
                 // installed or not.
                 source: "qrc:/icons/hicolor/48x48/apps/ferrous.svg"

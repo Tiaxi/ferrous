@@ -55,8 +55,10 @@ class BridgeClient : public QObject {
     // The volume asked for last, from the time it is asked for, or the
     // backend's once it has taken every request: see setVolume.
     Q_PROPERTY(double volume READ volume NOTIFY volumeChanged)
-    Q_PROPERTY(int queueLength READ queueLength NOTIFY snapshotChanged)
-    Q_PROPERTY(QString queueDurationText READ queueDurationText NOTIFY snapshotChanged)
+    // The queue's count and totals change with its rows, in the same
+    // turn of the event loop: see queueChanged.
+    Q_PROPERTY(int queueLength READ queueLength NOTIFY queueChanged)
+    Q_PROPERTY(QString queueDurationText READ queueDurationText NOTIFY queueChanged)
     Q_PROPERTY(QObject* queueRows READ queueRows CONSTANT)
     Q_PROPERTY(int selectedQueueIndex READ selectedQueueIndex NOTIFY snapshotChanged)
     // The queue change the user can undo: an ID that changes with each new
@@ -68,13 +70,25 @@ class BridgeClient : public QObject {
     // queueUndoKind name the change to undo.
     Q_PROPERTY(double queueRedoId READ queueRedoId NOTIFY queueUndoChanged)
     Q_PROPERTY(int queueRedoKind READ queueRedoKind NOTIFY queueUndoChanged)
-    Q_PROPERTY(int playingQueueIndex READ playingQueueIndex NOTIFY trackIdentityChanged)
+    // The playing row changes with the rows as well, such as when a track
+    // is put before it: see queueChanged. trackIdentityChanged follows.
+    Q_PROPERTY(int playingQueueIndex READ playingQueueIndex NOTIFY queueChanged)
+    // The length its queue row gives the current track, as the row shows
+    // it, or empty without a row: for a track that is stopped, whose
+    // length the engine may not have.
+    Q_PROPERTY(QString playingQueueLengthText READ playingQueueLengthText NOTIFY queueChanged)
     Q_PROPERTY(QString currentTrackPath READ currentTrackPath NOTIFY trackIdentityChanged)
     // Changes whenever a play starts: on every track change, also when the
     // same file plays again, and when a stopped track plays again. A seek, a
     // pause or a queue edit that keeps the playing track leaves it.
     Q_PROPERTY(double currentPlaySerial READ currentPlaySerial NOTIFY trackIdentityChanged)
     Q_PROPERTY(QString currentTrackCoverPath READ currentTrackCoverPath NOTIFY trackMetadataChanged)
+    // Whether the cover is a folder image under a name that holds a cover,
+    // such as cover.jpg, by the backend's rule: applying artwork overwrites
+    // it, and adds a cover file beside another folder image. False also for
+    // embedded art; undefined while the backend has not said, as for a
+    // cover from the queue row.
+    Q_PROPERTY(QVariant currentTrackCoverNamed READ currentTrackCoverNamed NOTIFY trackMetadataChanged)
     Q_PROPERTY(QString currentTrackTitle READ currentTrackTitle NOTIFY trackMetadataChanged)
     Q_PROPERTY(QString currentTrackArtist READ currentTrackArtist NOTIFY trackMetadataChanged)
     Q_PROPERTY(QString currentTrackAlbum READ currentTrackAlbum NOTIFY trackMetadataChanged)
@@ -174,6 +188,9 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QByteArray libraryTreeBinary READ libraryTreeBinary NOTIFY libraryChanged)
     Q_PROPERTY(int libraryVersion READ libraryVersion NOTIFY libraryChanged)
     Q_PROPERTY(bool libraryScanInProgress READ libraryScanInProgress NOTIFY libraryScanChanged)
+    // Whether the library counts and roots are the backend's library, not
+    // the empty start: until then, no roots is not yet a first run.
+    Q_PROPERTY(bool libraryLoaded READ libraryLoaded NOTIFY libraryChanged)
     Q_PROPERTY(int libraryRootCount READ libraryRootCount NOTIFY libraryChanged)
     Q_PROPERTY(int libraryTrackCount READ libraryTrackCount NOTIFY libraryChanged)
     Q_PROPERTY(int libraryArtistCount READ libraryArtistCount NOTIFY libraryChanged)
@@ -219,7 +236,8 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QString itunesArtworkErrorText READ itunesArtworkErrorText NOTIFY itunesArtworkChanged)
     // The track the suggestions were searched for, which applying one
     // changes: its trackPath, album, artist and the coverPath it had then
-    // (empty without art). It stays that track while playback moves on.
+    // (empty without art), with coverNamed as currentTrackCoverNamed had it
+    // when known. It stays that track while playback moves on.
     Q_PROPERTY(QVariantMap itunesArtworkTarget READ itunesArtworkTarget NOTIFY itunesArtworkChanged)
     Q_PROPERTY(QString diagnosticsText READ diagnosticsText NOTIFY diagnosticsChanged)
     Q_PROPERTY(QString diagnosticsLogPath READ diagnosticsLogPath NOTIFY diagnosticsChanged)
@@ -276,12 +294,14 @@ public:
     QObject *queueRows() const;
     int selectedQueueIndex() const;
     int playingQueueIndex() const;
+    QString playingQueueLengthText() const;
     QString currentTrackPath() const;
     // The track the title, artist, album, genre, year and number describe:
     // the current track, or while its own text is not known yet, the track
     // before (empty when there was none). MPRIS exports this track.
     QString currentTrackTextPath() const { return m_currentTrackTextPath; }
     QString currentTrackCoverPath() const;
+    QVariant currentTrackCoverNamed() const;
     // The track the cover is of: the current track, or while its own cover
     // is not known yet, the track before (see processBinarySnapshot()).
     QString currentTrackCoverTrackPath() const { return m_currentTrackCoverTrackPath; }
@@ -352,6 +372,7 @@ public:
     QByteArray libraryTreeBinary() const;
     int libraryVersion() const;
     bool libraryScanInProgress() const;
+    bool libraryLoaded() const;
     int libraryRootCount() const;
     int libraryTrackCount() const;
     int libraryArtistCount() const;
@@ -458,6 +479,14 @@ public:
     // "visualizationMode", and "followCurrentTrack". Empty until it has
     // arrived.
     Q_INVOKABLE QVariantMap savedWindowLayout() const;
+    // A failed save before quitting as QuitSaveFailedDialog reads it:
+    // "settings", "queue" and "scrobbles", whether each could not be saved;
+    // "cause", a code the dialog puts in words ("permission",
+    // "readOnlyFileSystem", "noSpace", "busy", "engineStopped", or empty
+    // for none it can name); and "detail", the system's text, a line for
+    // each failed save. `subjects` and `cause` are BinaryBridgeCodec's
+    // QuitSaveSubject bits and QuitSaveCause.
+    static QVariantMap quitSaveFailureMap(quint8 subjects, quint8 cause, const QString &detail);
     // The layout the backend sent as a map, as savedWindowLayout gives it.
     static QVariantMap windowLayoutMap(
         const BinaryBridgeCodec::WindowLayout &saved, const QList<QRect> &screens);
@@ -587,6 +616,14 @@ signals:
     void trackIdentityChanged();
     void trackMetadataChanged();
     void snapshotChanged();
+    // The queue's count, totals or playing row changed: at the end of the
+    // poll that changed them, not with the coalesced snapshotChanged or the
+    // queued trackIdentityChanged, so nothing bound to them draws a frame
+    // behind the rows (an empty queue's message over its first rows, none
+    // over a cleared list, or new rows without the playing row's mark).
+    // snapshotChanged, and trackIdentityChanged for a new playing row,
+    // follow as well, for their handlers.
+    void queueChanged();
     // The volume changed: at once for a request of the UI's, and with the
     // snapshot for one of the backend's, such as a change made outside the
     // app.
@@ -619,16 +656,19 @@ signals:
     void backendFailureChanged();
     // An error for the user: the message, its BinaryBridgeCodec::ErrorCategory
     // and ErrorSeverity, and the file or folder it is about, or empty.
-    void bridgeError(const QString &message, int category, int severity, const QString &subject);
+    // `detail` is the system's text for it, or empty: Recent Issues shows it
+    // under the message, in secondary ink.
+    void bridgeError(const QString &message, int category, int severity, const QString &subject,
+                     const QString &detail);
     void queueUndoChanged();
     // An undo brought back these rows, or a redo moved them here, and the
     // queue view selects them; they are rows of the queue as it is when
     // this is emitted.
     void queueUndoRestored(const QVariantList &rows);
     // The answer to the saveStateBeforeQuit call that returned requestId:
-    // whether the settings and the queue were saved, and what to show the
-    // user if not.
-    void stateSaveFinished(quint32 requestId, bool saved, const QString &message);
+    // whether the settings and the queue were saved, and, if not, what
+    // could not be saved and why, as quitSaveFailureMap gives it.
+    void stateSaveFinished(quint32 requestId, bool saved, const QVariantMap &failure);
     // The backend sent the window layout saved in the settings.
     void savedWindowLayoutRead();
     void queueColumnWidthsChanged();
@@ -896,10 +936,13 @@ private:
     // Tell the UI about an error, which Recent Issues shows, and add it to
     // the diagnostics log with its category and severity; see bridgeError.
     // What the user need not see goes to logDiagnostic only.
+    // `detail` is the system's text, which Recent Issues shows apart and
+    // the log after the message.
     void reportError(BinaryBridgeCodec::ErrorCategory category, const QString &message,
                      const QString &subject = {},
                      BinaryBridgeCodec::ErrorSeverity severity =
-                         BinaryBridgeCodec::ErrorSeverityError);
+                         BinaryBridgeCodec::ErrorSeverityError,
+                     const QString &detail = {});
     void sendPathListCommand(quint16 cmdId, const QStringList &paths,
                              const KLocalizedString &tooLargeMessage);
     void sendLibraryItems(
@@ -965,6 +1008,7 @@ private:
     mutable bool m_queuePathFirstIndexStale{true};
     int m_selectedQueueIndex{-1};
     int m_playingQueueIndex{-1};
+    QString m_playingQueueLengthText;
     QString m_currentTrackPath;
     // Backend track token of the current track; it also changes when the
     // same file starts again, as with repeat-one.
@@ -974,6 +1018,8 @@ private:
     QString m_currentTrackCoverPath;
     // The track m_currentTrackCoverPath is of; see currentTrackCoverTrackPath().
     QString m_currentTrackCoverTrackPath;
+    // See currentTrackCoverNamed().
+    QVariant m_currentTrackCoverNamed;
     // The track the title, artist, album, genre, year and number describe:
     // the current track's, or while its own are not known yet, the track
     // before's (see processBinarySnapshot()).
@@ -1049,6 +1095,7 @@ private:
     QList<QStringList> m_libraryAlbumTrackPaths;
     mutable QHash<QString, QString> m_libraryThumbnailSourceCache;
     bool m_libraryScanInProgress{false};
+    bool m_libraryLoaded{false};
     int m_libraryRootCount{0};
     int m_libraryTrackCount{0};
     int m_libraryArtistCount{0};
@@ -1157,6 +1204,7 @@ private:
     bool m_pollTrackIdentityChanged{false};
     bool m_pollTrackMetadataChanged{false};
     bool m_pollSnapshotChanged{false};
+    bool m_pollQueueChanged{false};
     bool m_pollLibraryChanged{false};
     bool m_pollLibraryScanChanged{false};
     bool m_pollLastFmScrobbleChanged{false};

@@ -18,12 +18,14 @@ import "../logic/FormatUtils.js" as FormatUtils
 // "1:17 / 3:49", on the type scale of the viewer's text over the whole
 // screen (UiPalette.fullscreenTextScale), as the album art's details under
 // it are (at the window's size they were a second scale); on the
-// right, 8 px in from the edge, flat 24 px tool buttons: a zoom readout and
-// Reset while the view is zoomed, the new issues while there are any, the
+// right, 8 px in from the edge, flat 30 px tool buttons with 22 px glyphs
+// (larger with a larger font: at the window's 24 and 16 px they were a size
+// too small beside the strip's type): a zoom readout and
+// Reset's glyph while the view is zoomed, the new issues while there are any, the
 // viewer's own buttons (declared inside the strip, from the left, each taking
 // the strip's `plotColors`) and Close: the album art's info toggle, or the
-// visualization's mode switch, which with its zoom moves here from the
-// plot's corner while the strip is on, so the strip is the viewer's one
+// visualization's mode switch, which with its zoom is here rather
+// than in the plot's corner while the strip is on, so the strip is the viewer's one
 // place for its controls (a plate of them under the strip's Close read as
 // a second cluster). The whole strip shows and hides with the viewer's
 // controls, fading as they do; it is drawn over the view, which never
@@ -45,10 +47,18 @@ Rectangle {
     property real controlsLevel: root.controlsVisible ? 1 : 0
     // Whether the strip may show at all.
     property bool available: true
+    // How much of the track's text shows besides the strip's own fade:
+    // less where what is under the strip at rest takes its place, as the
+    // visualization's first lane's label does (PlotLanes.stripTextLevel).
+    property real trackLevel: 1
     property var pointerActivity: null
     // The view's zoom, 1 at the default; Reset calls resetView.
     property real zoomLevel: 1.0
     property var resetView: null
+    // Whether the view does not follow the playhead, and Follow Playhead's
+    // shortcut; see FollowNotice.
+    property bool noticeShown: false
+    property string followShortcut: ""
     property string resetToolTip: I18n.i18nc("@info:tooltip", "Reset Zoom")
     // The app's errors: new ones show as a button that opens Recent Issues,
     // as the viewer covers the status bar.
@@ -63,9 +73,14 @@ Rectangle {
     // Whether the pointer is on the strip, which counts as on the view.
     readonly property bool hovered: stripHover.hovered
     // Whether keyboard focus is on one of the strip's buttons, which keeps
-    // the viewer's controls shown.
+    // the viewer's controls shown; not the focus a click gave one, which
+    // would hold them until the next press on the view.
     readonly property bool focusInside: {
-        for (let item = root.Window.activeFocusItem; item; item = item.parent) {
+        const focused = root.Window.activeFocusItem
+        if (focused && focused.focusReason === Qt.MouseFocusReason) {
+            return false
+        }
+        for (let item = focused; item; item = item.parent) {
             if (item === root) {
                 return true
             }
@@ -96,6 +111,14 @@ Rectangle {
             FormatUtils.clockText(root.positionText),
             FormatUtils.clockText(root.track.durationText))
 
+    // Its buttons' glyphs, smallMedium (22 px) with the default font, and
+    // the buttons, 8 px larger, so the band stays 38 px.
+    readonly property int iconSize: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.smallMedium)
+    readonly property int buttonSize: root.iconSize + 8
+    // How far in from its left edge its title is.
+    readonly property real textInset: track.x
+    // How far in from the strip's right edge Close's centre is.
+    readonly property real closeAxisInset: controls.anchors.rightMargin + root.buttonSize / 2
     // Its text's size, as a factor of the window's.
     readonly property real textScale: root.uiPalette.fullscreenTextScale
     readonly property real textPointSize: root.uiPalette.basePointSize * root.textScale
@@ -132,11 +155,14 @@ Rectangle {
 
     // Each text at its own width while they fit; short of room, the time
     // stays whole, the title keeps at least 60% of the rest, and the two
-    // others elide.
+    // others elide. Beside "Not following", which can leave the time too
+    // little room on a narrow screen with a large font, it is left out
+    // rather than run under the notice.
     Row {
         id: track
         objectName: "viewerStripTrack"
-        readonly property real room: Math.max(0, controls.x - 12 - x)
+        opacity: root.trackLevel
+        readonly property real room: Math.max(0, controls.x - track.spacing - x)
         readonly property real textRoom: Math.max(0, track.room - (timeLabel.visible
             ? timeLabel.implicitWidth + track.spacing : 0) - (contextLabel.visible ? track.spacing : 0))
         readonly property real contextNeed: contextLabel.visible ? contextLabel.implicitWidth : 0
@@ -144,7 +170,9 @@ Rectangle {
         // the title sat too near the edge).
         x: 2 * Kirigami.Units.largeSpacing
         height: root.bandHeight
-        spacing: Math.round(12 * root.textScale)
+        // 14 px at the default font, and as much more as the font is larger
+        // (at 24 pt, 14 px beside 38 px type ran the album into the time).
+        spacing: root.uiPalette.scaledSize(Math.round(12 * root.textScale))
 
         Label {
             id: titleLabel
@@ -180,7 +208,7 @@ Rectangle {
             anchors.verticalCenter: parent.verticalCenter
             textFormat: Text.PlainText
             text: root.timeText
-            visible: text.length > 0
+            visible: text.length > 0 && (!root.noticeShown || timeLabel.implicitWidth <= track.room)
             color: root.plotColors.plotTextSecondary
             font.pointSize: root.textPointSize
             font.features: root.uiPalette.tabularFigures
@@ -197,9 +225,16 @@ Rectangle {
         y: Math.round((root.bandHeight - height) / 2)
         uiPalette: root.uiPalette
         plotColors: root.plotColors
+        viewerButtonSize: root.buttonSize
+        viewerIconSize: root.iconSize
         closeViewer: root.closeViewer
         zoomLevel: root.zoomLevel
+        // On the strip's one type scale, as the time is (at the window's
+        // small size it was 12 px in a 16 px strip).
+        readoutPointSize: root.textPointSize
         resetView: root.resetView
+        noticeShown: root.noticeShown
+        followShortcut: root.followShortcut
         resetToolTip: root.resetToolTip
         errorController: root.errorController
         closeButtonName: root.closeButtonName
