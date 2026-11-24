@@ -6317,6 +6317,10 @@ void TransportInputSmokeTest::seekBarMarksTheZoomedViewOfTheShownPlot() {
         waveformSurface->property("waveformItem").value<QObject *>());
     QVERIFY(waveform != nullptr);
     setPlayingTrack(bridge);
+    // The track's overview, which a switch to the waveform waits for while
+    // the spectrogram has columns to show.
+    bridge->setProperty("waveformCoverageSeconds", 229.0);
+    bridge->setProperty("waveformComplete", true);
     QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(seek);
     QVERIFY(accessible != nullptr && accessible->valueInterface() != nullptr);
     const auto seekState = [&]() {
@@ -6424,7 +6428,9 @@ void TransportInputSmokeTest::seekBarMarksTheZoomedViewOfTheShownPlot() {
     QCOMPARE(seekState(), seekBefore);
     // Through a switch to the waveform, at its default zoom: the
     // spectrogram's band while it is the plot that shows, until the
-    // waveform has come in.
+    // waveform has come in. From the spectrogram shown whole, as on a slow
+    // runner: switched back sooner, the waveform still showed under it.
+    QTRY_VERIFY(surface->property("settledMode").toInt() == 0);
     const auto spectrogramStillShows = [surface]() {
         return surface->property("settledMode").toInt() == 0
             && surface->property("modeFade").toDouble() <= 0.0;
