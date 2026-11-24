@@ -654,6 +654,12 @@ Rectangle {
                 clip: true
                 activeFocusOnTab: true
                 model: root.uiBridge.queueRows
+                // The row the keyboard is on is the view's current item,
+                // which the view gives the focus within it, so Tab into the
+                // queue lands on that row, and a screen reader reads its
+                // title, artist and state, as the library's Tab stop reads
+                // its row (it read "Queue, list" with no current item).
+                currentIndex: root.controller.currentRowIndex
                 boundsBehavior: Flickable.StopAtBounds
                 boundsMovement: Flickable.StopAtBounds
                 flickDeceleration: root.snappyScrollFlickDeceleration

@@ -1225,6 +1225,7 @@ private slots:
     void rowStatesShareOneRightEdge();
     void transportIsWindowChromeInTheHeaderColours();
     void listsRingARowAsTheKeyboardComesIn();
+    void tabIntoTheQueueFocusesItsCurrentRow();
     void listsRingTheCurrentRowOnlyForTheKeyboard();
     void unreadableTracksAreMarkedFromTheIssueHistory();
     void aTrackThatFailsToPlayShowsTheWarningWhileCurrent();
@@ -6088,6 +6089,80 @@ void UiMainWindowTest::transportIsWindowChromeInTheHeaderColours() {
                   .arg(menu.name(), bar.name(), header.name());
     };
     QTRY_VERIFY2(bandProblem().isEmpty(), qPrintable(bandProblem()));
+}
+
+// Tab into the queue gives the focus to the row the keyboard is on, the
+// one with the ring, so a screen reader reads its number, title, artist and
+// state, and the keys go on from it. The bare list had the focus when the
+// queue's rows came after the window opened, and a screen reader read only
+// "Queue, list"; otherwise its first row did, wherever the ring was.
+void UiMainWindowTest::tabIntoTheQueueFocusesItsCurrentRow() {
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    const bool accessibilityWasActive = QAccessible::isActive();
+    QAccessible::setActive(true);
+    const auto restoreAccessibility = qScopeGuard([accessibilityWasActive] {
+        QAccessible::setActive(accessibilityWasActive);
+    });
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *queueView = named(window, "playlistView");
+    QObject *queue = window->findChild<QObject *>(QStringLiteral("queueController"));
+    QVERIFY(queueView && queue);
+    // What the focus is on, as a screen reader is told: the item with the
+    // keyboard's focus, or the nearest item above it with a role.
+    const auto focused = [window]() -> QAccessibleInterface * {
+        for (QQuickItem *item = window->activeFocusItem(); item != nullptr; item = item->parentItem()) {
+            QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(item);
+            if (accessible != nullptr && accessible->role() != QAccessible::NoRole
+                && accessible->role() != QAccessible::Client) {
+                return accessible;
+            }
+        }
+        return nullptr;
+    };
+    const auto focusedName = [&focused]() {
+        QAccessibleInterface *accessible = focused();
+        return accessible != nullptr ? accessible->text(QAccessible::Name) : QString();
+    };
+
+    // The rows come after the window has opened; the fourth plays.
+    setQueue(bridge, sampleQueueRows(20));
+    bridge->setProperty("currentTrackPath", QStringLiteral("/music/3.flac"));
+    bridge->setProperty("playingQueueIndex", 3);
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QTRY_COMPARE(queueView->property("count").toInt(), 20);
+    tabInto(window, queueView);
+    QTRY_COMPARE(ringedRowsOf(queueView), QList<int>{3});
+    QTRY_COMPARE(window->activeFocusItem(), viewRowAt(queueView, 3));
+    QVERIFY(focused() != nullptr);
+    QCOMPARE(focused()->role(), QAccessible::ListItem);
+    QCOMPARE(focusedName(), QStringLiteral("4., Track 3, Artist 3, Album, 1:00, playing"));
+    QVERIFY(focused()->state().focused);
+
+    // Down goes on from it, and the focus with the ring.
+    QTest::keyClick(window, Qt::Key_Down);
+    QTRY_COMPARE(queue->property("selectedIndices").toList(), QVariantList{4});
+    QTRY_COMPARE(ringedRowsOf(queueView), QList<int>{4});
+    QTRY_COMPARE(window->activeFocusItem(), viewRowAt(queueView, 4));
+    QCOMPARE(focusedName(), QStringLiteral("5., Track 4, Artist 4, Album, 1:00"));
+
+    // Emptied, the list itself; filled again, stopped, the first row.
+    bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    bridge->setProperty("playingQueueIndex", -1);
+    setQueue(bridge, QVariantList{});
+    QVERIFY(QMetaObject::invokeMethod(queue, "clearSelection"));
+    queue->setProperty("focusRowIndex", -1);
+    QTRY_COMPARE(queueView->property("count").toInt(), 0);
+    QTRY_VERIFY(queueView->hasActiveFocus());
+    QCOMPARE(window->activeFocusItem(), queueView);
+    QCOMPARE(focused()->role(), QAccessible::List);
+    setQueue(bridge, sampleQueueRows(5));
+    QTRY_COMPARE(queueView->property("count").toInt(), 5);
+    tabInto(window, queueView);
+    QTRY_COMPARE(ringedRowsOf(queueView), QList<int>{0});
+    QTRY_COMPARE(window->activeFocusItem(), viewRowAt(queueView, 0));
+    QCOMPARE(focusedName(), QStringLiteral("1., Track 0, Artist 0, Album, 1:00"));
 }
 
 // Tab into the library or the queue with no row selected: a row it shows
