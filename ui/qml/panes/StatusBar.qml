@@ -93,9 +93,59 @@ ToolBar {
         const v = Number(root.uiBridge.currentTrackCurrentBitrateKbps)
         return isFinite(v) && v > 0 ? Math.round(v) : 0
     }
-    // "FLAC · 16-bit / 44.1 kHz · Stereo · 557 kbps", of which the format
-    // group shows as many as fit. Nothing while stopped.
-    readonly property var formatParts: {
+    // The gain ReplayGain applies to the current track, once its audio
+    // plays: a BinaryBridgeCodec::ReplayGainSource, 0 for none, as while
+    // ReplayGain is off. Nothing while stopped.
+    readonly property int replayGainSource: root.playbackState === "Stopped"
+        ? 0 : Number(root.uiBridge.replayGainSource || 0)
+    // "ReplayGain −6.4 dB": what the track plays at.
+    readonly property string replayGainText: root.replayGainSource > 0
+        ? I18n.i18nc("@info:status %1 is a gain such as −6.4 dB", "ReplayGain %1",
+            FormatUtils.formatGainDb(root.uiBridge.replayGainAppliedDb))
+        : ""
+    // The format's tooltip: the gain, how it was chosen, and whether the
+    // peak lowered it. Nothing while ReplayGain applies none.
+    readonly property string replayGainToolTipText: {
+        if (root.replayGainSource <= 0) {
+            return ""
+        }
+        const gain = FormatUtils.formatGainDb(root.uiBridge.replayGainSourceDb)
+        const preamp = FormatUtils.formatGainDb(root.uiBridge.replayGainAppliedPreampDb)
+        let chosen
+        switch (root.replayGainSource) {
+        case 1:
+            chosen = I18n.i18nc("@info:tooltip ReplayGain; %1 and %2 are gains such as −6.4 dB",
+                "Track gain %1, preamp %2", gain, preamp)
+            break
+        case 2:
+            chosen = I18n.i18nc("@info:tooltip ReplayGain; %1 and %2 are gains such as −6.4 dB",
+                "Album gain %1, preamp %2", gain, preamp)
+            break
+        case 3:
+            chosen = I18n.i18nc("@info:tooltip ReplayGain in Album mode for a file without an album "
+                + "gain; %1 and %2 are gains such as −6.4 dB",
+                "Track gain %1 (no album gain), preamp %2", gain, preamp)
+            break
+        default:
+            chosen = I18n.i18nc("@info:tooltip ReplayGain for a file without gain tags; %1 and %2 are "
+                + "gains such as −6.4 dB",
+                "No gain tags: untagged gain %1, preamp %2", gain, preamp)
+        }
+        const lines = [root.replayGainText, chosen]
+        if (root.uiBridge.replayGainPeakLimited === true) {
+            lines.push(I18n.i18nc("@info:tooltip ReplayGain", "Limited by the peak to avoid clipping"))
+        }
+        return lines.join("\n")
+    }
+    // The format, then the ReplayGain while the status bar shows it: of
+    // these the format group shows as many as fit, from the start.
+    readonly property var formatParts: root.replayGainText.length > 0
+            && root.uiBridge.showReplayGainInStatusBar !== false
+        ? root.trackFormatParts.concat([root.replayGainText])
+        : root.trackFormatParts
+    // "FLAC · 16-bit / 44.1 kHz · Stereo · 557 kbps". Nothing while
+    // stopped.
+    readonly property var trackFormatParts: {
         if (root.playbackState === "Stopped") {
             return []
         }
@@ -419,7 +469,7 @@ ToolBar {
                 // the modes keep (each part in whole pixels left up to 7 px
                 // more).
                 readonly property var partEnds: {
-                    const bitrateAt = root.bitrateKbps > 0 ? root.formatParts.length - 1 : -1
+                    const bitrateAt = root.bitrateKbps > 0 ? root.trackFormatParts.length - 1 : -1
                     const measured = root.formatParts.map((part, i) => i === bitrateAt
                         ? root.bitrateText(Math.max(root.bitrateKbps, Math.pow(10, root.bitrateDigits) - 1))
                         : part)
@@ -448,6 +498,18 @@ ToolBar {
                 }
                 readonly property var shownParts: root.formatParts.slice(0, formatGroup.shownCount)
                 readonly property string text: formatGroup.shownParts.join(FormatUtils.fieldSeparator)
+
+                // The ReplayGain over the format, also when the bar has no
+                // room for it or shows it only here.
+                HoverHandler {
+                    id: formatHover
+                }
+                StatusToolTip {
+                    objectName: "statusBarFormatToolTip"
+                    owner: formatGroup
+                    message: root.replayGainToolTipText
+                    visible: formatHover.hovered && root.replayGainToolTipText.length > 0
+                }
 
                 // The status bar's 12 px label font, with its tabular figures.
                 FontMetrics {

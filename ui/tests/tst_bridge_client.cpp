@@ -30,6 +30,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -237,6 +238,8 @@ private slots:
     void queueColumnWidthsAreDecodedFromTheSettingsAndTheWindowLayout();
     void spectrogramFrequencyCapIsSentAndDecodedAsTheBackendHasIt();
     void scrobbleProgressSettingIsSentAndDecodedAsTheBackendHasIt();
+    void replayGainSettingsAreSentAndDecodedAsTheBackendHasThem();
+    void appliedReplayGainIsShownForTheCurrentTrackOnly();
     void fullscreenTitleStripSettingIsSentAndDecodedAsTheBackendHasIt();
     void stretchShortTracksSettingIsSentAndDecodedAsTheBackendHasIt();
     void lastFmScrobbleIndicatorIsDecodedAsTheBackendSendsIt();
@@ -2960,6 +2963,145 @@ void BridgeClientTest::keyboardShortcutsAreSentAsTheBackendReadsThem() {
     QVERIFY(client.setKeyboardShortcuts({}));
     QVERIFY(client.keyboardShortcuts().isEmpty());
     QCOMPARE(qFromLittleEndian<quint32>(sent.last().constData() + sent.last().size() - 4), quint32(4));
+}
+
+// The ReplayGain settings as the settings section ends with them, after the
+// keyboard shortcuts.
+QByteArray replayGainSettingsPayload(quint8 mode, float preampDb, float untaggedDb, bool showInStatusBar) {
+    QByteArray payload = settingsSectionBeforeKeyboardShortcuts() + keyboardShortcutsPayload({}, 0);
+    QDataStream out(&payload, QIODevice::Append);
+    out.setByteOrder(QDataStream::LittleEndian);
+    out.setFloatingPointPrecision(QDataStream::SinglePrecision);
+    out << mode << preampDb << untaggedDb << quint8(showInStatusBar ? 1 : 0);
+    return payload;
+}
+
+void BridgeClientTest::replayGainSettingsAreSentAndDecodedAsTheBackendHasThem() {
+    const auto decode = [](const QByteArray &payload, BinaryBridgeCodec::DecodedSnapshot *decoded) {
+        QString error;
+        return BinaryBridgeCodec::decodeSnapshotPacket(
+            packetWithSection(BinaryBridgeCodec::SectionSettings, payload), decoded, &error);
+    };
+    // Older backends end the section with the shortcuts: ReplayGain is off
+    // and would show in the status bar.
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QVERIFY(decode(settingsSectionBeforeKeyboardShortcuts() + keyboardShortcutsPayload({}, 0), &decoded));
+    QVERIFY(!decoded.settings.hasReplayGain);
+    QCOMPARE(decoded.settings.replayGainMode, int(BinaryBridgeCodec::ReplayGainOff));
+    QVERIFY(decoded.settings.showReplayGainInStatusBar);
+    for (const quint8 mode : {quint8(0), quint8(1), quint8(2)}) {
+        for (const bool show : {false, true}) {
+            decoded = {};
+            QVERIFY(decode(replayGainSettingsPayload(mode, -2.5f, 6.0f, show), &decoded));
+            QVERIFY(decoded.settings.hasReplayGain);
+            QCOMPARE(decoded.settings.replayGainMode, int(mode));
+            QCOMPARE(decoded.settings.replayGainPreampDb, -2.5f);
+            QCOMPARE(decoded.settings.replayGainUntaggedDb, 6.0f);
+            QCOMPARE(decoded.settings.showReplayGainInStatusBar, show);
+        }
+    }
+    QVERIFY(!decode(replayGainSettingsPayload(3, 0.0f, 0.0f, true), &decoded));
+    QVERIFY(!decode(replayGainSettingsPayload(1, std::numeric_limits<float>::quiet_NaN(), 0.0f, true),
+                    &decoded));
+    QVERIFY(!decode(replayGainSettingsPayload(1, 0.0f, 0.0f, true).chopped(1), &decoded));
+    QVERIFY(!decode(replayGainSettingsPayload(1, 0.0f, 0.0f, true) + QByteArray(1, '\0'), &decoded));
+
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.push_back(payload);
+        return true;
+    };
+    QCOMPARE(quint16(BinaryBridgeCodec::CmdSetReplayGain), quint16(81));
+    QCOMPARE(quint16(BinaryBridgeCodec::CmdSetShowReplayGainInStatusBar), quint16(82));
+    // Each setter sends the three settings, with the one it changed: in
+    // the settings' range and 0.5 dB steps.
+    const auto sentSettings = [&sent]() {
+        const QByteArray &command = sent.last();
+        const char *payload = command.constData() + BinaryBridgeCodec::kCommandHeaderBytes;
+        float preamp = 0.0f;
+        float untagged = 0.0f;
+        const quint32 preampBits = qFromLittleEndian<quint32>(payload + 1);
+        const quint32 untaggedBits = qFromLittleEndian<quint32>(payload + 5);
+        std::memcpy(&preamp, &preampBits, sizeof(preamp));
+        std::memcpy(&untagged, &untaggedBits, sizeof(untagged));
+        return std::tuple<quint16, int, float, float>(qFromLittleEndian<quint16>(command.constData()),
+            command.size(), preamp, untagged);
+    };
+    QCOMPARE(client.replayGainMode(), int(BinaryBridgeCodec::ReplayGainOff));
+    client.setReplayGainMode(BinaryBridgeCodec::ReplayGainAlbum);
+    QCOMPARE(client.replayGainMode(), int(BinaryBridgeCodec::ReplayGainAlbum));
+    QCOMPARE(sentSettings(), std::make_tuple(quint16(81), BinaryBridgeCodec::kCommandHeaderBytes + 9, 0.0f, 0.0f));
+    QCOMPARE(sent.last().at(BinaryBridgeCodec::kCommandHeaderBytes), char(BinaryBridgeCodec::ReplayGainAlbum));
+    client.setReplayGainPreampDb(-2.3);
+    QCOMPARE(client.replayGainPreampDb(), -2.5);
+    QCOMPARE(std::get<2>(sentSettings()), -2.5f);
+    client.setReplayGainUntaggedDb(40.0);
+    QCOMPARE(client.replayGainUntaggedDb(), 15.0);
+    QCOMPARE(sentSettings(), std::make_tuple(quint16(81), BinaryBridgeCodec::kCommandHeaderBytes + 9, -2.5f, 15.0f));
+    QCOMPARE(sent.last().at(BinaryBridgeCodec::kCommandHeaderBytes), char(BinaryBridgeCodec::ReplayGainAlbum));
+    QVERIFY(client.showReplayGainInStatusBar());
+    client.setShowReplayGainInStatusBar(false);
+    QVERIFY(!client.showReplayGainInStatusBar());
+    QCOMPARE(qFromLittleEndian<quint16>(sent.last().constData()), quint16(82));
+    QCOMPARE(sent.last().size(), BinaryBridgeCodec::kCommandHeaderBytes + 1);
+    QCOMPARE(sent.last().at(BinaryBridgeCodec::kCommandHeaderBytes), char(0));
+
+    // The backend's values win.
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.settings.present = true;
+    snapshot.settings.hasReplayGain = true;
+    snapshot.settings.replayGainMode = BinaryBridgeCodec::ReplayGainTrack;
+    snapshot.settings.replayGainPreampDb = 1.0f;
+    snapshot.settings.replayGainUntaggedDb = -4.0f;
+    snapshot.settings.showReplayGainInStatusBar = true;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.replayGainMode(), int(BinaryBridgeCodec::ReplayGainTrack));
+    QCOMPARE(client.replayGainPreampDb(), 1.0);
+    QCOMPARE(client.replayGainUntaggedDb(), -4.0);
+    QVERIFY(client.showReplayGainInStatusBar());
+}
+
+void BridgeClientTest::appliedReplayGainIsShownForTheCurrentTrackOnly() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.playback.present = true;
+    snapshot.playback.state = 1;
+    snapshot.playback.currentPath = QStringLiteral("/music/a.flac");
+    snapshot.playback.trackToken = 7;
+    snapshot.playback.replayGainSource = BinaryBridgeCodec::ReplayGainSourceAlbum;
+    snapshot.playback.replayGainDb = -6.5f;
+    snapshot.playback.replayGainPreampDb = 2.0f;
+    snapshot.playback.replayGainAppliedDb = -4.5f;
+    snapshot.playback.replayGainPeakLimited = true;
+    snapshot.playback.replayGainTrackToken = 7;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.replayGainSource(), int(BinaryBridgeCodec::ReplayGainSourceAlbum));
+    QCOMPARE(client.replayGainSourceDb(), -6.5);
+    QCOMPARE(client.replayGainAppliedPreampDb(), 2.0);
+    QCOMPARE(client.replayGainAppliedDb(), -4.5);
+    QVERIFY(client.replayGainPeakLimited());
+
+    // The next track has none of its own yet: the previous one's is not it.
+    snapshot.playback.currentPath = QStringLiteral("/music/b.flac");
+    snapshot.playback.trackToken = 8;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.replayGainSource(), int(BinaryBridgeCodec::ReplayGainSourceNone));
+    QCOMPARE(client.replayGainAppliedDb(), 0.0);
+    QVERIFY(!client.replayGainPeakLimited());
+
+    snapshot.playback.replayGainTrackToken = 8;
+    snapshot.playback.replayGainSource = BinaryBridgeCodec::ReplayGainSourceUntagged;
+    snapshot.playback.replayGainPeakLimited = false;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.replayGainSource(), int(BinaryBridgeCodec::ReplayGainSourceUntagged));
+
+    // Off, or not yet playing: none.
+    snapshot.playback.replayGainSource = BinaryBridgeCodec::ReplayGainSourceNone;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.replayGainSource(), int(BinaryBridgeCodec::ReplayGainSourceNone));
 }
 
 void BridgeClientTest::keyboardShortcutsAreDecodedFromTheSettingsWithinTheirBounds() {
@@ -9516,7 +9658,7 @@ void BridgeClientTest::settingDefaultsAreANewBackendsSettings() {
     QVERIFY(snapshots.wait(5000));
     // Configure Ferrous's Defaults: what the backend starts with.
     const QVariantMap defaults = client->settingDefaults();
-    QCOMPARE(defaults.size(), 21);
+    QCOMPARE(defaults.size(), 25);
     // The level meter is off for new installs.
     QCOMPARE(defaults.value(QStringLiteral("showLevelMeter")), QVariant(false));
     for (auto it = defaults.cbegin(); it != defaults.cend(); ++it) {
@@ -10592,6 +10734,36 @@ void BridgeClientTest::testPlaybackTrackTokenDecoding()
     QCOMPARE(withPlaySerial.playback.playSerial, quint64(0xFFFF'FFFF'0000'000AULL));
     QVERIFY(withPlaySerial.playback.positionAdvancing);
     QVERIFY(!decode(payload.left(payload.size() - 3), &truncated));
+    QCOMPARE(withPlaySerial.playback.replayGainSource, int(BinaryBridgeCodec::ReplayGainSourceNone));
+
+    // The applied ReplayGain ends the section: how it was chosen, the tag's
+    // gain, the preamp and what plays, whether the peak lowered it, and the
+    // track it applies to.
+    const QByteArray withoutGain = payload;
+    appendLe(quint8(BinaryBridgeCodec::ReplayGainSourceTrackWithoutAlbum));
+    appendLe(float(-6.4f));
+    appendLe(float(1.5f));
+    appendLe(float(-4.9f));
+    appendLe(quint8(1));
+    appendLe(quint64(0xFFFF'FFFF'0000'0007ULL));
+    BinaryBridgeCodec::DecodedSnapshot withGain;
+    QVERIFY(decode(payload, &withGain));
+    QCOMPARE(withGain.playback.replayGainSource, int(BinaryBridgeCodec::ReplayGainSourceTrackWithoutAlbum));
+    QCOMPARE(withGain.playback.replayGainDb, -6.4f);
+    QCOMPARE(withGain.playback.replayGainPreampDb, 1.5f);
+    QCOMPARE(withGain.playback.replayGainAppliedDb, -4.9f);
+    QVERIFY(withGain.playback.replayGainPeakLimited);
+    QCOMPARE(withGain.playback.replayGainTrackToken, quint64(0xFFFF'FFFF'0000'0007ULL));
+    QVERIFY(!decode(payload.left(payload.size() - 1), &truncated));
+    QByteArray unknownSource = payload;
+    unknownSource[withoutGain.size()] = char(BinaryBridgeCodec::ReplayGainSourceLast + 1);
+    QVERIFY(!decode(unknownSource, &truncated));
+    QByteArray unknownLimit = payload;
+    unknownLimit[withoutGain.size() + 13] = char(2);
+    QVERIFY(!decode(unknownLimit, &truncated));
+    QVERIFY(!decode(payload + QByteArray(1, '\0'), &truncated));
+    payload = withoutGain;
+
     payload.chop(8);
     payload[payload.size() - 1] = char(2);
     QVERIFY(!decode(payload, &truncated));

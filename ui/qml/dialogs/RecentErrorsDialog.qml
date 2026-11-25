@@ -123,7 +123,7 @@ Popup {
             root.openPreferencesPage(0)
             break
         case "lastfm-settings":
-            root.openPreferencesPage(3)
+            root.openPreferencesPage(4)
             break
         case "diagnostics":
             root.openDiagnostics()

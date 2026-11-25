@@ -31,6 +31,7 @@ Components.DialogWindow {
         { title: I18n.i18nc("@title:tab preferences page", "Library"), icon: "folder-symbolic" },
         { title: I18n.i18nc("@title:tab preferences page", "Visualization"), icon: "view-media-visualization" },
         { title: I18n.i18nc("@title:tab preferences page", "General"), icon: "configure" },
+        { title: I18n.i18nc("@title:tab preferences page", "Playback"), icon: "media-playback-start" },
         { title: I18n.i18nc("@title:tab preferences page", "Last.fm"), icon: Qt.resolvedUrl("../assets/lastfm.svg") }
     ]
     // Kept for the callers that name a page.
@@ -38,7 +39,8 @@ Components.DialogWindow {
     readonly property int libraryPageIndex: 0
     readonly property int visualizationPageIndex: 1
     readonly property int generalPageIndex: 2
-    readonly property int lastFmPageIndex: 3
+    readonly property int playbackPageIndex: 3
+    readonly property int lastFmPageIndex: 4
 
     // What the user changed and has yet to apply.
     readonly property alias settings: settingsState
@@ -84,7 +86,8 @@ Components.DialogWindow {
             "viewerFullscreenMode", "showFullscreenTitleStrip", "preventDisplaySleepInFullscreen",
             "showLevelMeter", "stretchShortTracks",
             "lastFmScrobblingEnabled", "lastFmShowScrobbleProgress",
-            "systemMediaControlsEnabled"
+            "systemMediaControlsEnabled",
+            "replayGainMode", "replayGainPreampDb", "replayGainUntaggedDb", "showReplayGainInStatusBar"
         ]
         property var pending: ({})
         readonly property bool modified: Object.keys(settingsState.pending).length > 0
@@ -481,9 +484,18 @@ Components.DialogWindow {
                         settings: settingsState
                     }
 
-                    Preferences.LastFmPage {
+                    Preferences.PlaybackPage {
                         anchors.fill: parent
                         visible: pagesStack.currentIndex === 3
+                        sharedLabelWidth: pagesStack.labelWidth
+                        objectName: "preferencesPlaybackPage"
+                        uiPalette: root.uiPalette
+                        settings: settingsState
+                    }
+
+                    Preferences.LastFmPage {
+                        anchors.fill: parent
+                        visible: pagesStack.currentIndex === 4
                         sharedLabelWidth: pagesStack.labelWidth
                         objectName: "preferencesLastFmPage"
                         uiBridge: root.uiBridge

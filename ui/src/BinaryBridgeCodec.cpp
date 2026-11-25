@@ -215,9 +215,28 @@ bool decodePlaybackSection(const QByteArray &payload, DecodedPlayback *out) {
     if (!reader.atEnd() && !reader.readU64(&playSerial)) {
         return false;
     }
+    quint8 replayGainSource = ReplayGainSourceNone;
+    float replayGainDb = 0.0f;
+    float replayGainPreampDb = 0.0f;
+    float replayGainAppliedDb = 0.0f;
+    quint8 replayGainPeakLimited = 0;
+    quint64 replayGainTrackToken = 0;
+    if (!reader.atEnd()
+        && (!reader.readU8(&replayGainSource) || replayGainSource > ReplayGainSourceLast
+            || !reader.readF32(&replayGainDb) || !reader.readF32(&replayGainPreampDb)
+            || !reader.readF32(&replayGainAppliedDb) || !reader.readU8(&replayGainPeakLimited)
+            || replayGainPeakLimited > 1 || !reader.readU64(&replayGainTrackToken))) {
+        return false;
+    }
     if (!reader.atEnd()) {
         return false;
     }
+    out->replayGainSource = static_cast<int>(replayGainSource);
+    out->replayGainDb = replayGainDb;
+    out->replayGainPreampDb = replayGainPreampDb;
+    out->replayGainAppliedDb = replayGainAppliedDb;
+    out->replayGainPeakLimited = replayGainPeakLimited != 0;
+    out->replayGainTrackToken = replayGainTrackToken;
     out->present = true;
     out->state = static_cast<int>(state);
     out->repeatMode = static_cast<int>(repeatMode);
@@ -706,6 +725,20 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
             || !reader.readU32(&out->keyboardShortcutsGeneration))) {
         return false;
     }
+    out->hasReplayGain = !reader.atEnd();
+    if (out->hasReplayGain) {
+        quint8 mode = ReplayGainOff;
+        quint8 showInStatusBar = 1;
+        if (!reader.readU8(&mode) || mode > ReplayGainAlbum
+            || !reader.readF32(&out->replayGainPreampDb)
+            || !reader.readF32(&out->replayGainUntaggedDb) || !reader.readU8(&showInStatusBar)
+            || !std::isfinite(out->replayGainPreampDb)
+            || !std::isfinite(out->replayGainUntaggedDb)) {
+            return false;
+        }
+        out->replayGainMode = static_cast<int>(mode);
+        out->showReplayGainInStatusBar = showInStatusBar != 0;
+    }
     if (!reader.atEnd()) {
         return false;
     }
@@ -886,6 +919,19 @@ QByteArray encodeCommandSpectrogramViewAnchor(quint64 trackToken, double centerS
     std::memcpy(&bits, &seconds, sizeof(bits));
     appendLe<quint64>(payload, bits);
     return finalizeCommand(CmdSetSpectrogramViewAnchor, payload);
+}
+
+QByteArray encodeCommandReplayGain(quint8 mode, float preampDb, float untaggedDb) {
+    QByteArray payload;
+    payload.reserve(9);
+    payload.append(static_cast<char>(mode));
+    for (const float value : {preampDb, untaggedDb}) {
+        quint32 bits = 0;
+        static_assert(sizeof(value) == sizeof(bits), "float size mismatch");
+        std::memcpy(&bits, &value, sizeof(bits));
+        appendLe<quint32>(payload, bits);
+    }
+    return finalizeCommand(CmdSetReplayGain, payload);
 }
 
 QByteArray encodeCommandString(quint16 cmdId, const QString &value) {

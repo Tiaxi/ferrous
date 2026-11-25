@@ -18,6 +18,7 @@
 #include <QIcon>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QJSValue>
 #include <QJsonObject>
 #include <QQmlApplicationEngine>
 #include <QQmlComponent>
@@ -636,6 +637,7 @@ private slots:
     void enterInATextFieldTakesTheTextNotTheDefaultButton();
     void everyConfigureSettingReachesTheBridge();
     void titleStripSettingIsOnlyForTheWholeScreen();
+    void playbackPageSetsReplayGainOnOkAndShowsItsSettings();
     void configureOpensTallEnoughForItsTallestPage_data();
     void configureOpensTallEnoughForItsTallestPage();
     void configureMeasuresAPageThatGrowsOutOfView();
@@ -978,7 +980,7 @@ void UiDialogsTest::checkConfigurePageList(QQuickWindow *window) {
     QCOMPARE(list->width(), 176.0);
     QCOMPARE(hex(list->parentItem()->property("color").value<QColor>()), hex(tokenOf(window, "view")));
     const QStringList pages{QStringLiteral("Library"), QStringLiteral("Visualization"), QStringLiteral("General"),
-                            QStringLiteral("Last.fm")};
+                            QStringLiteral("Playback"), QStringLiteral("Last.fm")};
     QQuickItem *stack = nullptr;
     QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
     for (int i = 0; i < pages.size(); ++i) {
@@ -1046,7 +1048,7 @@ void UiDialogsTest::checkConfigurePageIcons(QQuickWindow *window, qreal pointSiz
         QCOMPARE(forLabels, 16.0);
         QCOMPARE(list->width(), 176.0);
     }
-    for (int index = 0; index < 4; ++index) {
+    for (int index = 0; index < 5; ++index) {
         QQuickItem *row = visibleNamed(prefs, QStringLiteral("preferencesPage_%1").arg(index));
         QVERIFY(row != nullptr);
         QQuickItem *icon = itemsNamed(row, QStringLiteral("preferencesPageIcon")).value(0);
@@ -1109,7 +1111,7 @@ void UiDialogsTest::checkConfigureListRowsAreAlike(QQuickWindow *window) {
     // The pages: each title on one baseline in its row, the title and the
     // icon on the row's middle.
     QList<qreal> baselines;
-    for (int index = 0; index < 4; ++index) {
+    for (int index = 0; index < 5; ++index) {
         QQuickItem *row = visibleNamed(prefs, QStringLiteral("preferencesPage_%1").arg(index));
         QVERIFY(row != nullptr);
         QTRY_VERIFY(!layoutPending(row));
@@ -1299,7 +1301,7 @@ void UiDialogsTest::configurePagesMoveByKeyboardAndTabReachesEveryControl() {
     QTest::keyClick(prefs, Qt::Key_PageUp, Qt::ControlModifier);
     QTest::keyClick(prefs, Qt::Key_PageUp, Qt::ControlModifier);
     QTest::keyClick(prefs, Qt::Key_PageUp, Qt::ControlModifier);
-    QTRY_COMPARE(stack->property("currentIndex").toInt(), 3);
+    QTRY_COMPARE(stack->property("currentIndex").toInt(), 4);
 
     // From the list, Tab reaches each page's controls, then the buttons, and
     // Space toggles a check box.
@@ -1309,7 +1311,8 @@ void UiDialogsTest::configurePagesMoveByKeyboardAndTabReachesEveryControl() {
         {1, QStringLiteral("channelButtonsComboBox")}, {1, QStringLiteral("showLevelMeterCheckBox")},
         {1, QStringLiteral("stretchShortTracksCheckBox")},
         {2, QStringLiteral("viewerFullscreenComboBox")},
-        {3, QStringLiteral("lastFmScrobblingCheckBox")},
+        {3, QStringLiteral("replayGainModeComboBox")},
+        {4, QStringLiteral("lastFmScrobblingCheckBox")},
         {2, QStringLiteral("systemMediaControlsCheckBox")},
     };
     for (const auto &[page, name] : controls) {
@@ -1628,8 +1631,8 @@ void UiDialogsTest::everyConfigureSettingReachesTheBridge() {
         {2, "preventDisplaySleepInFullscreenCheckBox", "preventDisplaySleepInFullscreen"},
         {1, "showLevelMeterCheckBox", "showLevelMeter"},
         {1, "stretchShortTracksCheckBox", "stretchShortTracks"},
-        {3, "lastFmScrobblingCheckBox", "lastFmScrobblingEnabled"},
-        {3, "lastFmShowScrobbleProgressCheckBox", "lastFmShowScrobbleProgress"},
+        {4, "lastFmScrobblingCheckBox", "lastFmScrobblingEnabled"},
+        {4, "lastFmShowScrobbleProgressCheckBox", "lastFmShowScrobbleProgress"},
         {2, "systemMediaControlsCheckBox", "systemMediaControlsEnabled"},
     };
     QHash<QString, bool> expected;
@@ -1681,6 +1684,74 @@ void UiDialogsTest::everyConfigureSettingReachesTheBridge() {
         QVERIFY2(bridge->property(choice.property) == choice.value, choice.property);
     }
     QCOMPARE(bridge->property("dbRange").toDouble(), 145.0);
+}
+
+void UiDialogsTest::playbackPageSetsReplayGainOnOkAndShowsItsSettings() {
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QVERIFY(bridge->setProperty("replayGainMode", 0));
+    QVERIFY(bridge->setProperty("replayGainPreampDb", -2.5));
+    QVERIFY(bridge->setProperty("replayGainUntaggedDb", 3.0));
+    QVERIFY(bridge->setProperty("showReplayGainInStatusBar", true));
+    QObject *dialog = openPreferences(window, 3);
+    QVERIFY(dialog != nullptr);
+    QCOMPARE(dialog->property("playbackPageIndex").toInt(), 3);
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *mode = nullptr;
+    QTRY_VERIFY((mode = visibleNamed(prefs, QStringLiteral("replayGainModeComboBox"))) != nullptr);
+    QQuickItem *preamp = visibleNamed(prefs, QStringLiteral("replayGainPreampSpinBox"));
+    QQuickItem *untagged = visibleNamed(prefs, QStringLiteral("replayGainUntaggedSpinBox"));
+    QQuickItem *show = visibleNamed(prefs, QStringLiteral("replayGainShowComboBox"));
+    QVERIFY(preamp != nullptr && untagged != nullptr && show != nullptr);
+    QCOMPARE(mode->property("displayText").toString(), QStringLiteral("Off"));
+    QCOMPARE(preamp->property("displayText").toString(), QStringLiteral("\u22122.5 dB"));
+    QCOMPARE(untagged->property("displayText").toString(), QStringLiteral("+3.0 dB"));
+    QCOMPARE(show->property("displayText").toString(), QStringLiteral("In the status bar"));
+    // While off, ReplayGain's other settings mean nothing.
+    QVERIFY(!preamp->isEnabled() && !untagged->isEnabled() && !show->isEnabled());
+    // A gain is typed with either separator, with or without its unit.
+    const QJSValue fromText = preamp->property("valueFromText").value<QJSValue>();
+    QCOMPARE(fromText.call({QJSValue(QStringLiteral("\u22124,5 dB"))}).toInt(), -9);
+    QCOMPARE(fromText.call({QJSValue(QStringLiteral("6.3"))}).toInt(), 13);
+    const QJSValue toText = preamp->property("textFromValue").value<QJSValue>();
+    QCOMPARE(toText.call({QJSValue(-9)}).toString(), QStringLiteral("\u22124.5 dB"));
+
+    QVERIFY(mode->setProperty("currentIndex", 2));
+    QVERIFY(QMetaObject::invokeMethod(mode, "activated", Q_ARG(int, 2)));
+    QTRY_VERIFY(preamp->isEnabled() && untagged->isEnabled() && show->isEnabled());
+    // From the keyboard, in 0.5 dB steps.
+    preamp->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyClick(prefs, Qt::Key_Up);
+    QTRY_COMPARE(preamp->property("displayText").toString(), QStringLiteral("\u22122.0 dB"));
+    untagged->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyClick(prefs, Qt::Key_Down);
+    QTest::keyClick(prefs, Qt::Key_Down);
+    QTRY_COMPARE(untagged->property("displayText").toString(), QStringLiteral("+2.0 dB"));
+    QVERIFY(show->setProperty("currentIndex", 1));
+    QVERIFY(QMetaObject::invokeMethod(show, "activated", Q_ARG(int, 1)));
+    // Nothing changes until OK.
+    QCOMPARE(bridge->property("replayGainMode").toInt(), 0);
+    QCOMPARE(bridge->property("replayGainPreampDb").toDouble(), -2.5);
+
+    click(prefs, visibleNamed(prefs, QStringLiteral("preferencesOkButton")));
+    QTRY_VERIFY(!dialog->property("visible").toBool());
+    QCOMPARE(bridge->property("replayGainMode").toInt(), 2);
+    QCOMPARE(bridge->property("replayGainPreampDb").toDouble(), -2.0);
+    QCOMPARE(bridge->property("replayGainUntaggedDb").toDouble(), 2.0);
+    QVERIFY(!bridge->property("showReplayGainInStatusBar").toBool());
+
+    // Reopened, it shows them, and Defaults turns ReplayGain off at 0 dB.
+    QVERIFY(QMetaObject::invokeMethod(dialog, "openPage", Q_ARG(QVariant, 3)));
+    QTRY_VERIFY(dialog->property("visible").toBool());
+    QTRY_COMPARE(mode->property("displayText").toString(), QStringLiteral("Album gain"));
+    QCOMPARE(show->property("displayText").toString(), QStringLiteral("Only in the tooltip"));
+    QVERIFY(QMetaObject::invokeMethod(dialog->property("settings").value<QObject *>(), "restoreDefaults"));
+    QTRY_COMPARE(mode->property("displayText").toString(), QStringLiteral("Off"));
+    QCOMPARE(preamp->property("displayText").toString(), QStringLiteral("0.0 dB"));
+    QCOMPARE(untagged->property("displayText").toString(), QStringLiteral("0.0 dB"));
+    QCOMPARE(show->property("displayText").toString(), QStringLiteral("In the status bar"));
 }
 
 void UiDialogsTest::titleStripSettingIsOnlyForTheWholeScreen() {
@@ -1769,7 +1840,7 @@ void UiDialogsTest::checkConfigureFitsItsPagesAtAnyWidth(QQuickWindow *window) {
     QQuickWindow *prefs = windowOf(dialog);
     QQuickItem *stack = nullptr;
     QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
-    QCOMPARE(formModes(dialog, stack), QList<bool>(4, true));
+    QCOMPARE(formModes(dialog, stack), QList<bool>(5, true));
     checkPreferencesPages(dialog, prefs, stack, QStringLiteral("default size"));
     QVERIFY(!QTest::currentTestFailed());
 
@@ -1795,7 +1866,7 @@ namespace {
 // view. Returns the tallest page's height, whole.
 qreal checkEveryConfigurePageIsWhole(QObject *dialog, QQuickWindow *prefs, QQuickItem *stack, const QString &at) {
     qreal tallest = 0;
-    for (int index = 0; index < 4; ++index) {
+    for (int index = 0; index < 5; ++index) {
         QQuickItem *page = stack->childItems().at(index);
         const qreal measured = page->property("wholeHeight").toReal();
         dialog->setProperty("pageIndex", index);
@@ -1890,7 +1961,7 @@ void UiDialogsTest::configureMeasuresAPageThatGrowsOutOfView() {
     QQuickWindow *prefs = windowOf(dialog);
     QQuickItem *stack = nullptr;
     QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
-    QQuickItem *lastFm = stack->childItems().at(3);
+    QQuickItem *lastFm = stack->childItems().at(4);
     QVERIFY(!lastFm->isVisible());
     const qreal before = lastFm->property("wholeHeight").toReal();
     QVERIFY2(before > 0, qPrintable(QString::number(before)));
@@ -1908,7 +1979,7 @@ void UiDialogsTest::configureMeasuresAPageThatGrowsOutOfView() {
     // The tallest page now.
     QCOMPARE(stack->implicitHeight(), grown);
     // As tall as it said once in view.
-    dialog->setProperty("pageIndex", 3);
+    dialog->setProperty("pageIndex", 4);
     QTRY_VERIFY(lastFm->isVisible() && !layoutPendingUnder(lastFm));
     QCOMPARE(lastFm->property("wholeHeight").toReal(),
              std::ceil(lastFm->property("contentHeight").toReal() + lastFm->property("topPadding").toReal()
@@ -1930,7 +2001,7 @@ void UiDialogsTest::configureMeasuresAPageThatGrowsOutOfView() {
     QQuickItem *secondStack = nullptr;
     QTRY_VERIFY((secondStack = visibleNamed(secondPrefs, QStringLiteral("preferencesPages"))) != nullptr);
     // Last.fm is the tallest page.
-    QCOMPARE(secondStack->implicitHeight(), secondStack->childItems().at(3)->property("wholeHeight").toReal());
+    QCOMPARE(secondStack->implicitHeight(), secondStack->childItems().at(4)->property("wholeHeight").toReal());
     checkEveryConfigurePageIsWhole(secondDialog, secondPrefs, secondStack, QStringLiteral("long status"));
     QVERIFY(!QTest::currentTestFailed());
     QVERIFY(reject(secondDialog));
@@ -1999,13 +2070,15 @@ void UiDialogsTest::checkConfigureGroupsItsSettingsOnFourPages(QQuickWindow *win
     QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
     QCOMPARE(dialog->property("pageTitles").toStringList(),
              QStringList({QStringLiteral("Library"), QStringLiteral("Visualization"), QStringLiteral("General"),
-                          QStringLiteral("Last.fm")}));
+                          QStringLiteral("Playback"), QStringLiteral("Last.fm")}));
     QCOMPARE(dialog->property("libraryPageIndex").toInt(), 0);
     QCOMPARE(dialog->property("visualizationPageIndex").toInt(), 1);
     QCOMPARE(dialog->property("generalPageIndex").toInt(), 2);
-    QCOMPARE(dialog->property("lastFmPageIndex").toInt(), 3);
+    QCOMPARE(dialog->property("playbackPageIndex").toInt(), 3);
+    QCOMPARE(dialog->property("lastFmPageIndex").toInt(), 4);
     const QStringList pageNames{QStringLiteral("preferencesLibraryPage"), QStringLiteral("preferencesVisualizationPage"),
-                                QStringLiteral("preferencesGeneralPage"), QStringLiteral("preferencesLastFmPage")};
+                                QStringLiteral("preferencesGeneralPage"), QStringLiteral("preferencesPlaybackPage"),
+                                QStringLiteral("preferencesLastFmPage")};
     QCOMPARE(stack->childItems().size(), pageNames.size());
     for (int page = 0; page < pageNames.size(); ++page) {
         QCOMPARE(stack->childItems().at(page)->objectName(), pageNames[page]);
@@ -2025,7 +2098,10 @@ void UiDialogsTest::checkConfigureGroupsItsSettingsOnFourPages(QQuickWindow *win
         {2, {QStringLiteral("viewerFullscreenComboBox"), QStringLiteral("showFullscreenTitleStripCheckBox"),
              QStringLiteral("preventDisplaySleepInFullscreenCheckBox"),
              QStringLiteral("systemMediaControlsCheckBox")}},
-        {3, {QStringLiteral("lastFmScrobblingCheckBox")}},
+        {3, {QStringLiteral("replayGainModeComboBox"), QStringLiteral("replayGainHelp"),
+             QStringLiteral("replayGainPreampSpinBox"), QStringLiteral("replayGainUntaggedSpinBox"),
+             QStringLiteral("replayGainShowComboBox")}},
+        {4, {QStringLiteral("lastFmScrobblingCheckBox")}},
     };
     for (const auto &[page, controls] : placement) {
         dialog->setProperty("pageIndex", page);
@@ -2179,7 +2255,7 @@ void UiDialogsTest::checkConfigureLabelsEndAtOnePlaceOnEveryPage(QQuickWindow *w
     QQuickWindow *prefs = windowOf(dialog);
     QQuickItem *stack = nullptr;
     QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
-    QCOMPARE(formModes(dialog, stack), QList<bool>(4, true));
+    QCOMPARE(formModes(dialog, stack), QList<bool>(5, true));
     // The x of each labelled field, on page `page`.
     const auto fieldsOf = [&](int page) {
         QList<qreal> xs;
@@ -2197,7 +2273,7 @@ void UiDialogsTest::checkConfigureLabelsEndAtOnePlaceOnEveryPage(QQuickWindow *w
     };
     QList<qreal> all;
     QStringList described;
-    for (int page = 0; page < 4; ++page) {
+    for (int page = 0; page < 5; ++page) {
         dialog->setProperty("pageIndex", page);
         QList<qreal> xs;
         QTRY_VERIFY2(!(xs = fieldsOf(page)).isEmpty(), qPrintable(QString::number(page)));
@@ -3114,7 +3190,7 @@ void UiDialogsTest::lastFmButtonsHaveGlyphsAtTheDialogsSize() {
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *bridge = bridgeOf(window);
     QVERIFY(bridge->setProperty("lastFmBuildConfigured", true));
-    QObject *dialog = openPreferences(window, 3);
+    QObject *dialog = openPreferences(window, 4);
     QVERIFY(dialog != nullptr);
     QQuickWindow *prefs = windowOf(dialog);
     const qreal size = paletteOf(window)->property("labelIconSize").toReal();
@@ -3148,7 +3224,7 @@ void UiDialogsTest::checkLastFmStatusCountsDroppedScrobbles(QQuickWindow *window
     QVERIFY(bridge->setProperty("lastFmStatusText", QStringLiteral("Last.fm scrobble queue flushed.")));
     QVERIFY(bridge->setProperty("lastFmPendingScrobbleCount", 2));
     QVERIFY(bridge->setProperty("lastFmDroppedScrobbleCount", 0));
-    QObject *dialog = openPreferences(window, 3);
+    QObject *dialog = openPreferences(window, 4);
     QVERIFY(dialog != nullptr);
     QQuickWindow *prefs = windowOf(dialog);
     QQuickItem *pending = nullptr;
@@ -3159,7 +3235,7 @@ void UiDialogsTest::checkLastFmStatusCountsDroppedScrobbles(QQuickWindow *window
     QQuickItem *stack = visibleNamed(prefs, QStringLiteral("preferencesPages"));
     QQuickItem *buttons = visibleNamed(prefs, QStringLiteral("lastFmAccountButtons"));
     QVERIFY(stack != nullptr && buttons != nullptr);
-    QTRY_VERIFY(!layoutPendingUnder(stack->childItems().at(3)));
+    QTRY_VERIFY(!layoutPendingUnder(stack->childItems().at(4)));
     const qreal buttonsTop = sceneRect(buttons).top();
     QTRY_VERIFY(sceneRect(pending).top() >= sceneRect(buttons).bottom());
     for (const QString &status : {QString(), QStringLiteral("Now playing: The Quiet Meridian - A Remarkably "
@@ -3167,7 +3243,7 @@ void UiDialogsTest::checkLastFmStatusCountsDroppedScrobbles(QQuickWindow *window
                                   QStringLiteral("Last.fm scrobble queue flushed.")}) {
         QVERIFY(bridge->setProperty("lastFmStatusText", status));
         QCoreApplication::processEvents();
-        QTRY_VERIFY(!layoutPendingUnder(stack->childItems().at(3)));
+        QTRY_VERIFY(!layoutPendingUnder(stack->childItems().at(4)));
         QCOMPARE(sceneRect(buttons).top(), buttonsTop);
     }
 
@@ -3197,7 +3273,7 @@ void UiDialogsTest::checkLastFmStatusCountsDroppedScrobbles(QQuickWindow *window
 void UiDialogsTest::checkLastFmPageShowsOnlyTheButtonsThatApply(QQuickWindow *window) {
     QObject *bridge = bridgeOf(window);
     QVERIFY(bridge->setProperty("lastFmBuildConfigured", true));
-    QObject *dialog = openPreferences(window, 3);
+    QObject *dialog = openPreferences(window, 4);
     QVERIFY(dialog != nullptr);
     // Configure Ferrous has a window of its own.
     QQuickWindow *prefs = windowOf(dialog);
@@ -3238,14 +3314,14 @@ void UiDialogsTest::checkLastFmPageShowsOnlyTheButtonsThatApply(QQuickWindow *wi
 void UiDialogsTest::checkLastFmScrobblingNeedsABuildWithLastFm(QQuickWindow *window) {
     QObject *bridge = bridgeOf(window);
     QVERIFY(bridge->setProperty("lastFmBuildConfigured", false));
-    QObject *dialog = openPreferences(window, 3);
+    QObject *dialog = openPreferences(window, 4);
     QVERIFY(dialog != nullptr);
     QQuickWindow *prefs = windowOf(dialog);
     QQuickItem *reason = nullptr;
     QTRY_VERIFY((reason = visibleNamed(prefs, QStringLiteral("lastFmUnavailableLabel"))) != nullptr);
     QCOMPARE(reason->property("text").toString(), QStringLiteral("Last.fm isn\u2019t available in this build."));
     QCOMPARE(hex(reason->property("color").value<QColor>()), hex(tokenOf(window, "text")));
-    QQuickItem *page = visibleNamed(prefs, QStringLiteral("preferencesPages"))->childItems().at(3);
+    QQuickItem *page = visibleNamed(prefs, QStringLiteral("preferencesPages"))->childItems().at(4);
     QTRY_VERIFY(!layoutPendingUnder(page));
     QQuickItem *glyph = visibleNamed(prefs, QStringLiteral("lastFmUnavailableIcon"));
     QVERIFY(glyph != nullptr);
@@ -3289,7 +3365,7 @@ void UiDialogsTest::checkLastFmScrobblingNeedsABuildWithLastFm(QQuickWindow *win
     QVERIFY(dialog->setProperty("pageIndex", 0));
     QTRY_VERIFY(!page->isVisible() && !layoutPendingUnder(page));
     QCOMPARE(page->property("wholeHeight").toReal(), shownHeight);
-    QVERIFY(dialog->setProperty("pageIndex", 3));
+    QVERIFY(dialog->setProperty("pageIndex", 4));
     QTRY_VERIFY(page->isVisible() && !layoutPendingUnder(page));
     for (const char *name : {"lastFmConnectButton", "lastFmCompleteButton", "lastFmReconnectButton",
                              "lastFmDisconnectButton"}) {
@@ -3334,10 +3410,10 @@ void UiDialogsTest::checkLastFmAccountIsAGroupApart(QQuickWindow *window, bool c
     const qreal generalGroupGap = gap(sleep, media);
     QVERIFY2(qAbs(generalGroupGap - 16) < 1, qPrintable(QString::number(generalGroupGap)));
 
-    dialog->setProperty("pageIndex", 3);
+    dialog->setProperty("pageIndex", 4);
     QQuickItem *account = nullptr;
     QTRY_VERIFY((account = visibleNamed(prefs, QStringLiteral("lastFmAccountLabel"))) != nullptr);
-    QTRY_VERIFY(!layoutPendingUnder(stack->childItems().at(3)));
+    QTRY_VERIFY(!layoutPendingUnder(stack->childItems().at(4)));
     QQuickItem *box = visibleNamed(prefs, QStringLiteral("lastFmScrobblingCheckBox"));
     QQuickItem *helpRow = visibleNamed(prefs, QStringLiteral("lastFmScrobblingHelp"));
     QVERIFY(box != nullptr && helpRow != nullptr);
@@ -4067,7 +4143,7 @@ void UiDialogsTest::recentIssuesActionsShowTheFileOrOpenTheSettings() {
     QCOMPARE(bridge->property("shownInLibrary").toStringList(), bothShown);
 
     // A library notice opens the library settings; a Last.fm one, Last.fm's.
-    const QList<QPair<int, int>> settings{{2, 0}, {5, 3}};
+    const QList<QPair<int, int>> settings{{2, 0}, {5, 4}};
     for (const auto &[category, page] : settings) {
         QVERIFY(QMetaObject::invokeMethod(object(window, QStringLiteral("errorController")), "clear"));
         report(window, category, 0, QString(), QStringLiteral("Something to look at. It explains itself."));
@@ -8318,7 +8394,7 @@ QStringList itemsCrossingWindow(QQuickWindow *window, bool acrossOnly) {
 void checkPreferencesPages(QObject *preferences, QQuickWindow *prefs, QQuickItem *stack, const QString &size) {
     QQuickItem *list = visibleNamed(prefs, QStringLiteral("preferencesPageList"));
     QVERIFY(list != nullptr);
-    for (int page = 0; page < 4; ++page) {
+    for (int page = 0; page < 5; ++page) {
         const QString at = QStringLiteral("%1, page %2").arg(size).arg(page);
         preferences->setProperty("pageIndex", page);
         QTRY_COMPARE(stack->property("currentIndex").toInt(), page);
@@ -8375,7 +8451,7 @@ void checkPreferencesPages(QObject *preferences, QQuickWindow *prefs, QQuickItem
 // Whether each page of Configure Ferrous has its labels beside its fields.
 QList<bool> formModes(QObject *preferences, QQuickItem *stack) {
     QList<bool> modes;
-    for (int page = 0; page < 4; ++page) {
+    for (int page = 0; page < 5; ++page) {
         preferences->setProperty("pageIndex", page);
         QQuickItem *pageItem = stack->childItems().at(page);
         for (QQuickItem *form : itemsNamed(pageItem, QStringLiteral("preferencesForm"))) {
@@ -8456,14 +8532,14 @@ void UiDialogsTest::checkDialogsHoldTheirContents(DialogsWindow &main) {
     QQuickItem *stack = nullptr;
     QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
     // It opens wide enough for every page's labels beside its fields.
-    QCOMPARE(formModes(preferences, stack), QList<bool>(4, true));
+    QCOMPARE(formModes(preferences, stack), QList<bool>(5, true));
     checkPreferencesPages(preferences, prefs, stack, QStringLiteral("24 pt, default size"));
     QVERIFY(!QTest::currentTestFailed());
     // In a larger window too. (Narrower, configureFitsItsPagesAtAnyWidth
     // checks it.)
     prefs->resize(2200, prefs->height());
     QTRY_COMPARE(prefs->width(), 2200);
-    QCOMPARE(formModes(preferences, stack), QList<bool>(4, true));
+    QCOMPARE(formModes(preferences, stack), QList<bool>(5, true));
     checkPreferencesPages(preferences, prefs, stack, QStringLiteral("24 pt, wide"));
     QVERIFY(!QTest::currentTestFailed());
     QVERIFY(reject(preferences));
@@ -9442,7 +9518,7 @@ void UiDialogsTest::configureWidthsFollowTheFont() {
         }
 
         QObject *bridge = bridgeOf(main.window);
-        QVERIFY(dialog->setProperty("pageIndex", 3));
+        QVERIFY(dialog->setProperty("pageIndex", 4));
         for (const bool configured : {false, true}) {
             QVERIFY(bridge->setProperty("lastFmBuildConfigured", configured));
             QVERIFY(bridge->setProperty("lastFmAuthState", configured ? 1 : 0));
@@ -9450,7 +9526,7 @@ void UiDialogsTest::configureWidthsFollowTheFont() {
             const QString line = configured ? QStringLiteral("lastFmAccountLabel")
                                             : QStringLiteral("lastFmUnavailableLabel");
             QTRY_VERIFY((account = visibleNamed(prefs, line)) != nullptr);
-            QTRY_VERIFY(!layoutPendingUnder(stack->childItems().at(3)));
+            QTRY_VERIFY(!layoutPendingUnder(stack->childItems().at(4)));
             if (pointSize <= 10) {
                 QVERIFY2(account->width() <= 24.0 * 18, qPrintable(describeItem(account)));
             }
@@ -9762,7 +9838,7 @@ void UiDialogsTest::configureHelpStartsAtItsBoxsText() {
     const QColor ground = tokenOf(window, "chrome");
     const QString sample = QStringLiteral("HHHH");
     int underBoxes = 0;
-    for (int index = 0; index < 4; ++index) {
+    for (int index = 0; index < 5; ++index) {
         QQuickItem *page = stack->childItems().at(index);
         QVERIFY(dialog->setProperty("pageIndex", index));
         QTRY_VERIFY(page->isVisible() && !layoutPendingUnder(page));

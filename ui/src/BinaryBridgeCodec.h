@@ -204,7 +204,41 @@ enum CommandId : quint16 {
     // the request, which SectionSettings echoes; see
     // encodeCommandKeyboardShortcuts.
     CmdSetKeyboardShortcuts = 80,
+    // How ReplayGain levels playback; see encodeCommandReplayGain.
+    CmdSetReplayGain = 81,
+    // Whether the status bar shows the gain ReplayGain applies (u8), rather
+    // than only the tooltip of the track's format.
+    CmdSetShowReplayGainInStatusBar = 82,
 };
+
+// How ReplayGain levels playback. Mirrors ReplayGainMode in
+// src/playback/replay_gain.rs.
+enum ReplayGainMode : quint8 {
+    ReplayGainOff = 0,
+    ReplayGainTrack = 1,
+    ReplayGainAlbum = 2,
+};
+
+// How the gain ReplayGain applies to the current track was chosen. Mirrors
+// GainSource in src/playback/replay_gain.rs; 0 is none, while ReplayGain is
+// off or before the track's audio plays.
+enum ReplayGainSource : quint8 {
+    ReplayGainSourceNone = 0,
+    // The track gain, in Track mode.
+    ReplayGainSourceTrack = 1,
+    // The album gain, in Album mode.
+    ReplayGainSourceAlbum = 2,
+    // The track gain, in Album mode, as the file has no album gain.
+    ReplayGainSourceTrackWithoutAlbum = 3,
+    // The gain for files without gain tags.
+    ReplayGainSourceUntagged = 4,
+    ReplayGainSourceLast = ReplayGainSourceUntagged,
+};
+
+// The lowest and highest ReplayGain preamp and gain for files without gain
+// tags, in dB. Mirrors REPLAY_GAIN_DB_RANGE in src/playback/replay_gain.rs.
+constexpr float kMinReplayGainDb = -15.0f;
+constexpr float kMaxReplayGainDb = 15.0f;
 
 // The narrowest and widest queue column the backend keeps, in logical
 // pixels. Mirrors MIN_WIDTH and MAX_WIDTH in
@@ -305,6 +339,15 @@ struct DecodedPlayback {
     // Advances whenever a play starts, also when the same file plays again
     // or a stopped track plays again, which keeps its trackToken.
     quint64 playSerial{0};
+    // The gain ReplayGain applies to the track of replayGainTrackToken, or
+    // ReplayGainSourceNone: the tag's gain (or the untagged gain), the
+    // preamp and what plays, in dB, and whether the peak lowered it.
+    int replayGainSource{ReplayGainSourceNone};
+    float replayGainDb{0.0f};
+    float replayGainPreampDb{0.0f};
+    float replayGainAppliedDb{0.0f};
+    bool replayGainPeakLimited{false};
+    quint64 replayGainTrackToken{0};
 };
 
 struct DecodedQueueTrack {
@@ -495,6 +538,13 @@ struct DecodedSettings {
     bool hasKeyboardShortcuts{false};
     KeyboardShortcuts keyboardShortcuts;
     quint32 keyboardShortcutsGeneration{0};
+    // The ReplayGain settings, as CmdSetReplayGain lays them out, and
+    // whether the status bar shows the gain; older backends send none.
+    bool hasReplayGain{false};
+    int replayGainMode{ReplayGainOff};
+    float replayGainPreampDb{0.0f};
+    float replayGainUntaggedDb{0.0f};
+    bool showReplayGainInStatusBar{true};
 };
 
 // What the scrobble progress indicator shows. Mirrors ScrobbleIndicatorState
@@ -687,6 +737,9 @@ QByteArray encodeCommandF64(quint16 cmdId, double value);
 // one that follows it, and the f64 seconds the moved view is centred on (0
 // when it follows). A `centerSeconds` that is NaN follows the playhead.
 QByteArray encodeCommandSpectrogramViewAnchor(quint64 trackToken, double centerSeconds);
+// CmdSetReplayGain: the u8 mode (ReplayGainMode), then the f32 preamp and the
+// f32 gain for files without gain tags, in dB.
+QByteArray encodeCommandReplayGain(quint8 mode, float preampDb, float untaggedDb);
 QByteArray encodeCommandString(quint16 cmdId, const QString &value);
 QByteArray encodeCommandStringPair(quint16 cmdId, const QString &first, const QString &second);
 // CmdApplyAlbumArt: the track and artwork paths, then the track file's u64
