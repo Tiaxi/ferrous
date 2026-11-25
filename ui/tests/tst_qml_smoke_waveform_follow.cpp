@@ -46,6 +46,8 @@ private slots:
     void grabbedTimeHoldsFromThePress_data();
     void grabbedTimeHoldsFromThePress();
     void panShowsAClosedHand();
+    void pausedPanMovesTheCrosshair_data();
+    void pausedPanMovesTheCrosshair();
 };
 
 namespace {
@@ -1510,6 +1512,60 @@ Window {
     QTest::keyClick(window, Qt::Key_Escape);
     QVERIFY(!item->m_autoscroll.active());
     QVERIFY(QGuiApplication::overrideCursor() == nullptr);
+}
+
+void WaveformFollowSmokeTest::pausedPanMovesTheCrosshair_data() {
+    QTest::addColumn<double>("zoom");
+    QTest::addColumn<int>("moveBy");
+    // The whole track, which has nowhere to pan to, and a zoomed view held
+    // short of a drag (#726).
+    QTest::newRow("whole track") << 1.0 << 120;
+    QTest::newRow("short of a drag") << 8.0 << 1;
+}
+
+void WaveformFollowSmokeTest::pausedPanMovesTheCrosshair() {
+    QFETCH(double, zoom);
+    QFETCH(int, moveBy);
+    QQuickWindow window;
+    window.resize(static_cast<int>(kWidth), 120);
+    auto *item = new WaveformEditorItem(window.contentItem());
+    item->setWidth(kWidth);
+    item->setHeight(120.0);
+    item->setDurationSeconds(kDuration);
+    setTestPosition(*item, 30.0, 1);
+    item->setZoomLevel(zoom);
+    item->setCrosshairEnabled(true);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QSignalSpy frames(&window, &QQuickWindow::frameSwapped);
+    // Paused, the window draws nothing more once it has settled.
+    const auto settle = [&frames]() {
+        for (int attempt = 0; attempt < 50; ++attempt) {
+            frames.clear();
+            QTest::qWait(100);
+            if (frames.isEmpty()) return true;
+        }
+        return false;
+    };
+    const QPoint press(200, 60);
+    QTest::mouseMove(&window, press);
+    QVERIFY(settle());
+    QTest::mousePress(&window, Qt::MiddleButton, Qt::NoModifier, press);
+    QVERIFY(item->m_panPressed);
+    QVERIFY(settle());
+
+    // The crosshair follows the pointer, although the view stays.
+    const QPoint moved(press.x() + moveBy, press.y());
+    const auto view = viewOf(*item);
+    QTest::mouseMove(&window, moved);
+    QVERIFY(!item->m_panning);
+    QVERIFY(sameView(viewOf(*item), view));
+    {
+        QMutexLocker lock(&item->m_stateMutex);
+        QCOMPARE(item->m_hoverPosition, QPointF(moved));
+    }
+    QTRY_VERIFY_WITH_TIMEOUT(!frames.isEmpty(), 2000);
+    QTest::mouseRelease(&window, Qt::MiddleButton, Qt::NoModifier, moved);
 }
 
 void WaveformFollowSmokeTest::grabbedTimeHoldsStillThroughAPan_data() {

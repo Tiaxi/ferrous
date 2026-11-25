@@ -4325,14 +4325,21 @@ void WaveformEditorItem::mouseMoveEvent(QMouseEvent *event) {
         // The crosshair keeps to the pointer, which holds the time it
         // grabbed.
         m_hoverPosition = pointer;
+        // Where the view does not move, nothing else draws the crosshair
+        // where the pointer went: while paused, no playhead moves either.
+        const auto crosshairMovesAlone = [this, &lock]() {
+            const bool shown = m_crosshairEnabled;
+            lock.unlock();
+            if (shown) update();
+        };
         const double span = visibleSpanForZoomLocked(m_presentedZoomLevel);
         // The whole track has nowhere to pan to.
-        if (span <= 0.0 || span >= m_durationSeconds) return;
+        if (span <= 0.0 || span >= m_durationSeconds) return crosshairMovesAlone();
         const qint64 nowNs = m_nowNs();
         if (!m_panning) {
             if (std::abs(pointer.x() - m_panPressPosition.x())
                 < QGuiApplication::styleHints()->startDragDistance()) {
-                return;
+                return crosshairMovesAlone();
             }
             settleFollowLocked(nowNs);
             detachAtLocked(nowNs, 0.5);
