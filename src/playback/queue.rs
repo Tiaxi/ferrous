@@ -716,6 +716,11 @@ impl GaplessQueue {
                 return None;
             }
             if !self.row_failed(cursor.index) {
+                if !rules.shuffle_enabled && cursor.index == from.index {
+                    // Past failed rows, back to the row it started from,
+                    // which plays again as it came to play.
+                    cursor.pick = from.pick;
+                }
                 return Some(cursor);
             }
         }
@@ -1024,6 +1029,25 @@ mod tests {
         assert_eq!(queue.current_pick(), TrackPick::Shuffle);
         queue.set_repeat_mode(RepeatMode::All);
         assert_eq!(queue.previous_manual().unwrap().index, 0);
+        assert_eq!(queue.current_pick(), TrackPick::Shuffle);
+
+        // So does one whose other rows failed: the search steps past them
+        // back to it.
+        let (mut queue, paths) = queue_of(3);
+        queue.set_shuffle_enabled(true);
+        let picked = queue.next_manual().unwrap().index;
+        for (row, path) in paths.iter().enumerate() {
+            if row != picked {
+                queue.mark_failed(path.clone());
+            }
+        }
+        queue.set_shuffle_enabled(false);
+        queue.set_repeat_mode(RepeatMode::All);
+        let replay = queue.stage_natural(gapless).unwrap();
+        assert_eq!(replay.path, paths[picked]);
+        assert_eq!(replay.pick, TrackPick::Shuffle);
+        assert_eq!(queue.set_repeat_mode(RepeatMode::One), None);
+        queue.commit_gapless().unwrap();
         assert_eq!(queue.current_pick(), TrackPick::Shuffle);
     }
 
