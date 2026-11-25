@@ -277,6 +277,11 @@ void KeyboardShortcutsSmokeTest::keptKeysAndTypedKeysAreTold() {
     QCOMPARE(role("Return"), QStringLiteral("activate"));
     QCOMPARE(role("Enter"), QStringLiteral("activate"));
     QCOMPARE(StandardKeys::keptKeyRole(QKeySequence(Qt::KeypadModifier | Qt::Key_Enter)), QStringLiteral("activate"));
+    // Ctrl+Enter adds the library's and search's selection to the queue.
+    QCOMPARE(role("Ctrl+Return"), QStringLiteral("queue"));
+    QCOMPARE(role("Ctrl+Enter"), QStringLiteral("queue"));
+    QCOMPARE(StandardKeys::keptKeyRole(QKeySequence(Qt::ControlModifier | Qt::KeypadModifier | Qt::Key_Enter)),
+             QStringLiteral("queue"));
     QCOMPARE(role("Delete"), QStringLiteral("delete"));
     QCOMPARE(role("Backspace"), QStringLiteral("delete"));
     QCOMPARE(role("Tab"), QStringLiteral("focus"));
@@ -291,8 +296,9 @@ void KeyboardShortcutsSmokeTest::keptKeysAndTypedKeysAreTold() {
     QCOMPARE(role("Shift+F10"), QStringLiteral("contextMenu"));
     QCOMPARE(role("Ctrl+M"), QStringLiteral("menuBar"));
     // With modifiers, the window leaves them to the shortcuts.
-    for (const char *key : {"Ctrl+Return", "Shift+Delete", "Ctrl+Tab", "Shift+Esc", "Shift+Left", "Ctrl+Up",
-                            "Alt+Home", "Ctrl+Shift+M", "F10", "M", "Space", "Ctrl+Alt+,"}) {
+    for (const char *key : {"Ctrl+Shift+Return", "Alt+Return", "Meta+Enter", "Shift+Delete", "Ctrl+Tab",
+                            "Shift+Esc", "Shift+Left", "Ctrl+Up", "Alt+Home", "Ctrl+Shift+M", "F10", "M", "Space",
+                            "Ctrl+Alt+,"}) {
         QVERIFY2(role(key).isEmpty(), key);
     }
     QVERIFY(role("Ctrl+K, Delete").isEmpty());
@@ -568,7 +574,10 @@ void KeyboardShortcutsSmokeTest::keysTheWindowKeepsAreRefused() {
                              Kept{Qt::Key_Home, Qt::NoModifier, "moves the selection"},
                              Kept{Qt::Key_M, Qt::ControlModifier, "menu bar"},
                              Kept{Qt::Key_F10, Qt::ShiftModifier, "context menu"},
-                             Kept{Qt::Key_Return, Qt::NoModifier, "default button"}}) {
+                             Kept{Qt::Key_Return, Qt::NoModifier, "default button"},
+                             Kept{Qt::Key_Return, Qt::ControlModifier, "adds the selection to the queue"},
+                             Kept{Qt::Key_Enter, Qt::ControlModifier | Qt::KeypadModifier,
+                                  "adds the selection to the queue"}}) {
         QVERIFY(fixture.capture("keyboardShortcutsShortcutEditor", kept.key, kept.modifiers));
         QVERIFY2(refusal->isVisible(), kept.says);
         QVERIFY2(refusal->property("text").toString().contains(QString::fromLatin1(kept.says)),
@@ -1050,7 +1059,7 @@ void KeyboardShortcutsSmokeTest::namesAndKeysAreQuotedAsInTheOtherDialogs() {
     QCOMPARE(fixture.item("keyboardShortcutsEditorTitle")->property("text").toString(),
              QStringLiteral("Shortcuts for “Play/Pause”"));
     // One key of each role that is kept, and the album art viewer's.
-    for (const char *key : {"Return", "Del", "Tab", "Esc", "Home", "Shift+F10", "Ctrl+M", "I"}) {
+    for (const char *key : {"Return", "Ctrl+Return", "Del", "Tab", "Esc", "Home", "Shift+F10", "Ctrl+M", "I"}) {
         QVariant refusal;
         QVERIFY(QMetaObject::invokeMethod(fixture.dialog, "refusalFor", Q_RETURN_ARG(QVariant, refusal),
                                           Q_ARG(QVariant, QVariant::fromValue(fixture.action("playPauseAction"))),

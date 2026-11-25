@@ -47,11 +47,13 @@ public:
     // What the window, its lists or its text fields keep `sequence` for,
     // so that no action may take it, as a code the shortcut editor words:
     // "activate" for Enter, which plays a list's selection and presses a
-    // dialog's default button; "delete" for Delete and Backspace; "focus"
-    // for Tab and Shift+Tab; "cancel" for Escape; "navigate" for the arrow,
-    // Page, Home and End keys alone; "contextMenu" for Menu and Shift+F10;
-    // "menuBar" for Ctrl+M, which shows KDE's menu bar. Empty for a key an
-    // action may take, and for a sequence of more than one key.
+    // dialog's default button; "queue" for Ctrl+Enter, which adds the
+    // library's or search's selection to the queue; "delete" for Delete and
+    // Backspace; "focus" for Tab and Shift+Tab; "cancel" for Escape;
+    // "navigate" for the arrow, Page, Home and End keys alone;
+    // "contextMenu" for Menu and Shift+F10; "menuBar" for Ctrl+M, which
+    // shows KDE's menu bar. Empty for a key an action may take, and for a
+    // sequence of more than one key.
     Q_INVOKABLE static QString keptKeyRole(const QVariant &sequence);
 
     // Whether `sequence` is one key that types a character, with Shift or

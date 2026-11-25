@@ -871,6 +871,29 @@ QtObject {
         root.playRowItems(root.libraryModel.rowDataForRow(index))
     }
 
+    // What Ctrl+Enter does: as activateSelection, but adds the rows to the
+    // end of the queue, leaving playback and the selection as they are.
+    function queueCurrentSelection() {
+        const index = root.currentSelectionIndex()
+        if (index < 0) {
+            return
+        }
+        if (root.selectedSelectionKey.length === 0) {
+            root.selectIndex(index)
+        }
+        root.appendRowItems(root.libraryModel.rowDataForRow(index))
+    }
+
+    // Whether `event` is Ctrl+Enter, on either Enter key, with no other
+    // modifier: the library's key for adding its selection to the queue.
+    function isQueueKey(event) {
+        if (event.key !== Qt.Key_Return && event.key !== Qt.Key_Enter) {
+            return false
+        }
+        const modifiers = event.modifiers & ~Qt.KeypadModifier
+        return modifiers === Qt.ControlModifier
+    }
+
     function typeAheadSearch(prefix) {
         if (prefix.length === 0) {
             return false
@@ -908,6 +931,16 @@ QtObject {
 
     function handleKeyPress(event) {
         if (root.tryCaptureGlobalSearchPrefill(event)) {
+            return
+        }
+        if (root.isQueueKey(event)) {
+            if (root.libraryModel.count > 0) {
+                // Where the user goes with the keyboard wins over a row
+                // still being revealed, as with Enter.
+                root.cancelPendingReveal()
+                root.queueCurrentSelection()
+                event.accepted = true
+            }
             return
         }
         if ((event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)) !== 0) {
