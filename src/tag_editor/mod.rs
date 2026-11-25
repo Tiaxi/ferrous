@@ -15,8 +15,8 @@ use crate::edit_failure::{EditFailure, EditStep, FailureCause};
 use crate::file_edit_lock;
 use crate::frontend_bridge::library_tree::{album_row_key, section_row_key};
 use crate::library::{
-    read_library_snapshot_from_db, rename_indexed_metadata_paths, LibraryRoot, LibrarySnapshot,
-    TrackRefresh,
+    read_library_snapshot_from_db, rename_indexed_metadata_paths, FailedRename,
+    FileAfterFailedRename, LibraryRoot, LibrarySnapshot, TrackRefresh,
 };
 use crate::panic_guard;
 use crate::raw_audio::{
@@ -263,8 +263,9 @@ pub(crate) struct RenameResultRow {
     pub(crate) new_path: Option<String>,
     pub(crate) ok: bool,
     pub(crate) error: Option<String>,
-    /// Why the batch's rename stopped, where the failure is sure of it. It
-    /// is on each of the batch's files, as is the error (#741).
+    /// Why the file was not renamed, where that is sure: the system's
+    /// refusal for the file the batch stopped at, and for the others what
+    /// became of them when it stopped (#741).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) cause: Option<FailureCause>,
 }
@@ -1157,18 +1158,8 @@ pub(crate) fn rename_rows_with_refresh(request: RenameRequest) -> (RenameRespons
 
     let refresh = match rename_indexed_metadata_paths(&renames) {
         Ok(refresh) => refresh,
-        Err(failure) => {
-            let cause = failure.cause();
-            let error = String::from(failure);
-            for (old_path, new_path) in renamed_pairs {
-                results.push(RenameResultRow {
-                    path: old_path,
-                    new_path: Some(new_path),
-                    ok: false,
-                    error: Some(error.clone()),
-                    cause,
-                });
-            }
+        Err(failed) => {
+            results.extend(failed_rename_results(renamed_pairs, &failed));
             edit_log::log_renames(&results);
             let response = RenameResponse {
                 results,
@@ -1208,6 +1199,81 @@ pub(crate) fn rename_rows_with_refresh(request: RenameRequest) -> (RenameRespons
         error: None,
     };
     (response, refresh)
+}
+
+/// The results of renaming `renamed_pairs`, the batch that `failed`
+/// stopped: the file it stopped at has the error, and the others say what
+/// became of them (#741). A batch that stopped at no file's rename, but at
+/// the library's, gives each file the error.
+fn failed_rename_results(
+    renamed_pairs: Vec<(String, String)>,
+    failed: &FailedRename,
+) -> Vec<RenameResultRow> {
+    let stopped_at = failed
+        .failed_file
+        .and_then(|index| renamed_pairs.get(index))
+        .map(|(old_path, _)| old_path.clone());
+    let error = failed.error.to_string();
+    renamed_pairs
+        .into_iter()
+        .zip(&failed.files)
+        .enumerate()
+        .map(|(index, ((path, new_path), file))| {
+            let (error, cause) = match &stopped_at {
+                Some(stopped_at) if failed.failed_file != Some(index) => {
+                    stopped_elsewhere_result(stopped_at, file)
+                }
+                _ => (
+                    match file {
+                        FileAfterFailedRename::Unchanged => error.clone(),
+                        FileAfterFailedRename::Restored => {
+                            format!("{error}; the file keeps its original name")
+                        }
+                        FileAfterFailedRename::Stranded(location) => format!(
+                            "{error}; giving the file its original name back failed; \
+                             it is now at {}",
+                            location.to_string_lossy()
+                        ),
+                    },
+                    failed.error.cause(),
+                ),
+            };
+            RenameResultRow {
+                path,
+                new_path: Some(new_path),
+                ok: false,
+                error: Some(error),
+                cause,
+            }
+        })
+        .collect()
+}
+
+/// The error and cause of a file whose batch stopped at the rename of
+/// `stopped_at`, another file's, which left it as `file` says.
+fn stopped_elsewhere_result(
+    stopped_at: &str,
+    file: &FileAfterFailedRename,
+) -> (String, Option<FailureCause>) {
+    let (error, cause) = match file {
+        FileAfterFailedRename::Unchanged => (
+            format!("not renamed, because renaming stopped at {stopped_at}"),
+            FailureCause::RenameStoppedElsewhere,
+        ),
+        FileAfterFailedRename::Restored => (
+            format!("renamed back to its original name, because renaming stopped at {stopped_at}"),
+            FailureCause::RenameUndone,
+        ),
+        FileAfterFailedRename::Stranded(location) => (
+            format!(
+                "renaming stopped at {stopped_at}, and giving this file its original name \
+                 back failed; it is now at {}",
+                location.to_string_lossy()
+            ),
+            FailureCause::RenameNotUndone,
+        ),
+    };
+    (error, Some(cause))
 }
 
 pub(crate) fn serialize_load_response(response: &LoadResponse) -> Result<Vec<u8>, String> {

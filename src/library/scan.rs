@@ -1751,14 +1751,16 @@ impl DiskRenameJournal {
         });
     }
 
-    /// Undoes the recorded renames, newest first, and adds the outcome to
-    /// `error`. A file whose earlier name is taken again stays where it is
-    /// rather than replacing the file that now has that name.
-    fn restore(mut self, error: String) -> String {
-        if self.moves.is_empty() {
-            return error;
+    /// Undoes the recorded renames, newest first, after `error` stopped the
+    /// batch at `failed_file`, if it stopped at one. A file whose earlier
+    /// name is taken again stays where it is rather than replacing the file
+    /// that now has that name.
+    fn restore(mut self, error: EditFailure, failed_file: Option<usize>) -> FailedRename {
+        let mut moved = vec![false; self.originals.len()];
+        for DiskMove { file, .. } in &self.moves {
+            moved[*file] = true;
         }
-        let mut failures = Vec::new();
+        let mut restore_failures = Vec::new();
         while let Some(DiskMove { file, from, to }) = self.moves.pop() {
             if self.locations[file] != to {
                 // Undoing a later rename of this file failed.
@@ -1783,36 +1785,131 @@ impl DiskRenameJournal {
             };
             match restored {
                 Ok(()) => self.locations[file] = from,
-                Err(failure) => failures.push(failure),
+                Err(failure) => restore_failures.push(failure),
             }
         }
-        if failures.is_empty() {
-            return format!("{error}; the files keep their original names");
+        let files = moved
+            .into_iter()
+            .zip(self.originals.iter().zip(self.locations))
+            .map(|(moved, (original, location))| {
+                if !moved {
+                    FileAfterFailedRename::Unchanged
+                } else if *original == location {
+                    FileAfterFailedRename::Restored
+                } else {
+                    FileAfterFailedRename::Stranded(location)
+                }
+            })
+            .collect();
+        FailedRename {
+            error,
+            failed_file,
+            originals: self.originals,
+            files,
+            restore_failures,
         }
-        let (stranded, kept): (Vec<_>, Vec<_>) = self
+    }
+}
+
+/// What became of a file of a batch rename that failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FileAfterFailedRename {
+    /// It was not renamed.
+    Unchanged,
+    /// It was renamed, then given its original name back.
+    Restored,
+    /// It was renamed, and giving it its original name back failed: it is
+    /// at this path.
+    Stranded(PathBuf),
+}
+
+/// A batch rename that failed, once the files it renamed were put back
+/// where they could be. The library's rows are unchanged.
+#[derive(Debug)]
+pub(crate) struct FailedRename {
+    /// What stopped the batch.
+    pub(crate) error: EditFailure,
+    /// The file the batch stopped at, by its index in the batch, where it
+    /// stopped at a file's rename rather than, say, at the library's.
+    pub(crate) failed_file: Option<usize>,
+    originals: Vec<PathBuf>,
+    /// What became of each file of the batch, in its order.
+    pub(crate) files: Vec<FileAfterFailedRename>,
+    /// Why files could not be given their names back.
+    restore_failures: Vec<String>,
+}
+
+impl FailedRename {
+    /// `error`, which stopped `renames` before any file was renamed.
+    fn before_any_rename(renames: &[(PathBuf, PathBuf)], error: EditFailure) -> Self {
+        Self {
+            error,
+            failed_file: None,
+            originals: renames
+                .iter()
+                .map(|(old_path, _)| old_path.clone())
+                .collect(),
+            files: vec![FileAfterFailedRename::Unchanged; renames.len()],
+            restore_failures: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl FailedRename {
+    /// `error`, which stopped `renames` at `failed_file`, leaving them as
+    /// `files` says, with no reason given for a file not put back.
+    pub(crate) fn for_test(
+        renames: &[(PathBuf, PathBuf)],
+        error: EditFailure,
+        failed_file: Option<usize>,
+        files: Vec<FileAfterFailedRename>,
+    ) -> Self {
+        Self {
+            files,
+            failed_file,
+            ..Self::before_any_rename(renames, error)
+        }
+    }
+}
+
+/// The error and what became of the batch's files, in one message.
+impl std::fmt::Display for FailedRename {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.error)?;
+        if self
+            .files
+            .iter()
+            .all(|file| *file == FileAfterFailedRename::Unchanged)
+        {
+            return Ok(());
+        }
+        if self.restore_failures.is_empty() {
+            return f.write_str("; the files keep their original names");
+        }
+        let stranded = self
             .originals
             .iter()
-            .zip(&self.locations)
-            .partition(|(original, location)| original != location);
-        let stranded = stranded
-            .into_iter()
-            .map(|(original, location)| {
-                format!(
+            .zip(&self.files)
+            .filter_map(|(original, file)| match file {
+                FileAfterFailedRename::Stranded(location) => Some(format!(
                     "{} is now at {}",
                     original.to_string_lossy(),
                     location.to_string_lossy()
-                )
+                )),
+                _ => None,
             })
             .collect::<Vec<_>>();
-        let mut message = format!(
-            "{error}; restoring the original file names failed ({}); {}",
-            failures.join("; "),
+        write!(
+            f,
+            "; restoring the original file names failed ({}); {}",
+            self.restore_failures.join("; "),
             stranded.join("; ")
-        );
-        if !kept.is_empty() {
-            message.push_str("; the other files keep their original names");
+        )?;
+        if stranded.len() < self.files.len() {
+            f.write_str("; the other files keep their original names")?;
         }
-        message
+        Ok(())
     }
 }
 
@@ -1982,16 +2079,20 @@ fn is_case_only_rename(current: &Path, target: &Path) -> bool {
 /// new paths and which reports the files that cannot be read to the user.
 pub(crate) fn rename_indexed_metadata_paths(
     renames: &[(PathBuf, PathBuf)],
-) -> Result<TrackRefresh, EditFailure> {
-    let mut conn = open_library_db().map_err(|e| format!("failed to open library db: {e}"))?;
-    init_schema(&conn).map_err(|e| format!("failed to initialize library db schema: {e}"))?;
+) -> Result<TrackRefresh, FailedRename> {
+    let before_any_rename =
+        |error: String| FailedRename::before_any_rename(renames, EditFailure::from(error));
+    let mut conn = open_library_db()
+        .map_err(|e| before_any_rename(format!("failed to open library db: {e}")))?;
+    init_schema(&conn)
+        .map_err(|e| before_any_rename(format!("failed to initialize library db schema: {e}")))?;
     rename_indexed_metadata_paths_in_conn(&mut conn, renames)
 }
 
 fn rename_indexed_metadata_paths_in_conn(
     conn: &mut Connection,
     renames: &[(PathBuf, PathBuf)],
-) -> Result<TrackRefresh, EditFailure> {
+) -> Result<TrackRefresh, FailedRename> {
     rename_with_journal(
         conn,
         renames,
@@ -2005,35 +2106,46 @@ fn rename_with_journal(
     renames: &[(PathBuf, PathBuf)],
     mut journal: DiskRenameJournal,
     covers: Option<&EmbeddedCoverCache>,
-) -> Result<TrackRefresh, EditFailure> {
+) -> Result<TrackRefresh, FailedRename> {
     // Take the write lock before any file moves. A deferred transaction that
     // reads first cannot wait for the lock when it then writes: SQLite fails
     // it at once with "database is locked" if another writer holds the lock.
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|e| format!("failed to start rename transaction: {e}"))?;
+        .map_err(|e| {
+            FailedRename::before_any_rename(
+                renames,
+                format!("failed to start rename transaction: {e}").into(),
+            )
+        })?;
     let updated = apply_disk_renames(renames, &mut journal)
-        .and_then(|()| Ok(update_renamed_track_rows(&tx, renames, covers)?));
+        .map_err(|(file, error)| (Some(file), error))
+        .and_then(|()| {
+            update_renamed_track_rows(&tx, renames, covers).map_err(|e| (None, e.into()))
+        });
     let committed = match updated {
-        Ok(refreshed) => tx
-            .commit()
-            .map(|()| refreshed)
-            .map_err(|e| format!("failed to finalize rename transaction: {e}").into()),
+        Ok(refreshed) => tx.commit().map(|()| refreshed).map_err(|e| {
+            (
+                None,
+                format!("failed to finalize rename transaction: {e}").into(),
+            )
+        }),
         Err(error) => {
             drop(tx);
             Err(error)
         }
     };
     // A failed transaction has rolled back by now; put the files back to match its rows.
-    committed.map_err(|error: EditFailure| error.map_message(|message| journal.restore(message)))
+    committed.map_err(|(failed_file, error)| journal.restore(error, failed_file))
 }
 
 /// Renames the files on disk, recording each rename in `journal`. Renames
-/// whose targets are other files' sources go through temporary names.
+/// whose targets are other files' sources go through temporary names. A
+/// failure stops at the file whose rename failed, by its index.
 fn apply_disk_renames(
     renames: &[(PathBuf, PathBuf)],
     journal: &mut DiskRenameJournal,
-) -> Result<(), EditFailure> {
+) -> Result<(), (usize, EditFailure)> {
     let source_paths = renames
         .iter()
         .map(|(old_path, _)| old_path.clone())
@@ -2046,77 +2158,113 @@ fn apply_disk_renames(
     if requires_staged_rename {
         let mut staged = Vec::<(usize, PathBuf)>::new();
         for (index, (old_path, new_path)) in renames.iter().enumerate() {
-            if old_path == new_path {
-                continue;
-            }
-            if !claimed_targets.insert(new_path.clone()) {
-                return Err(format!(
-                    "multiple files resolve to the same rename target {}",
-                    new_path.to_string_lossy()
-                )
-                .into());
-            }
-            if !old_path.exists() && path_entry_exists(new_path) {
-                continue;
-            }
-            if path_entry_exists(new_path) && !path_matches_any_source(&source_paths, new_path) {
-                return Err(format!(
-                    "refusing to overwrite existing file {}",
-                    new_path.to_string_lossy()
-                )
-                .into());
-            }
-            let temp_path = build_temp_rename_path(old_path);
-            journal
-                .rename(index, old_path, &temp_path)
-                .map_err(|e| rename_failure("stage rename", old_path, &temp_path, &e))?;
-            staged.push((index, temp_path));
+            let temp_path = stage_disk_rename(
+                index,
+                old_path,
+                new_path,
+                &source_paths,
+                &mut claimed_targets,
+                journal,
+            )
+            .map_err(|error| (index, error))?;
+            staged.extend(temp_path.map(|temp_path| (index, temp_path)));
         }
 
         for (index, temp_path) in staged {
             let (old_path, new_path) = &renames[index];
             if path_entry_exists(new_path) && !path_matches_any_source(&source_paths, new_path) {
-                return Err(format!(
-                    "refusing to overwrite existing file {}",
-                    new_path.to_string_lossy()
-                )
-                .into());
+                return Err((index, refusal_to_overwrite(new_path)));
             }
-            journal.finalize(index, &temp_path, new_path, old_path)?;
+            journal
+                .finalize(index, &temp_path, new_path, old_path)
+                .map_err(|error| (index, error))?;
         }
     } else {
         for (index, (old_path, new_path)) in renames.iter().enumerate() {
-            if old_path == new_path {
-                continue;
-            }
-            if !claimed_targets.insert(new_path.clone()) {
-                return Err(format!(
-                    "multiple files resolve to the same rename target {}",
-                    new_path.to_string_lossy()
-                )
-                .into());
-            }
-            if !old_path.exists() && path_entry_exists(new_path) {
-                continue;
-            }
-            if !path_entry_exists(new_path) {
-                journal
-                    .rename(index, old_path, new_path)
-                    .map_err(|e| rename_failure("rename", old_path, new_path, &e))?;
-            } else if paths_refer_to_same_file(old_path, new_path) {
-                // The new name is another case of the old one on a
-                // case-insensitive filesystem.
-                journal.rename_through_temp(index, old_path, new_path)?;
-            } else {
-                return Err(format!(
-                    "refusing to overwrite existing file {}",
-                    new_path.to_string_lossy()
-                )
-                .into());
-            }
+            apply_disk_rename(index, old_path, new_path, &mut claimed_targets, journal)
+                .map_err(|error| (index, error))?;
         }
     }
     Ok(())
+}
+
+fn refusal_to_overwrite(path: &Path) -> EditFailure {
+    format!(
+        "refusing to overwrite existing file {}",
+        path.to_string_lossy()
+    )
+    .into()
+}
+
+fn claim_rename_target(
+    claimed_targets: &mut HashSet<PathBuf>,
+    new_path: &Path,
+) -> Result<(), EditFailure> {
+    if claimed_targets.insert(new_path.to_path_buf()) {
+        return Ok(());
+    }
+    Err(format!(
+        "multiple files resolve to the same rename target {}",
+        new_path.to_string_lossy()
+    )
+    .into())
+}
+
+/// Moves the `index`th file to a temporary name, for a batch some of whose
+/// targets are other files' sources, and returns that name; none for a
+/// file that keeps its name or was already renamed.
+fn stage_disk_rename(
+    index: usize,
+    old_path: &Path,
+    new_path: &Path,
+    source_paths: &HashSet<PathBuf>,
+    claimed_targets: &mut HashSet<PathBuf>,
+    journal: &mut DiskRenameJournal,
+) -> Result<Option<PathBuf>, EditFailure> {
+    if old_path == new_path {
+        return Ok(None);
+    }
+    claim_rename_target(claimed_targets, new_path)?;
+    if !old_path.exists() && path_entry_exists(new_path) {
+        return Ok(None);
+    }
+    if path_entry_exists(new_path) && !path_matches_any_source(source_paths, new_path) {
+        return Err(refusal_to_overwrite(new_path));
+    }
+    let temp_path = build_temp_rename_path(old_path);
+    journal
+        .rename(index, old_path, &temp_path)
+        .map_err(|e| rename_failure("stage rename", old_path, &temp_path, &e))?;
+    Ok(Some(temp_path))
+}
+
+/// Renames the `index`th file, for a batch none of whose targets are other
+/// files' sources.
+fn apply_disk_rename(
+    index: usize,
+    old_path: &Path,
+    new_path: &Path,
+    claimed_targets: &mut HashSet<PathBuf>,
+    journal: &mut DiskRenameJournal,
+) -> Result<(), EditFailure> {
+    if old_path == new_path {
+        return Ok(());
+    }
+    claim_rename_target(claimed_targets, new_path)?;
+    if !old_path.exists() && path_entry_exists(new_path) {
+        return Ok(());
+    }
+    if !path_entry_exists(new_path) {
+        journal
+            .rename(index, old_path, new_path)
+            .map_err(|e| rename_failure("rename", old_path, new_path, &e))
+    } else if paths_refer_to_same_file(old_path, new_path) {
+        // The new name is another case of the old one on a
+        // case-insensitive filesystem.
+        journal.rename_through_temp(index, old_path, new_path)
+    } else {
+        Err(refusal_to_overwrite(new_path))
+    }
 }
 
 struct RenamedTrackRow<'a> {
@@ -8194,8 +8342,13 @@ mod tests {
         journal.rename(0, &paths[0], &moved).expect("rename");
         write_stub(&paths[0], b"newcomer");
 
-        let error = journal.restore("injected failure".to_string());
+        let failed = journal.restore("injected failure".to_string().into(), Some(0));
 
+        assert_eq!(
+            failed.files,
+            [FileAfterFailedRename::Stranded(moved.clone())]
+        );
+        let error = failed.to_string();
         assert!(
             error.starts_with("injected failure; restoring the original file names failed ("),
             "{error}"
@@ -8338,9 +8491,10 @@ mod tests {
         assert_eq!(file_names(&dir), ["01 - ONE.flac"]);
         assert_eq!(fs::read(&renamed).expect("read"), bytes);
         assert_eq!(journal.moves.len(), 2);
-        let error = journal.restore("injected failure".to_string());
+        let failed = journal.restore("injected failure".to_string().into(), Some(0));
+        assert_eq!(failed.files, [FileAfterFailedRename::Restored]);
         assert_eq!(
-            error,
+            failed.to_string(),
             "injected failure; the files keep their original names"
         );
         assert_eq!(file_names(&dir), ["01 - One.flac"]);

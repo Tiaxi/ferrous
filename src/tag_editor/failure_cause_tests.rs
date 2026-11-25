@@ -245,14 +245,30 @@ fn a_rename_in_a_read_only_folder_is_a_permission() {
 
         let response = rename(&paths);
 
+        // The first file's rename fails, and the second is left as it was.
         assert_eq!(response.results.len(), 2);
-        for (path, result) in paths.iter().zip(&response.results) {
-            assert!(!result.ok);
+        for path in &paths {
             assert!(path.exists());
-            assert_eq!(result.cause, Some(FailureCause::RenameNotPermitted));
-            let error = result.error.as_deref().expect("error");
-            assert!(error.starts_with(action), "{error}");
         }
+        let failed = &response.results[0];
+        assert!(!failed.ok);
+        assert_eq!(failed.path, paths[0].to_string_lossy());
+        assert_eq!(failed.cause, Some(FailureCause::RenameNotPermitted));
+        let error = failed.error.as_deref().expect("error");
+        assert!(error.starts_with(action), "{error}");
+        let left = &response.results[1];
+        assert!(!left.ok);
+        assert_eq!(left.cause, Some(FailureCause::RenameStoppedElsewhere));
+        assert_eq!(
+            left.error.as_deref(),
+            Some(
+                format!(
+                    "not renamed, because renaming stopped at {}",
+                    paths[0].display()
+                )
+                .as_str()
+            )
+        );
         let bytes = serialize_rename_response(&response).expect("serialize");
         let sent: Value = serde_json::from_slice(&bytes).expect("json");
         assert_eq!(sent["results"][0]["cause"], "renameNotPermitted");
@@ -260,7 +276,7 @@ fn a_rename_in_a_read_only_folder_is_a_permission() {
 }
 
 #[test]
-fn a_rename_put_back_keeps_the_cause_that_stopped_it() {
+fn a_failed_rename_blames_its_file_and_tells_what_became_of_the_others() {
     if !permissions_hold() {
         return;
     }
@@ -268,26 +284,50 @@ fn a_rename_put_back_keeps_the_cause_that_stopped_it() {
     let paths = [
         fixture.track("writable/a.flac", "One", "1"),
         fixture.track("read-only/b.flac", "Two", "2"),
+        fixture.track("writable/c.flac", "Three", "3"),
     ];
     let folder = fixture.dir.join("read-only");
     fixture.restrict(&folder, 0o555);
 
     let response = rename(&paths);
 
-    // The batch fails as a whole, with one error (#741), so the writable
-    // folder's file gets a cause that names neither a file nor a folder.
-    let error = format!(
-        "failed to rename {} to {}: {}; the files keep their original names",
-        paths[1].display(),
-        folder.join("02 - Two.flac").display(),
-        denied()
-    );
-    assert_eq!(response.results.len(), 2);
-    for (path, result) in paths.iter().zip(&response.results) {
+    // The first file is renamed, the second's rename fails, and the batch
+    // stops there: the first is given its name back, the third is left as
+    // it was (#741).
+    for path in &paths {
         assert!(path.exists());
-        assert_eq!(result.error.as_deref(), Some(error.as_str()));
-        assert_eq!(result.cause, Some(FailureCause::RenameNotPermitted));
     }
+    let stopped_at = paths[1].display();
+    let expected = [
+        (
+            format!("renamed back to its original name, because renaming stopped at {stopped_at}"),
+            FailureCause::RenameUndone,
+        ),
+        (
+            format!(
+                "failed to rename {stopped_at} to {}: {}",
+                folder.join("02 - Two.flac").display(),
+                denied()
+            ),
+            FailureCause::RenameNotPermitted,
+        ),
+        (
+            format!("not renamed, because renaming stopped at {stopped_at}"),
+            FailureCause::RenameStoppedElsewhere,
+        ),
+    ];
+    assert_eq!(response.results.len(), expected.len());
+    assert!(response.successful_paths.is_empty());
+    for ((path, result), (error, cause)) in paths.iter().zip(&response.results).zip(&expected) {
+        assert_eq!(result.path, path.to_string_lossy());
+        assert!(!result.ok, "{result:?}");
+        assert_eq!(result.error.as_deref(), Some(error.as_str()));
+        assert_eq!(result.cause, Some(*cause));
+    }
+    let bytes = serialize_rename_response(&response).expect("serialize");
+    let sent: Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(sent["results"][0]["cause"], "renameUndone");
+    assert_eq!(sent["results"][2]["cause"], "renameStoppedElsewhere");
 }
 
 #[test]

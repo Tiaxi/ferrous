@@ -36,7 +36,7 @@ pub(crate) use scan::{
     is_audio_track_file, is_supported_audio, read_external_track, read_track_info,
     refresh_cover_paths_for_tracks, refresh_cover_paths_for_tracks_with_override,
     refresh_indexed_metadata_for_paths, rename_indexed_metadata_paths, track_file_fingerprint,
-    TrackRefresh,
+    FailedRename, FileAfterFailedRename, TrackRefresh,
 };
 pub(crate) use scan::{read_library_snapshot_from_db, ExternalReadFailures, ExternalTrackCache};
 pub use search_tags::SearchTags;

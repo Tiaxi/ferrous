@@ -9,8 +9,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection};
 
-use super::{load_rows_for_paths, preview_rename_rows, rename_rows, RenameRequest, RenameResponse};
-use crate::library::index_tracks_for_test;
+use super::{
+    failed_rename_results, load_rows_for_paths, preview_rename_rows, rename_rows, RenameRequest,
+    RenameResponse,
+};
+use crate::edit_failure::{EditFailure, EditStep, FailureCause};
+use crate::library::{index_tracks_for_test, FailedRename, FileAfterFailedRename};
 use crate::tag_write::write_test_flac;
 
 /// `(rowid, path, root_path, title, track_no)` for the rows under one root.
@@ -248,14 +252,17 @@ fn a_failed_database_update_puts_swapped_files_back() {
         .expect("drop failure trigger");
     assert!(response.successful_paths.is_empty());
     assert_eq!(response.results.len(), 2);
+    // The batch stopped at the library's update, not at a file, so each
+    // file has the error and says it keeps its name.
     for result in &response.results {
         assert!(!result.ok, "{result:?}");
         let error = result.error.as_deref().unwrap_or_default();
         assert!(error.contains("injected failure"), "{error}");
         assert!(
-            error.ends_with("the files keep their original names"),
+            error.ends_with("the file keeps its original name"),
             "{error}"
         );
+        assert_eq!(result.cause, None);
     }
     assert_eq!(file_names(&dir), ["01 - One.flac", "02 - Two.flac"]);
     for (path, original) in paths.iter().zip(&bytes) {
@@ -458,4 +465,69 @@ fn a_rename_confirmed_from_a_preview_runs_only_while_its_plan_holds() {
     assert_renamed(&response, std::slice::from_ref(&renamed));
     assert_eq!(file_names(&dir), ["01 - One.flac", "y.flac"]);
     fs::remove_dir_all(dir).expect("cleanup");
+}
+
+#[test]
+fn each_file_of_a_stopped_rename_says_what_became_of_it() {
+    let pair = |name: &str| {
+        (
+            PathBuf::from(format!("/fixture/{name}.flac")),
+            PathBuf::from(format!("/fixture/{name} renamed.flac")),
+        )
+    };
+    let renames = ["a", "b", "c", "d"].map(pair);
+    let denied = std::io::Error::from_raw_os_error(libc::EACCES);
+    let error = EditFailure::io(EditStep::Rename, &denied, "denied".to_string());
+    let stranded = PathBuf::from("/fixture/.ferrous-rename-1.tmp");
+    let failed = FailedRename::for_test(
+        &renames,
+        error,
+        Some(2),
+        vec![
+            FileAfterFailedRename::Restored,
+            FileAfterFailedRename::Stranded(renames[1].1.clone()),
+            FileAfterFailedRename::Stranded(stranded),
+            FileAfterFailedRename::Unchanged,
+        ],
+    );
+    let pairs = renames
+        .iter()
+        .map(|(old, new)| {
+            (
+                old.to_string_lossy().into_owned(),
+                new.to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+
+    let results = failed_rename_results(pairs, &failed);
+
+    let expected = [
+        (
+            "renamed back to its original name, because renaming stopped at /fixture/c.flac",
+            Some(FailureCause::RenameUndone),
+        ),
+        (
+            "renaming stopped at /fixture/c.flac, and giving this file its original name back \
+             failed; it is now at /fixture/b renamed.flac",
+            Some(FailureCause::RenameNotUndone),
+        ),
+        (
+            "denied; giving the file its original name back failed; it is now at \
+             /fixture/.ferrous-rename-1.tmp",
+            Some(FailureCause::RenameNotPermitted),
+        ),
+        (
+            "not renamed, because renaming stopped at /fixture/c.flac",
+            Some(FailureCause::RenameStoppedElsewhere),
+        ),
+    ];
+    assert_eq!(results.len(), expected.len());
+    for (((old, new), result), (error, cause)) in renames.iter().zip(&results).zip(expected) {
+        assert_eq!(result.path, old.to_string_lossy());
+        assert_eq!(result.new_path.as_deref(), Some(&*new.to_string_lossy()));
+        assert!(!result.ok);
+        assert_eq!(result.error.as_deref(), Some(error));
+        assert_eq!(result.cause, cause);
+    }
 }
