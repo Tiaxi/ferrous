@@ -11,6 +11,8 @@ use crate::analysis::AnalysisCommand;
 
 pub mod clock;
 pub use clock::{monotonic_now, MonotonicTime};
+pub mod replay_gain;
+pub use replay_gain::{AppliedGain, GainSource, ReplayGainMode, ReplayGainSettings};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PlaybackState {
@@ -124,6 +126,18 @@ pub struct PlaybackSnapshot {
     /// snapshot with a new value carries where that seek landed in
     /// `position`, and follows its [`PlaybackEvent::Seeked`].
     pub seek_landed_serial: u64,
+    /// The `ReplayGain` that the output applies to the current track, once
+    /// its audio plays; `None` while `ReplayGain` is off, and before the
+    /// output plays the current track's stream.
+    pub replay_gain: Option<ReplayGainReport>,
+}
+
+/// The `ReplayGain` that the output applies to a track.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReplayGainReport {
+    pub applied: AppliedGain,
+    /// `track_token` of the track it is applied to.
+    pub track_token: u64,
 }
 
 /// New paths of renamed files, keyed by their old paths.
@@ -204,6 +218,9 @@ pub enum PlaybackCommand {
         expected: FileStamp,
     },
     SetVolume(f32),
+    /// Level tracks with their `ReplayGain` tags, from the next buffer the
+    /// output plays. Apart from the volume, which stays the user's.
+    SetReplayGain(ReplayGainSettings),
     SetRepeatMode(RepeatMode),
     SetShuffle(bool),
     /// Mute or unmute a channel.
@@ -1815,6 +1832,10 @@ mod channel_mix;
 mod collection_order;
 #[cfg(feature = "gst")]
 pub(crate) mod file_source;
+#[cfg(all(test, feature = "gst"))]
+mod gain_fixtures;
+#[cfg(feature = "gst")]
+mod gain_stage;
 #[cfg(feature = "gst")]
 pub(crate) mod parsebin_stall;
 #[cfg(all(test, feature = "gst"))]

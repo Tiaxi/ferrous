@@ -3907,6 +3907,7 @@ mod tests {
                 seek_landed_serial: 2,
                 position_sampled_at: MonotonicTime::from_nanos(1_000_000),
                 position_advancing: true,
+                replay_gain: None,
             },
             analysis: AnalysisSnapshot {
                 waveform_peaks: vec![0.1, 0.5, 0.9],
