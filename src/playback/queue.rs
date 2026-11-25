@@ -127,8 +127,12 @@ impl Cursor {
         } else {
             return false;
         };
+        if target != self.index {
+            // The only row, which plays again as it came to play, is no
+            // move in the queue's order.
+            self.pick = TrackPick::Other;
+        }
         self.index = target;
-        self.pick = TrackPick::Other;
         self.rebuild_shuffle_pool(len);
         true
     }
@@ -1000,6 +1004,27 @@ mod tests {
         assert_eq!(queue.current_pick(), TrackPick::Other);
         assert_eq!(queue.next_manual().unwrap().index, 0);
         assert_eq!(queue.current_pick(), TrackPick::Other);
+
+        // A shuffle pick left as the only row, with shuffle off, plays again
+        // as a shuffle pick too.
+        let (mut queue, _) = queue_of(3);
+        queue.set_shuffle_enabled(true);
+        let picked = queue.next_manual().unwrap().index;
+        assert_eq!(queue.current_pick(), TrackPick::Shuffle);
+        let others: Vec<usize> = (0..3).filter(|row| *row != picked).collect();
+        assert!(!queue.remove_many(&others).current_removed);
+        queue.set_shuffle_enabled(false);
+        queue.set_repeat_mode(RepeatMode::All);
+        assert_eq!(
+            queue.stage_natural(gapless).unwrap().pick,
+            TrackPick::Shuffle
+        );
+        assert_eq!(queue.set_repeat_mode(RepeatMode::One), None);
+        queue.commit_gapless().unwrap();
+        assert_eq!(queue.current_pick(), TrackPick::Shuffle);
+        queue.set_repeat_mode(RepeatMode::All);
+        assert_eq!(queue.previous_manual().unwrap().index, 0);
+        assert_eq!(queue.current_pick(), TrackPick::Shuffle);
     }
 
     #[test]
