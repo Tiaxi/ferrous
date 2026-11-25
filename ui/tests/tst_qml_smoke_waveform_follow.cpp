@@ -29,6 +29,8 @@ private slots:
     void playheadPastTheReattachPointLeavesTheView();
     void ownSeekKeepsTheViewAndOthersBringItBack_data();
     void ownSeekKeepsTheViewAndOthersBringItBack();
+    void dragHeldThroughAJumpPansAgain_data();
+    void dragHeldThroughAJumpPansAgain();
     void followPlayheadReattachesAtOnce_data();
     void followPlayheadReattachesAtOnce();
     void gstreamerSeeksAndTrackChangesBringTheViewBack();
@@ -850,6 +852,74 @@ void WaveformFollowSmokeTest::ownSeekKeepsTheViewAndOthersBringItBack() {
     }
 }
 
+void WaveformFollowSmokeTest::dragHeldThroughAJumpPansAgain_data() {
+    QTest::addColumn<QString>("event");
+    QTest::addRow("seek bar") << QStringLiteral("seek bar");
+    QTest::addRow("gapless successor") << QStringLiteral("gapless successor");
+    QTest::addRow("repeat one") << QStringLiteral("repeat one");
+    QTest::addRow("next track") << QStringLiteral("next track");
+    QTest::addRow("follow playhead") << QStringLiteral("follow playhead");
+}
+
+// A seek from elsewhere, a track change, including a gapless successor and
+// Repeat-One, or Follow Playhead brings a view still dragged back to the
+// playhead; the drag's next move detaches it again, where the drag puts it,
+// as the spectrogram's does, and the view stays there once let go (#725).
+void WaveformFollowSmokeTest::dragHeldThroughAJumpPansAgain() {
+    QFETCH(QString, event);
+    WaveformEditorItem item;
+    TestTime time;
+    playZoomed(item, time, 8.0, 30.0);
+    item.setSourcePath(QStringLiteral("/fixture/one.wav"));
+    const double span = kDuration / 8.0;
+    sendMouse(item, QEvent::MouseButtonPress, 300.0, Qt::MiddleButton, Qt::MiddleButton);
+    for (const double x : {250.0, 200.0}) {
+        sendMouse(item, QEvent::MouseMove, x, Qt::NoButton, Qt::MiddleButton);
+    }
+    QVERIFY(item.panning() && item.detached());
+    const auto put = viewOf(item);
+
+    PlaybackClock &clock = testClock(item);
+    const quint64 token = clock.state().trackToken;
+    if (event == QStringLiteral("seek bar")) {
+        clock.holdAt(10.0);
+        engineLands(item, 10.03);
+    } else if (event == QStringLiteral("follow playhead")) {
+        item.followPlayhead();
+    } else {
+        if (event == QStringLiteral("next track")) {
+            item.setSourcePath(QStringLiteral("/fixture/two.wav"));
+        }
+        PlaybackSample next;
+        next.positionSeconds = 0.0;
+        next.sampledAtNs = clock.nowNs();
+        next.advancing = true;
+        next.trackToken = token + 1;
+        clock.applySample(next, false);
+    }
+    time.advance(0.1);
+    frame(item);
+    QVERIFY(!item.detached());
+    QVERIFY(item.panning());
+    QVERIFY(sameView(viewOf(item), followingViewOf(item)));
+
+    // 50 px further left: the view where the drag puts it, half a quarter
+    // of its span on from where it was before the jump.
+    sendMouse(item, QEvent::MouseMove, 150.0, Qt::NoButton, Qt::MiddleButton);
+    QVERIFY(item.detached());
+    const auto moved = viewOf(item);
+    QVERIFY2(std::abs(moved.first - (put.first + span / 8.0)) < columnOf(item),
+             qPrintable(QStringLiteral("%1, put %2").arg(describe(moved), describe(put))));
+    time.advance(0.5);
+    frame(item);
+    QVERIFY(sameView(viewOf(item), moved));
+    sendMouse(item, QEvent::MouseButtonRelease, 150.0, Qt::MiddleButton, Qt::NoButton);
+    QVERIFY(!item.panning() && item.detached());
+    time.advance(0.5);
+    frame(item);
+    QVERIFY(sameView(viewOf(item), moved));
+}
+
 void WaveformFollowSmokeTest::followPlayheadReattachesAtOnce_data() {
     QTest::addColumn<bool>("playing");
     QTest::addRow("playing") << true;
@@ -882,7 +952,7 @@ void WaveformFollowSmokeTest::followPlayheadReattachesAtOnce() {
 // With the real bridge and the GStreamer backend, playing in real time
 // into a fake audio sink: the plot's own seek keeps a detached view as the
 // engine confirms it, and a seek from elsewhere, a gapless successor and
-// Repeat-One bring it back.
+// Repeat-One bring it back; a drag held through Repeat-One moves it again.
 void WaveformFollowSmokeTest::gstreamerSeeksAndTrackChangesBringTheViewBack() {
     // The tests' fakesink plays as fast as it can; fakeaudiosink, from the
     // GStreamer bad plugins the app requires, keeps to the clock. Without
@@ -964,6 +1034,22 @@ void WaveformFollowSmokeTest::gstreamerSeeksAndTrackChangesBringTheViewBack() {
     QTRY_VERIFY_WITH_TIMEOUT(bridge.playbackClock()->state().trackToken != token, 10000);
     QCOMPARE(bridge.currentTrackPath(), second);
     QTRY_VERIFY_WITH_TIMEOUT(!item.detached(), 10000);
+
+    // A drag held through Repeat-One moves the view again from its next
+    // move (#725).
+    bridge.seek(kTrackSeconds - 1.5);
+    QTRY_VERIFY_WITH_TIMEOUT(engineDone(), 10000);
+    sendMouse(item, QEvent::MouseButtonPress, 0.0, Qt::MiddleButton, Qt::MiddleButton);
+    sendMouse(item, QEvent::MouseMove, 100.0, Qt::NoButton, Qt::MiddleButton);
+    QVERIFY(item.panning() && item.detached());
+    const quint64 heldToken = bridge.playbackClock()->state().trackToken;
+    QTRY_VERIFY_WITH_TIMEOUT(bridge.playbackClock()->state().trackToken != heldToken, 10000);
+    QTRY_VERIFY_WITH_TIMEOUT(!item.detached(), 10000);
+    QVERIFY(item.panning());
+    sendMouse(item, QEvent::MouseMove, 200.0, Qt::NoButton, Qt::MiddleButton);
+    QVERIFY(item.detached());
+    sendMouse(item, QEvent::MouseButtonRelease, 200.0, Qt::MiddleButton, Qt::NoButton);
+    QVERIFY(!item.panning() && item.detached());
 
     // Autoscroll, which the plot's own seek leaves running, and which a
     // seek from elsewhere stops, bringing the view back.

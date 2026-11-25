@@ -4351,6 +4351,11 @@ void WaveformEditorItem::mouseMoveEvent(QMouseEvent *event) {
             startsPan = true;
             m_panOriginStart = visibleRangeLocked(nowNs).first;
             m_panOriginX = m_panPressPosition.x();
+        } else if (m_follow != Follow::Detached) {
+            // A seek from elsewhere, a track change or Follow Playhead
+            // brought the view back to the playhead while the drag went on:
+            // the drag moves it again, as the spectrogram's does.
+            detachAtLocked(nowNs, 0.5);
         }
         // The time grabbed stays under the pointer: the view moves by the
         // columns the crosshair moves by, not by the pointer's fractions of
