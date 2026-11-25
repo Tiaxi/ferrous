@@ -86,6 +86,7 @@ private slots:
     void followPlayheadBringsTheShownPlotBack();
     void seekBarMarksTheZoomedViewOfTheShownPlot();
     void fTypesInTheLibraryAndFollowsThePlayheadElsewhere();
+    void ctrlEnterQueuesInTheLibraryOverAStoredShortcut();
     void usingThePlotTakesTheFocusFromTheLibrary();
     void viewerKeysWorkAfterAPressOnItsPlot();
     void panShowsAClosedHandInThePaneAndTheViewers();
@@ -6510,6 +6511,46 @@ void TransportInputSmokeTest::fTypesInTheLibraryAndFollowsThePlayheadElsewhere()
     QTest::keyClick(window, 'f');
     QTRY_COMPARE(followed.count(), 1);
     QVERIFY(!waveform->detached());
+}
+
+// A Ctrl+Enter stored as an action's shortcut, from before the editor
+// refused it, gives way to the library's Ctrl+Enter while the library has
+// the focus, and works elsewhere, as in the queue.
+void TransportInputSmokeTest::ctrlEnterQueuesInTheLibraryOverAStoredShortcut() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    libraryModel.setExpandedKeys(QStringList{
+        QStringLiteral("artist|Artist A"),
+        QStringLiteral("album|Artist A|Album A"),
+    });
+    libraryModel.setLibraryTreeFromBinary(sampleArtistAlbumTreeBinary());
+    QTRY_COMPARE(libraryModel.rowCount(), 3);
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *stop = window->findChild<QObject *>(QStringLiteral("stopAction"));
+    QObject *library = window->findChild<QObject *>(QStringLiteral("libraryController"));
+    auto *libraryView = qvariant_cast<QQuickItem *>(window->property("libraryViewRef"));
+    auto *queueView = window->findChild<QQuickItem *>(QStringLiteral("playlistView"));
+    QVERIFY(bridge != nullptr && stop != nullptr && library != nullptr && libraryView != nullptr
+            && queueView != nullptr);
+    setPlayingTrack(bridge);
+    bridge->setProperty("keyboardShortcuts", QVariantMap{{QStringLiteral("stop"), QStringLiteral("Ctrl+Return")}});
+    QCOMPARE(stop->property("shortcut").value<QKeySequence>(), QKeySequence(QStringLiteral("Ctrl+Return")));
+    QTRY_VERIFY(stop->property("enabled").toBool());
+    QSignalSpy stopped(stop, SIGNAL(triggered(QObject *)));
+
+    QVERIFY(QMetaObject::invokeMethod(libraryView, "forceActiveFocus"));
+    QTRY_VERIFY(libraryView->hasActiveFocus());
+    QVERIFY(QMetaObject::invokeMethod(library, "selectIndex", Q_ARG(QVariant, 1)));
+    QTest::keyClick(window, Qt::Key_Return, Qt::ControlModifier);
+    QTest::keyClick(window, Qt::Key_Enter, Qt::ControlModifier | Qt::KeypadModifier);
+    QCOMPARE(stopped.count(), 0);
+
+    queueView->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(queueView->hasActiveFocus());
+    QTest::keyClick(window, Qt::Key_Return, Qt::ControlModifier);
+    QTRY_COMPARE(stopped.count(), 1);
 }
 
 namespace {

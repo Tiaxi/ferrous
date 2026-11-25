@@ -10229,7 +10229,7 @@ void UiDialogsTest::dialogsWordTheirSettingsAndFailures() {
 
     QObject *shortcuts = object(window, QStringLiteral("keyboardShortcutsDialog"));
     QVERIFY(shortcuts != nullptr);
-    for (const char *key : {"Return", "Ctrl+Return", "Del", "Tab", "Esc", "Up", "Menu", "Ctrl+M"}) {
+    for (const char *key : {"Return", "Del", "Tab", "Esc", "Up", "Menu", "Ctrl+M"}) {
         QVariant refusal;
         QVERIFY(QMetaObject::invokeMethod(shortcuts, "refusalFor", Q_RETURN_ARG(QVariant, refusal),
                                           Q_ARG(QVariant, QVariantMap()), Q_ARG(QVariant, QString::fromLatin1(key))));
