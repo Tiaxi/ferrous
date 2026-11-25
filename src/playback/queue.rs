@@ -148,11 +148,8 @@ impl Cursor {
     fn advance_shuffle_random(&mut self, len: usize, rules: Rules) -> bool {
         let allow_repeat_cycle = rules.repeat_mode == RepeatMode::All;
         if len == 1 {
-            let picked = allow_repeat_cycle || rules.repeat_mode == RepeatMode::One;
-            if picked {
-                self.pick = TrackPick::Shuffle;
-            }
-            return picked;
+            // The only row plays again, as it came to play: no pick.
+            return allow_repeat_cycle || rules.repeat_mode == RepeatMode::One;
         }
         if self.shuffle_pool.is_empty() {
             if !allow_repeat_cycle {
@@ -989,6 +986,20 @@ mod tests {
         assert_eq!(staged.pick, TrackPick::Shuffle);
         queue.take_eos_successor().unwrap();
         assert_eq!(queue.current_pick(), TrackPick::Shuffle);
+    }
+
+    #[test]
+    fn the_only_row_plays_again_as_it_came_to_play() {
+        let (mut queue, _) = queue_of(1);
+        queue.set_shuffle_enabled(true);
+        queue.set_repeat_mode(RepeatMode::All);
+        assert_eq!(queue.stage_natural(gapless).unwrap().pick, TrackPick::Other);
+        // Repeat-One keeps that replay, which keeps the first pass's pick.
+        assert_eq!(queue.set_repeat_mode(RepeatMode::One), None);
+        queue.commit_gapless().unwrap();
+        assert_eq!(queue.current_pick(), TrackPick::Other);
+        assert_eq!(queue.next_manual().unwrap().index, 0);
+        assert_eq!(queue.current_pick(), TrackPick::Other);
     }
 
     #[test]

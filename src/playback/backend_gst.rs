@@ -15084,11 +15084,15 @@ mod engine_tests {
             let replay = engine.wait_for_changes(3);
             assert_change(&replay, &picked, 1, Expect::Gapless);
             engine.wait_until("the second pass did not play", |engine| {
-                engine.snapshot.position > Duration::from_millis(500)
-                    && engine
-                        .snapshot
-                        .replay_gain
-                        .is_some_and(|report| report.track_token == replay.token)
+                engine
+                    .snapshot
+                    .replay_gain
+                    .is_some_and(|report| report.track_token == replay.token)
+                    && streams
+                        .lock()
+                        .unwrap()
+                        .last()
+                        .is_some_and(|pass| pass.len() > 12)
             });
 
             let streams = streams.lock().unwrap().clone();
