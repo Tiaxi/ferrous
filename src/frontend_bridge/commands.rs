@@ -2858,31 +2858,36 @@ mod tests {
             _ => panic!("unexpected event variant"),
         }
         // The file does not exist, so the spectrogram clears what it shows,
-        // and the overview ends whole and empty (#776); playback, not
-        // analysis, reports the missing file.
+        // and the overview ends whole and empty (#776), once its decoders
+        // have tried the file; playback, not analysis, reports the missing
+        // file.
+        use crate::analysis::AnalysisEvent;
+        let whole_and_empty = |event: &AnalysisEvent| {
+            matches!(event, AnalysisEvent::Snapshot(snapshot)
+                if snapshot.waveform_complete
+                    && snapshot.waveform_peaks.is_empty()
+                    && snapshot.waveform_coverage_seconds == 0.0)
+        };
+        let unexpected = |event: &AnalysisEvent| {
+            matches!(
+                event,
+                AnalysisEvent::Snapshot(_) | AnalysisEvent::WorkerFailed(_)
+            )
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let event = analysis_rx
+                .recv_deadline(deadline)
+                .expect("the overview ends");
+            if whole_and_empty(&event) {
+                break;
+            }
+            assert!(!unexpected(&event), "{event:?}");
+        }
         let later: Vec<_> =
             std::iter::from_fn(|| analysis_rx.recv_timeout(Duration::from_millis(120)).ok())
                 .collect();
-        let snapshots: Vec<_> = later
-            .iter()
-            .filter_map(|event| match event {
-                crate::analysis::AnalysisEvent::Snapshot(snapshot) => Some(snapshot),
-                _ => None,
-            })
-            .collect();
-        assert!(
-            matches!(snapshots.as_slice(), [snapshot]
-                if snapshot.waveform_complete
-                    && snapshot.waveform_peaks.is_empty()
-                    && snapshot.waveform_coverage_seconds == 0.0),
-            "{later:?}"
-        );
-        assert!(
-            !later
-                .iter()
-                .any(|event| matches!(event, crate::analysis::AnalysisEvent::WorkerFailed(_))),
-            "{later:?}"
-        );
+        assert!(!later.iter().any(unexpected), "{later:?}");
     }
 
     #[test]
