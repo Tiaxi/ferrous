@@ -24,15 +24,6 @@ pub enum ReplayGainMode {
 
 impl ReplayGainMode {
     #[must_use]
-    pub fn from_u8(value: u8) -> Self {
-        match value {
-            1 => Self::Track,
-            2 => Self::Album,
-            _ => Self::Off,
-        }
-    }
-
-    #[must_use]
     pub fn to_u8(self) -> u8 {
         match self {
             Self::Off => 0,
@@ -177,27 +168,26 @@ const MAX_GAIN_DB: f64 = 60.0;
 #[must_use]
 pub fn gain_for(settings: &ReplayGainSettings, tags: &GainTags) -> Option<AppliedGain> {
     let settings = settings.clamped();
-    let (source, gain_db, peak) = match settings.mode {
+    let untagged = (GainSource::Untagged, f64::from(settings.untagged_db));
+    let (source, gain_db) = match settings.mode {
         ReplayGainMode::Off => return None,
         ReplayGainMode::Album => match (tags.album_gain, tags.track_gain) {
-            // The album's peak keeps its tracks as loud as each other; a
-            // file without one keeps its own track from clipping.
-            (Some(gain), _) => (GainSource::Album, gain, tags.album_peak.or(tags.track_peak)),
-            (None, Some(gain)) => (GainSource::TrackWithoutAlbum, gain, tags.track_peak),
-            (None, None) => (
-                GainSource::Untagged,
-                f64::from(settings.untagged_db),
-                tags.track_peak.or(tags.album_peak),
-            ),
+            (Some(gain), _) => (GainSource::Album, gain),
+            (None, Some(gain)) => (GainSource::TrackWithoutAlbum, gain),
+            (None, None) => untagged,
         },
-        ReplayGainMode::Track => match tags.track_gain {
-            Some(gain) => (GainSource::Track, gain, tags.track_peak),
-            None => (
-                GainSource::Untagged,
-                f64::from(settings.untagged_db),
-                tags.track_peak.or(tags.album_peak),
-            ),
-        },
+        ReplayGainMode::Track => tags
+            .track_gain
+            .map_or(untagged, |gain| (GainSource::Track, gain)),
+    };
+    // The album's peak keeps an album's tracks as loud as each other. A
+    // file without the peak of its gain takes the other one, which is no
+    // lower than its track's own: the album's peak is the highest of its
+    // tracks'.
+    let peak = if source == GainSource::Album {
+        tags.album_peak.or(tags.track_peak)
+    } else {
+        tags.track_peak.or(tags.album_peak)
     };
     let preamp_db = f64::from(settings.preamp_db);
     let wanted_db = (gain_db + preamp_db).clamp(-MAX_GAIN_DB, MAX_GAIN_DB);
@@ -476,6 +466,20 @@ mod tests {
     }
 
     #[test]
+    fn a_track_gain_without_a_track_peak_is_limited_by_the_album_peak() {
+        let tags = GainTags {
+            track_gain: Some(6.0),
+            album_peak: Some(0.9),
+            ..GainTags::default()
+        };
+        for mode in [ReplayGainMode::Track, ReplayGainMode::Album] {
+            let applied = gain_for(&settings(mode, 0.0, 0.0), &tags).unwrap();
+            assert!(applied.peak_limited, "{mode:?}: {applied:?}");
+            assert!((applied.linear - 1.0 / 0.9).abs() < 1e-12, "{mode:?}");
+        }
+    }
+
+    #[test]
     fn a_peak_of_zero_limits_nothing() {
         let tags = GainTags {
             track_gain: Some(3.0),
@@ -542,10 +546,8 @@ mod tests {
                 ReplayGainMode::parse_settings_value(mode.settings_value()),
                 Some(mode)
             );
-            assert_eq!(ReplayGainMode::from_u8(mode.to_u8()), mode);
         }
         assert_eq!(ReplayGainMode::parse_settings_value("loud"), None);
-        assert_eq!(ReplayGainMode::from_u8(9), ReplayGainMode::Off);
     }
 
     #[cfg(feature = "gst")]

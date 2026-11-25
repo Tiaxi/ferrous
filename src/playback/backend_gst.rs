@@ -2124,6 +2124,8 @@ impl GstPlaybackRuntime {
         }
         if !current_continues {
             self.abandon_seeks();
+            // The run that applied it is over; the next one reports its own.
+            self.snapshot.replay_gain = None;
         }
         self.awaiting_run_stream_start = true;
         self.last_stream_group = None;
@@ -14965,6 +14967,14 @@ mod engine_tests {
                 .map(|sample| (f64::from(*sample) * gain).round() as i32)
                 .collect();
             assert_eq!(play_through(&mut engine), scaled);
+            assert!(
+                engine.snapshots.iter().any(|snapshot| snapshot
+                    .replay_gain
+                    .is_some_and(|report| report.applied.source == GainSource::Track)),
+                "the track's gain was reported while it played"
+            );
+            // The track played to its end: it reports no gain stopped.
+            assert_eq!(engine.snapshot.replay_gain, None);
         }
     }
 }
