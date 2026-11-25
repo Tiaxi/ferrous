@@ -24,7 +24,7 @@ use crate::library::{
 use crate::metadata::{MetadataEvent, MetadataService, TrackMetadata};
 use crate::playback::{
     PathRenames, PlaybackCommand, PlaybackEngine, PlaybackEvent, PlaybackSnapshot, PlaybackState,
-    RepeatMode,
+    RepeatMode, ReplayGainSettings,
 };
 use crate::save_cause::{SaveCause, SaveProblem};
 use crate::worker_thread::{spawn_joinable, JoinableThread};
@@ -335,6 +335,12 @@ pub enum BridgeSettingsCommand {
     LoadFromDisk,
     SaveToDisk,
     SetVolume(f32),
+    /// How `ReplayGain` levels playback, which the engine applies from the
+    /// next buffer it plays.
+    SetReplayGain(ReplayGainSettings),
+    /// Whether the status bar shows the gain `ReplayGain` applies, rather
+    /// than only its format's tooltip.
+    SetShowReplayGainInStatusBar(bool),
     SetFftSize(usize),
     /// Whether the spectrogram shows only the audible band of the track's
     /// rate family, up to 22.05 or 24 kHz, instead of up to Nyquist.
@@ -731,6 +737,10 @@ pub struct BridgeIntegrationSettings {
 pub struct BridgeSettings {
     /// Volume level on the cubic scale; see [`crate::playback::volume_level_to_gain`].
     pub volume: f32,
+    pub replay_gain: ReplayGainSettings,
+    /// Whether the status bar shows the gain `ReplayGain` applies, rather
+    /// than only its format's tooltip. Only the UI uses it.
+    pub show_replay_gain_in_status_bar: bool,
     pub fft_size: usize,
     pub spectrogram_view_mode: SpectrogramViewMode,
     pub spectrogram_display_mode: SpectrogramDisplayMode,
@@ -761,6 +771,8 @@ impl Default for BridgeSettings {
             || std::env::var_os("FERROUS_PROFILE").is_some();
         Self {
             volume: 1.0,
+            replay_gain: ReplayGainSettings::default(),
+            show_replay_gain_in_status_bar: true,
             fft_size: 8192,
             spectrogram_view_mode: SpectrogramViewMode::Downmix,
             spectrogram_display_mode: SpectrogramDisplayMode::Rolling,
@@ -3088,6 +3100,7 @@ fn restore_initial_bridge_state(
     let volume = state.settings.volume;
     state.playback.volume = volume;
     commands::command_volume(state, playback, volume);
+    playback.command(PlaybackCommand::SetReplayGain(state.settings.replay_gain));
     // Display mode first so self.display_mode is correct before
     // SetFftSize / SetSpectrogramViewMode restart the session.
     analysis.command(AnalysisCommand::SetSpectrogramDisplayMode(
@@ -8182,6 +8195,77 @@ mod tests {
         runtime.handle_wake(BridgeLoopWake::Tick, &event_tx);
         assert_eq!(runtime.state.settings.volume, 0.0);
         assert!(runtime.flags.settings_dirty);
+    }
+
+    #[test]
+    fn replay_gain_settings_reach_the_engine_at_start_and_when_changed_and_are_saved() {
+        use crate::playback::{ReplayGainMode, ReplayGainSettings};
+
+        let _guard = test_guard();
+        let saved = ReplayGainSettings {
+            mode: ReplayGainMode::Album,
+            preamp_db: 2.0,
+            untagged_db: -3.5,
+        };
+        let (engine_tx, engine_rx) = unbounded();
+        let playback = PlaybackEngine::from_command_sender(engine_tx);
+        let (analysis, _analysis_rx) = AnalysisEngine::new_with_spectrogram_output(None);
+        let mut options = BridgeRuntimeOptions {
+            settings: Some(BridgeSettings {
+                replay_gain: saved,
+                ..BridgeSettings::default()
+            }),
+            ..BridgeRuntimeOptions::default()
+        };
+        let (state, _lastfm, _lastfm_rx) =
+            prepare_initial_bridge_state(&mut options, &analysis, &playback);
+        assert_eq!(state.settings.replay_gain, saved);
+        assert!(engine_rx.try_iter().any(
+            |command| matches!(command, PlaybackCommand::SetReplayGain(settings) if settings == saved)
+        ));
+
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        cut_off_workers(&mut runtime, &[]);
+        let (event_tx, event_rx) = bounded::<BridgeEvent>(64);
+        let (engine_tx, engine_rx) = unbounded();
+        runtime.playback = PlaybackEngine::from_command_sender(engine_tx);
+        runtime.flags.settings_dirty = false;
+        let track = ReplayGainSettings {
+            mode: ReplayGainMode::Track,
+            preamp_db: 20.0,
+            untagged_db: 1.5,
+        };
+        runtime.handle_wake(
+            BridgeLoopWake::Command(BridgeCommand::Settings(
+                BridgeSettingsCommand::SetReplayGain(track),
+            )),
+            &event_tx,
+        );
+        let clamped = ReplayGainSettings {
+            preamp_db: 15.0,
+            ..track
+        };
+        assert_eq!(runtime.state.settings.replay_gain, clamped);
+        assert!(runtime.flags.settings_dirty);
+        assert!(engine_rx.try_iter().any(
+            |command| matches!(command, PlaybackCommand::SetReplayGain(settings) if settings == clamped)
+        ));
+        let snapshot = emitted_snapshots(&event_rx)
+            .pop()
+            .expect("a snapshot of the new settings");
+        assert_eq!(snapshot.settings.replay_gain, clamped);
+
+        runtime.flags.settings_dirty = false;
+        runtime.handle_wake(
+            BridgeLoopWake::Command(BridgeCommand::Settings(
+                BridgeSettingsCommand::SetShowReplayGainInStatusBar(false),
+            )),
+            &event_tx,
+        );
+        assert!(!runtime.state.settings.show_replay_gain_in_status_bar);
+        assert!(runtime.flags.settings_dirty);
+        // Only the UI acts on it.
+        assert!(engine_rx.try_iter().next().is_none());
     }
 
     #[test]

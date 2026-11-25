@@ -32,7 +32,9 @@ use crate::library::{track_file_fingerprint, TrackRefresh};
 use crate::panic_guard;
 #[cfg(test)]
 use crate::panic_guard::test_hooks;
-use crate::playback::{PathRenames, PlaybackState, RepeatMode};
+use crate::playback::{
+    PathRenames, PlaybackState, RepeatMode, ReplayGainMode, ReplayGainReport, ReplayGainSettings,
+};
 use crate::save_cause::SaveCause;
 use crate::tag_editor;
 
@@ -2603,6 +2605,8 @@ fn parse_settings_command(
         76 => BridgeSettingsCommand::SetShowFullscreenTitleStrip(reader.read_u8()? != 0),
         77 => BridgeSettingsCommand::SetStretchShortTracks(reader.read_u8()? != 0),
         80 => read_keyboard_shortcuts_command(reader)?,
+        81 => BridgeSettingsCommand::SetReplayGain(read_replay_gain_settings(reader)?),
+        82 => BridgeSettingsCommand::SetShowReplayGainInStatusBar(reader.read_u8()? != 0),
         _ => return Ok(None),
     };
     reader.expect_done()?;
@@ -3108,7 +3112,35 @@ fn encode_playback_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     push_u64(&mut out, snapshot.playback.position_sampled_at.as_nanos());
     push_u8(&mut out, u8::from(snapshot.playback.position_advancing));
     push_u64(&mut out, snapshot.play_serial);
+    push_replay_gain_report(&mut out, snapshot.playback.replay_gain.as_ref());
     out
+}
+
+/// The `ReplayGain` the output applies to the current track: a u8 for how
+/// it was chosen (0 none, while off or before the track plays; 1 the track
+/// gain, 2 the album gain, 3 the track gain for want of an album gain, 4
+/// the gain for untagged files), the f32 gain, the f32 preamp and the f32
+/// gain applied, in dB, a u8 that is 1 when the peak lowered it, and the
+/// u64 token of the track it applies to. Zeros without one.
+fn push_replay_gain_report(out: &mut Vec<u8>, report: Option<&ReplayGainReport>) {
+    let Some(report) = report else {
+        push_u8(out, 0);
+        push_f32(out, 0.0);
+        push_f32(out, 0.0);
+        push_f32(out, 0.0);
+        push_u8(out, 0);
+        push_u64(out, 0);
+        return;
+    };
+    let applied = &report.applied;
+    #[allow(clippy::cast_possible_truncation)] // Gains of at most 60 dB.
+    let db = |value: f64| value as f32;
+    push_u8(out, applied.source.to_u8());
+    push_f32(out, db(applied.gain_db));
+    push_f32(out, db(applied.preamp_db));
+    push_f32(out, db(applied.applied_db));
+    push_u8(out, u8::from(applied.peak_limited));
+    push_u64(out, report.track_token);
 }
 
 fn encode_library_meta_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
@@ -3359,11 +3391,47 @@ fn encode_settings_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     );
     // The volume requests taken: see `BridgeSnapshot::volume_requests_taken`.
     push_u64(&mut out, snapshot.volume_requests_taken);
-    // The keyboard shortcuts, last, as command 80 lays them out, with the
+    // The keyboard shortcuts, as command 80 lays them out, with the
     // generation of the latest request the bridge took.
     push_keyboard_shortcuts(&mut out, &snapshot.settings.keyboard_shortcuts);
     push_u32(&mut out, snapshot.keyboard_shortcuts_generation);
+    // ReplayGain, last, as command 81 lays it out, then whether the status
+    // bar shows the gain, as command 82 does.
+    push_replay_gain_settings(&mut out, &snapshot.settings.replay_gain);
+    push_u8(
+        &mut out,
+        u8::from(snapshot.settings.show_replay_gain_in_status_bar),
+    );
     out
+}
+
+/// The `ReplayGain` settings as command 81 lays them out: the u8 mode (0
+/// off, 1 track, 2 album), then the f32 preamp and the f32 gain for files
+/// without gain tags, in dB.
+fn push_replay_gain_settings(out: &mut Vec<u8>, settings: &ReplayGainSettings) {
+    push_u8(out, settings.mode.to_u8());
+    push_f32(out, settings.preamp_db);
+    push_f32(out, settings.untagged_db);
+}
+
+fn read_replay_gain_settings(reader: &mut BinaryReader<'_>) -> Result<ReplayGainSettings, String> {
+    let mode = match reader.read_u8()? {
+        0 => ReplayGainMode::Off,
+        1 => ReplayGainMode::Track,
+        2 => ReplayGainMode::Album,
+        _ => return Err("unknown ReplayGain mode".to_string()),
+    };
+    let preamp_db = reader.read_f32()?;
+    let untagged_db = reader.read_f32()?;
+    if !preamp_db.is_finite() || !untagged_db.is_finite() {
+        return Err("ReplayGain gains must be finite".to_string());
+    }
+    Ok(ReplayGainSettings {
+        mode,
+        preamp_db,
+        untagged_db,
+    }
+    .clamped())
 }
 
 fn encode_lastfm_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
@@ -3989,6 +4057,8 @@ mod tests {
             queue_undo: QueueUndoState::default(),
             settings: super::super::BridgeSettings {
                 volume: 0.75,
+                replay_gain: crate::playback::ReplayGainSettings::default(),
+                show_replay_gain_in_status_bar: true,
                 fft_size: 2048,
                 spectrogram_view_mode: SpectrogramViewMode::Downmix,
                 spectrogram_display_mode: SpectrogramDisplayMode::Rolling,
@@ -5876,9 +5946,13 @@ mod tests {
     /// The bytes of the count of volume requests the bridge took.
     const SETTINGS_VOLUME_REQUESTS_BYTES: usize = 8;
 
+    /// The bytes of the ReplayGain settings and whether the status bar
+    /// shows the gain, which end the settings section.
+    const SETTINGS_REPLAY_GAIN_BYTES: usize = 10;
+
     /// The bytes of no changed keyboard shortcuts and their generation,
-    /// which end the settings section.
-    const SETTINGS_NO_KEYBOARD_SHORTCUTS_BYTES: usize = 8;
+    /// then of the ReplayGain settings, which end the settings section.
+    const SETTINGS_NO_KEYBOARD_SHORTCUTS_BYTES: usize = 8 + SETTINGS_REPLAY_GAIN_BYTES;
 
     /// The bytes that end the settings section: the queue's column widths
     /// and their generation, then the spectrogram's frequency cap, whether
@@ -6171,12 +6245,120 @@ mod tests {
         snapshot.settings.keyboard_shortcuts = shortcuts;
         snapshot.keyboard_shortcuts_generation = 9;
         let settings = encode_settings_section(&snapshot);
+        let settings = &settings[..settings.len() - SETTINGS_REPLAY_GAIN_BYTES];
         let tail =
             keyboard_shortcuts_payload(&[("play_pause", "Media Play; Space"), ("stop", "")], 9);
         assert!(settings.ends_with(&tail), "{settings:?}");
         let mut snapshot = sample_snapshot();
         snapshot.keyboard_shortcuts_generation = 2;
-        assert!(encode_settings_section(&snapshot).ends_with(&keyboard_shortcuts_payload(&[], 2)));
+        let settings = encode_settings_section(&snapshot);
+        assert!(settings[..settings.len() - SETTINGS_REPLAY_GAIN_BYTES]
+            .ends_with(&keyboard_shortcuts_payload(&[], 2)));
+    }
+
+    /// Command 81's payload.
+    fn replay_gain_payload(mode: u8, preamp_db: f32, untagged_db: f32) -> Vec<u8> {
+        let mut payload = vec![mode];
+        push_f32(&mut payload, preamp_db);
+        push_f32(&mut payload, untagged_db);
+        payload
+    }
+
+    #[test]
+    fn replay_gain_commands_and_snapshot_share_protocol() {
+        let parsed = |payload: &[u8]| parse_binary_command(&encode_command(81, payload));
+        for (code, mode) in [
+            (0, ReplayGainMode::Off),
+            (1, ReplayGainMode::Track),
+            (2, ReplayGainMode::Album),
+        ] {
+            let cmd = parsed(&replay_gain_payload(code, -2.5, 6.0))
+                .expect("parse ReplayGain settings")
+                .expect("a ReplayGain command");
+            let BridgeCommand::Settings(BridgeSettingsCommand::SetReplayGain(settings)) = cmd
+            else {
+                panic!("{cmd:?}");
+            };
+            assert_eq!(
+                settings,
+                ReplayGainSettings {
+                    mode,
+                    preamp_db: -2.5,
+                    untagged_db: 6.0,
+                }
+            );
+
+            // The settings section ends with them, as the command lays them
+            // out, then whether the status bar shows the gain.
+            for show in [false, true] {
+                let mut snapshot = sample_snapshot();
+                snapshot.settings.replay_gain = settings;
+                snapshot.settings.show_replay_gain_in_status_bar = show;
+                let section = encode_settings_section(&snapshot);
+                let mut tail = replay_gain_payload(code, -2.5, 6.0);
+                tail.push(u8::from(show));
+                assert_eq!(&section[section.len() - SETTINGS_REPLAY_GAIN_BYTES..], tail);
+            }
+        }
+        // Out of range, clamped; not a number, or an unknown mode, refused.
+        let cmd = parsed(&replay_gain_payload(1, 40.0, -40.0))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(cmd,
+            BridgeCommand::Settings(BridgeSettingsCommand::SetReplayGain(settings))
+            if settings.preamp_db == 15.0 && settings.untagged_db == -15.0));
+        assert!(parsed(&replay_gain_payload(1, f32::NAN, 0.0)).is_err());
+        assert!(parsed(&replay_gain_payload(1, 0.0, f32::INFINITY)).is_err());
+        assert!(parsed(&replay_gain_payload(3, 0.0, 0.0)).is_err());
+        assert!(parsed(&replay_gain_payload(1, 0.0, 0.0)[..8]).is_err());
+        let mut long = replay_gain_payload(1, 0.0, 0.0);
+        long.push(0);
+        assert!(parsed(&long).is_err());
+
+        for show in [false, true] {
+            let cmd = parse_binary_command(&encode_command(82, &[u8::from(show)]))
+                .expect("parse status bar setting")
+                .expect("status bar setting command");
+            assert!(matches!(cmd,
+                BridgeCommand::Settings(BridgeSettingsCommand::SetShowReplayGainInStatusBar(value))
+                if value == show));
+        }
+        assert!(parse_binary_command(&encode_command(82, &[])).is_err());
+    }
+
+    #[test]
+    fn playback_section_ends_with_the_applied_replay_gain_and_its_track() {
+        use crate::playback::{AppliedGain, GainSource};
+
+        let mut snapshot = sample_snapshot();
+        let none = encode_playback_section(&snapshot);
+        let mut expected = vec![0];
+        expected.extend([0; 12]);
+        expected.push(0);
+        expected.extend([0; 8]);
+        assert!(none.ends_with(&expected), "{none:?}");
+
+        snapshot.playback.replay_gain = Some(ReplayGainReport {
+            applied: AppliedGain {
+                source: GainSource::TrackWithoutAlbum,
+                gain_db: -6.4,
+                preamp_db: 1.5,
+                applied_db: -4.9,
+                peak_limited: true,
+                linear: 0.57,
+            },
+            track_token: 7,
+        });
+        let section = encode_playback_section(&snapshot);
+        assert_eq!(section.len(), none.len());
+        let mut reader = BinaryReader::new(&section[section.len() - expected.len()..]);
+        assert_eq!(reader.read_u8().unwrap(), 3);
+        assert!((reader.read_f32().unwrap() + 6.4).abs() < 1e-6);
+        assert!((reader.read_f32().unwrap() - 1.5).abs() < 1e-6);
+        assert!((reader.read_f32().unwrap() + 4.9).abs() < 1e-6);
+        assert_eq!(reader.read_u8().unwrap(), 1);
+        assert_eq!(reader.read_u64().unwrap(), 7);
+        reader.expect_done().unwrap();
     }
 
     #[test]
@@ -8762,11 +8944,11 @@ mod tests {
             };
             p += 1;
             result.playback_play_serial = u64::from_le_bytes(s[p..p + 8].try_into().unwrap());
-            assert_eq!(
-                p + 8,
-                section_len,
-                "the play serial ends the playback section"
-            );
+            p += 8;
+            // The applied ReplayGain: its source, three gains, whether the
+            // peak limited it, and its track.
+            p += 1 + 12 + 1 + 8;
+            assert_eq!(p, section_len, "the ReplayGain ends the playback section");
             offset += section_len;
         }
         // Skip remaining sections before settings.  Sections appear in
