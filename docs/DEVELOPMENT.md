@@ -43,7 +43,7 @@ CTEST_PARALLEL_LEVEL=1 ./scripts/run-tests.sh --ui-only    # one test at a time
 ./scripts/run-tests.sh --ui-only --no-configure --no-build --verbose
 ```
 
-Running `ctest --test-dir ui/build` directly also gives each test program directories of its own, in `$TMPDIR` or `/tmp`, and leaves them there; `-j` runs tests in parallel. CI runs as many UI tests at a time as its runner has CPUs, since nothing else runs there, and so does the RPM spec's `%check`, as many as the package build compiles on. Its UI jobs compile through ccache, whose objects each push to `main` saves for later runs; a pull request's run restores them and saves none.
+Running `ctest --test-dir ui/build` directly also gives each test program directories of its own, in `$TMPDIR` or `/tmp`, and leaves them there; `-j` runs tests in parallel. CI runs as many UI tests at a time as its runner has CPUs, since nothing else runs there, and the RPM spec's `%check` runs as many as RPM's build job count (`%{_smp_build_ncpus}`), when it's set. Its UI jobs compile through ccache, whose objects each push to `main` saves for later runs; a pull request's run restores them and saves none.
 
 A UI test that plays a format whose GStreamer decoder may be missing skips without it: `gstreamerStoppedTrackPlaysAgainWithItsOverview` needs `avdec_ac3`, from the libav plugin (`gstreamer1-plugin-libav`; Fedora's own build has it). With `FERROUS_TEST_REQUIRE_DECODERS=1` it fails instead. CI's UI jobs and the RPM spec's `%check` set it, since they install the plugin, so that the test cannot stop running there unnoticed.
 

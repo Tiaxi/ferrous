@@ -111,7 +111,8 @@ DESTDIR=%{buildroot} cmake --install ui/build
 desktop-file-validate %{buildroot}%{_datadir}/applications/ferrous.desktop
 appstreamcli validate --no-net %{buildroot}%{_metainfodir}/io.github.tiaxi.ferrous.metainfo.xml
 # Keep the tests away from the builder's own settings, library, and caches.
-# The tests run as many at a time as the build compiles on, as in CI: they
+# The tests run as many at a time as RPM's build job count, when it's set
+# (ctest picks its own default otherwise), much as in CI: they
 # mostly wait on animations and timers, so one at a time takes several times
 # longer. Each test program gets directories of its own from the launcher,
 # ui/tests/own_directories.sh, so the tests that run at once share none.
