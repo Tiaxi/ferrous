@@ -140,6 +140,21 @@ fn log_truncated_overview(path: Option<&Path>, coverage_seconds: f32) {
     );
 }
 
+/// Logs that the overview decode of the file at `path` ended with no audio,
+/// once for each play: the waveform stays empty.
+fn log_empty_overview(path: Option<&Path>) {
+    let file = path.map_or_else(
+        || "the track".to_string(),
+        crate::frontend_bridge::quoted_path,
+    );
+    crate::frontend_bridge::log_info(
+        crate::frontend_bridge::ErrorCategory::Analysis,
+        &format!(
+            "The waveform decode of {file} found no audio it could read; the waveform stays empty."
+        ),
+    );
+}
+
 #[derive(Debug, Clone)]
 pub enum AnalysisCommand {
     SetTrack {
@@ -245,6 +260,8 @@ pub struct AnalysisSpectrogramChannel {
 pub struct AnalysisSnapshot {
     pub waveform_peaks: Vec<f32>,
     pub waveform_coverage_seconds: f32,
+    /// Whether the overview is whole: no more of it comes. It covers the
+    /// track, or its decode ended with no audio, and then it has no peaks.
     pub waveform_complete: bool,
     /// Whether the track's file is cut off: it ends at
     /// `waveform_coverage_seconds`, before the length its header gives.
@@ -2402,11 +2419,17 @@ impl AnalysisRuntimeState {
             ends_early,
             source,
         } = update;
-        if track_token == self.active_track_token && done && !complete && ends_early.is_none() {
-            log_truncated_overview(self.active_track_path.as_deref(), coverage_seconds);
-        }
-        if track_token != self.active_track_token || peaks.is_empty() {
+        if track_token != self.active_track_token {
             return;
+        }
+        if peaks.is_empty() {
+            if done {
+                self.publish_empty_overview(event_tx);
+            }
+            return;
+        }
+        if done && !complete && ends_early.is_none() {
+            log_truncated_overview(self.active_track_path.as_deref(), coverage_seconds);
         }
 
         self.snapshot.waveform_peaks = peaks;
@@ -2431,6 +2454,20 @@ impl AnalysisRuntimeState {
         if done || self.snapshot.waveform_peaks.len() >= MIN_PREVIEW_PEAKS {
             self.emit_snapshot(event_tx, true);
         }
+    }
+
+    /// Publishes the overview of a decode that ended with no audio, as of a
+    /// file the overview's decoders cannot read: whole and empty, so that
+    /// the plot waits for it no more (#776). It is not saved, and the next
+    /// play decodes the file again.
+    fn publish_empty_overview(&mut self, event_tx: &dyn AnalysisEventOutput) {
+        log_empty_overview(self.active_track_path.as_deref());
+        self.snapshot.waveform_peaks.clear();
+        self.snapshot.waveform_coverage_seconds = 0.0;
+        self.snapshot.waveform_complete = true;
+        self.snapshot.waveform_ends_early = false;
+        self.waveform_dirty = true;
+        self.emit_snapshot(event_tx, true);
     }
 
     /// Saves the waveform decoded from the file of stamp `source`: the file
@@ -2527,6 +2564,7 @@ fn decode_overview_job(
         }
     };
     let mut prefill = PrefillSlot::offering(&mut sink);
+    let mut ended = false;
     let _ = decode_waveform_peaks_stream(
         path,
         1024,
@@ -2536,6 +2574,7 @@ fn decode_overview_job(
             if superseded() {
                 return false;
             }
+            ended |= progress != OverviewProgress::Partial;
             send(WaveformUpdate::of(
                 peaks,
                 coverage_seconds,
@@ -2546,6 +2585,18 @@ fn decode_overview_job(
         },
         superseded,
     );
+    // The decoders end with a last update whenever they decode audio: a
+    // decode that ends without one, and was not superseded, decoded none,
+    // as of a file they cannot read. Its last update has no peaks, so that
+    // the track's overview ends too (#776).
+    if !ended && !superseded() {
+        send(WaveformUpdate::of(
+            Vec::new(),
+            0.0,
+            OverviewProgress::Truncated,
+            source.get(),
+        ));
+    }
 }
 
 /// Saturating conversion from `f64` to `u64`, clamping to `[0, u64::MAX]`.
@@ -7878,6 +7929,80 @@ mod tests {
             AnalysisEvent::Snapshot(snapshot)
                 if !snapshot.waveform_complete
                     && (snapshot.waveform_coverage_seconds - decoded).abs() < 1e-3)));
+    }
+
+    /// An overview decode that ends with no audio is the track's whole
+    /// overview, empty: the plot stops waiting for it, and it is not saved.
+    /// One of a track before is dropped (#776).
+    #[test]
+    fn an_overview_that_ends_with_no_audio_is_published_whole_and_empty() {
+        let path = Path::new("/music/a.flac");
+        let channels = TestChannels::new();
+        let ctx = channels.ctx();
+        let mut state = AnalysisRuntimeState::new();
+        state.handle_track_change(path.to_path_buf(), true, false, 4, &ctx);
+        state.track_io_requests.try_iter().for_each(drop);
+        channels.event_rx.try_iter().for_each(drop);
+        let empty_overviews = |channels: &TestChannels| {
+            channels
+                .event_rx
+                .try_iter()
+                .filter(|event| {
+                    matches!(event, AnalysisEvent::Snapshot(snapshot)
+                        if snapshot.waveform_complete && snapshot.waveform_peaks.is_empty())
+                })
+                .count()
+        };
+
+        // A preview with nothing yet is no overview.
+        let mut preview = done(Vec::new(), 0.0, false);
+        preview.done = false;
+        state.handle_waveform_progress(4, preview, ctx.event_tx);
+        assert_eq!(empty_overviews(&channels), 0);
+
+        // The track before's decode, which ended with nothing.
+        state.handle_waveform_progress(3, done(Vec::new(), 0.0, false), ctx.event_tx);
+        assert_eq!(empty_overviews(&channels), 0);
+        assert!(!state.snapshot.waveform_complete);
+
+        state.handle_waveform_progress(4, done(Vec::new(), 0.0, false), ctx.event_tx);
+        assert_eq!(empty_overviews(&channels), 1);
+        assert!(state.snapshot.waveform_complete);
+        assert_eq!(state.snapshot.waveform_coverage_seconds, 0.0);
+        assert!(!state.snapshot.waveform_ends_early);
+        let requests: Vec<_> = state.track_io_requests.try_iter().collect();
+        assert!(requests.is_empty(), "saved: {requests:?}");
+
+        // The next track waits for its own.
+        state.handle_track_change(path.to_path_buf(), true, false, 5, &ctx);
+        assert!(!state.snapshot.waveform_complete);
+    }
+
+    /// The overview decode of a file it cannot read ends with a last
+    /// update, of no audio, unless another track superseded it (#776).
+    #[test]
+    fn an_overview_decode_of_a_file_it_cannot_read_ends_with_a_last_update() {
+        let folder = crate::paths::test_root().join("analysis-unreadable-overview");
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).expect("folder");
+        let garbage = folder.join("noise.flac");
+        std::fs::write(&garbage, [0x5a_u8; 4096]).expect("write fixture");
+        let missing = folder.join("missing.flac");
+        for path in [&garbage, &missing] {
+            for superseded in [false, true] {
+                let mut updates = Vec::new();
+                decode_overview_job(path, &|| superseded, |update| updates.push(update), drop);
+                if superseded {
+                    assert!(updates.is_empty(), "{path:?}: {updates:?}");
+                    continue;
+                }
+                let [update] = <[_; 1]>::try_from(updates).expect("one update");
+                assert!(update.done && !update.complete, "{path:?}: {update:?}");
+                assert!(update.peaks.is_empty() && update.ends_early.is_none());
+                assert_eq!(update.coverage_seconds, 0.0);
+            }
+        }
+        std::fs::remove_dir_all(&folder).expect("remove fixture");
     }
 
     fn decoded_stamp() -> WaveformSourceStamp {
