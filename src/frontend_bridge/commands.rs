@@ -2863,13 +2863,24 @@ mod tests {
         let later: Vec<_> =
             std::iter::from_fn(|| analysis_rx.recv_timeout(Duration::from_millis(120)).ok())
                 .collect();
+        let snapshots: Vec<_> = later
+            .iter()
+            .filter_map(|event| match event {
+                crate::analysis::AnalysisEvent::Snapshot(snapshot) => Some(snapshot),
+                _ => None,
+            })
+            .collect();
         assert!(
-            !later.iter().any(|event| match event {
-                crate::analysis::AnalysisEvent::Snapshot(snapshot) =>
-                    !(snapshot.waveform_complete && snapshot.waveform_peaks.is_empty()),
-                crate::analysis::AnalysisEvent::WorkerFailed(_) => true,
-                _ => false,
-            }),
+            matches!(snapshots.as_slice(), [snapshot]
+                if snapshot.waveform_complete
+                    && snapshot.waveform_peaks.is_empty()
+                    && snapshot.waveform_coverage_seconds == 0.0),
+            "{later:?}"
+        );
+        assert!(
+            !later
+                .iter()
+                .any(|event| matches!(event, crate::analysis::AnalysisEvent::WorkerFailed(_))),
             "{later:?}"
         );
     }

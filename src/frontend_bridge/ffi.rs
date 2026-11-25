@@ -114,6 +114,10 @@ struct AnalysisDelta {
     sample_rate_hz: u32,
     frame_seq: u32,
     waveform_changed: bool,
+    /// Whether the overview is whole and empty: the frame carries its peaks,
+    /// none, so that the UI drops those of the track before, which it keeps
+    /// until the next track's come.
+    waveform_whole_and_empty: bool,
     waveform_coverage_millis: u32,
     /// The analysis frame's flags for how far the waveform reaches.
     waveform_end_flags: u8,
@@ -3519,6 +3523,8 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState
         sample_rate_hz: s.analysis.sample_rate_hz,
         frame_seq: emit_state.analysis_frame_seq,
         waveform_changed,
+        waveform_whole_and_empty: s.analysis.waveform_complete
+            && s.analysis.waveform_peaks.is_empty(),
         waveform_coverage_millis,
         waveform_end_flags: waveform_end_flags(&s.analysis),
         track_token: s.analysis.track_token,
@@ -3568,7 +3574,8 @@ fn round_clamped_to_u8(value: f64) -> u8 {
 /// [16..20] u32  frame sequence
 /// [20]     u8   channels = 0
 /// [21..29] u64  track token of the waveform state
-/// [29..]        waveform peaks, with ANALYSIS_FLAG_WAVEFORM
+/// [29..]        waveform peaks, with ANALYSIS_FLAG_WAVEFORM; none for an
+///               overview whole and empty
 /// ```
 fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
     // A frame without a change would repeat the last sequence number, and
@@ -3579,7 +3586,7 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
     let waveform_len = delta.waveform_peaks_u8.len();
 
     let mut flags = 0u8;
-    if delta.waveform_changed && waveform_len > 0 {
+    if (delta.waveform_changed && waveform_len > 0) || delta.waveform_whole_and_empty {
         flags |= ANALYSIS_FLAG_WAVEFORM;
     }
     flags |= delta.waveform_end_flags;
@@ -6955,6 +6962,47 @@ mod tests {
 
     fn packets_encoded() -> usize {
         PACKETS_ENCODED.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn a_whole_and_empty_overview_clears_the_peaks_of_the_track_before() {
+        // The overview of a file its decoders cannot read ends whole and
+        // empty (#776): its frame carries no peaks, with the flag that the
+        // peaks changed, so that the UI does not draw the track before's
+        // across it.
+        let (command_tx, _command_rx) = crossbeam_channel::unbounded();
+        let mut runtime = FfiRuntime::new(command_tx, -1, -1);
+        let mut before = snapshot_without_queue(0);
+        before.analysis.track_token = 7;
+        runtime.process_bridge_events([BridgeEvent::Snapshot(Box::new(before.clone()))]);
+        let frame = runtime.pop_analysis_frame().expect("a frame for the peaks");
+        assert_ne!(frame[9] & ANALYSIS_FLAG_WAVEFORM, 0);
+        assert_ne!(u16::from_le_bytes([frame[10], frame[11]]), 0);
+
+        // The next track, before its overview: the UI keeps the peaks.
+        let mut next = before;
+        next.analysis.waveform_peaks.clear();
+        next.analysis.waveform_coverage_seconds = 0.0;
+        next.analysis.waveform_complete = false;
+        next.analysis.track_token = 8;
+        runtime.process_bridge_events([BridgeEvent::Snapshot(Box::new(next.clone()))]);
+        let frame = runtime
+            .pop_analysis_frame()
+            .expect("a frame for the change");
+        assert_eq!(frame[9], 0);
+
+        next.analysis.waveform_complete = true;
+        runtime.process_bridge_events([BridgeEvent::Snapshot(Box::new(next))]);
+        let frame = runtime
+            .pop_analysis_frame()
+            .expect("a frame for the overview");
+        assert_eq!(
+            frame[9],
+            ANALYSIS_FLAG_WAVEFORM | ANALYSIS_FLAG_WAVEFORM_COMPLETE
+        );
+        assert_eq!(u16::from_le_bytes([frame[10], frame[11]]), 0);
+        assert_eq!(frame.len(), 4 + ANALYSIS_FRAME_HEADER);
+        assert!(runtime.pop_analysis_frame().is_none());
     }
 
     #[test]

@@ -538,7 +538,7 @@ fn process_playback_snapshot_event(
 /// so its token is taken no more (#671).
 fn forget_analysed_track(state: &mut BridgeState) -> SnapshotUrgency {
     state.analysis_track_token = 0;
-    if state.analysis.waveform_peaks.is_empty() {
+    if state.analysis.waveform_peaks.is_empty() && !state.analysis.waveform_complete {
         return SnapshotUrgency::None;
     }
     state.analysis.waveform_peaks.clear();
@@ -1739,18 +1739,21 @@ mod tests {
             &playback_rx,
             &metadata,
         );
-        state.analysis.waveform_peaks = vec![0.1, 0.2, 0.3];
-        state.analysis.waveform_coverage_seconds = 2.0;
-        state.analysis.waveform_complete = true;
+        // A track's overview, and one whole and empty (#776).
+        for peaks in [vec![0.1, 0.2, 0.3], Vec::new()] {
+            state.analysis.waveform_coverage_seconds = if peaks.is_empty() { 0.0 } else { 2.0 };
+            state.analysis.waveform_peaks = peaks;
+            state.analysis.waveform_complete = true;
 
-        let mut stopped = state.playback.clone();
-        stopped.state = PlaybackState::Stopped;
-        stopped.current = None;
-        stopped.current_queue_index = None;
-        snapshot_commands(stopped, harness, &mut state);
-        assert!(state.analysis.waveform_peaks.is_empty());
-        assert!(state.analysis.waveform_coverage_seconds.abs() < f32::EPSILON);
-        assert!(!state.analysis.waveform_complete);
+            let mut stopped = state.playback.clone();
+            stopped.state = PlaybackState::Stopped;
+            stopped.current = None;
+            stopped.current_queue_index = None;
+            snapshot_commands(stopped, harness, &mut state);
+            assert!(state.analysis.waveform_peaks.is_empty());
+            assert!(state.analysis.waveform_coverage_seconds.abs() < f32::EPSILON);
+            assert!(!state.analysis.waveform_complete);
+        }
     }
 
     #[test]

@@ -444,6 +444,7 @@ private slots:
     void aStoppedEngineIsNamedAnEngine();
     void spectrogramOverlaySettingsApplyFromSnapshot();
     void analysisFrameTellsAFileThatEndsEarly();
+    void analysisFrameOfAWholeEmptyOverviewDropsThePeaksBefore();
     void spectrogramOverlaySettingsDecodeFromBinaryPayload();
     void testSoloChannelCommandEncoding();
     void testSoloedChannelsDecoding();
@@ -9772,6 +9773,55 @@ void BridgeClientTest::analysisFrameTellsAFileThatEndsEarly() {
     client.processAnalysisBytes(frame(0x10, 100000, 5, 5));
     QVERIFY(client.waveformEndsEarly());
     QCOMPARE(client.waveformCoverageSeconds(), 100.0);
+}
+
+// The overview of a file its decoders cannot read ends whole and empty
+// (#776): its frame, with no peaks, drops those of the track before, which
+// the client keeps until the next track's come, so that they are not drawn
+// across it.
+void BridgeClientTest::analysisFrameOfAWholeEmptyOverviewDropsThePeaksBefore() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    // [len u32][magic][rate u32][flags][waveform len u16][coverage ms u32]
+    // [rows u16][bins u16][seq u32][channels][track token u64]: 29 bytes
+    // after the length, then the peaks.
+    const auto frame = [](quint8 flags, const QByteArray &peaks, quint32 coverageMillis, quint32 seq,
+                          quint64 token) {
+        QByteArray bytes;
+        QDataStream out(&bytes, QIODevice::WriteOnly);
+        out.setByteOrder(QDataStream::LittleEndian);
+        out << quint32(29 + peaks.size()) << quint8(0xA1) << quint32(44100) << flags
+            << quint16(peaks.size()) << coverageMillis << quint16(0) << quint16(0) << seq << quint8(0)
+            << token;
+        bytes.append(peaks);
+        return bytes;
+    };
+    const auto playing = [&client](quint64 token) {
+        BinaryBridgeCodec::DecodedSnapshot snapshot;
+        snapshot.playback.present = true;
+        snapshot.playback.state = 1;
+        snapshot.playback.trackToken = token;
+        snapshot.playback.currentPath = QStringLiteral("/music/%1.flac").arg(token);
+        QVERIFY(client.processBinarySnapshot(snapshot));
+    };
+    constexpr quint8 waveform = 0x01;
+    constexpr quint8 complete = 0x08;
+    playing(4);
+    const QByteArray peaks(64, '\x40');
+    client.processAnalysisBytes(frame(waveform | complete, peaks, 60000, 1, 4));
+    QCOMPARE(client.waveformPeaksPacked(), peaks);
+    QVERIFY(client.waveformComplete());
+
+    // The next track, before its overview: the peaks stay, covering none.
+    playing(5);
+    client.processAnalysisBytes(frame(0x00, QByteArray(), 0, 2, 5));
+    QCOMPARE(client.waveformPeaksPacked(), peaks);
+    QVERIFY(!client.waveformComplete());
+
+    client.processAnalysisBytes(frame(waveform | complete, QByteArray(), 0, 3, 5));
+    QVERIFY(client.waveformPeaksPacked().isEmpty());
+    QVERIFY(client.waveformComplete());
+    QCOMPARE(client.waveformCoverageSeconds(), 0.0);
 }
 
 void BridgeClientTest::spectrogramOverlaySettingsApplyFromSnapshot() {
