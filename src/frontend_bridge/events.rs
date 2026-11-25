@@ -1812,6 +1812,51 @@ mod tests {
         assert!((state.analysis.waveform_coverage_seconds - 30.0).abs() < f32::EPSILON);
     }
 
+    #[test]
+    fn an_overview_that_ends_with_no_audio_is_whole_and_empty_for_its_track_alone() {
+        // The overview of a file its decoders cannot read ends whole and
+        // empty, so that the plot waits for it no more (#776): for the track
+        // it is of, and not the next one, the same file again as under
+        // Repeat One too, whose overview is still on its way.
+        let (analysis, _command_rx, playback_tx, playback_rx, metadata, mut state) =
+            playback_harness(SpectrogramDisplayMode::Centered);
+        let (analysis_tx, analysis_rx) = crossbeam_channel::unbounded::<AnalysisEvent>();
+        let (event_tx, _event_rx) = crossbeam_channel::unbounded::<BridgeEvent>();
+        let empty = |token: u64| {
+            AnalysisEvent::Snapshot(AnalysisSnapshot {
+                waveform_complete: true,
+                sample_rate_hz: 44_100,
+                track_token: token,
+                ..AnalysisSnapshot::default()
+            })
+        };
+        let play = |token: u64, state: &mut BridgeState| {
+            playback_tx
+                .send(PlaybackEvent::track_change(
+                    p("/music/unreadable.flac"),
+                    0,
+                    TrackChangeKind::Manual,
+                    token,
+                    &state.playback,
+                ))
+                .expect("send the track change");
+            pump_playback_events(&playback_rx, &analysis, &metadata, state);
+        };
+
+        play(7, &mut state);
+        state.analysis.waveform_peaks = vec![0.5; 8];
+        play(8, &mut state);
+        analysis_tx.send(empty(7)).expect("queue the snapshot");
+        drain_analysis_events(&analysis_rx, &event_tx, &mut state);
+        assert!(!state.analysis.waveform_complete);
+
+        analysis_tx.send(empty(8)).expect("queue the snapshot");
+        drain_analysis_events(&analysis_rx, &event_tx, &mut state);
+        assert!(state.analysis.waveform_complete);
+        assert!(state.analysis.waveform_peaks.is_empty());
+        assert!(state.analysis.waveform_coverage_seconds.abs() < f32::EPSILON);
+    }
+
     fn playback_harness(
         display_mode: SpectrogramDisplayMode,
     ) -> (

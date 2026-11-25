@@ -2857,18 +2857,19 @@ mod tests {
             crate::analysis::AnalysisEvent::Snapshot(_) => {}
             _ => panic!("unexpected event variant"),
         }
-        // The file does not exist, so the spectrogram clears what it shows;
-        // no further waveform snapshot follows, and playback, not analysis,
-        // reports the missing file.
+        // The file does not exist, so the spectrogram clears what it shows,
+        // and the overview ends whole and empty (#776); playback, not
+        // analysis, reports the missing file.
         let later: Vec<_> =
             std::iter::from_fn(|| analysis_rx.recv_timeout(Duration::from_millis(120)).ok())
                 .collect();
         assert!(
-            !later.iter().any(|event| matches!(
-                event,
-                crate::analysis::AnalysisEvent::Snapshot(_)
-                    | crate::analysis::AnalysisEvent::WorkerFailed(_)
-            )),
+            !later.iter().any(|event| match event {
+                crate::analysis::AnalysisEvent::Snapshot(snapshot) =>
+                    !(snapshot.waveform_complete && snapshot.waveform_peaks.is_empty()),
+                crate::analysis::AnalysisEvent::WorkerFailed(_) => true,
+                _ => false,
+            }),
             "{later:?}"
         );
     }

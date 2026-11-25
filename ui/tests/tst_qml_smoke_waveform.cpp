@@ -25,6 +25,8 @@ private slots:
     void gstreamerTrackChangesKeepTheTransportsTrack();
     void modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPicture_data();
     void modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPicture();
+    void modeSwitchSettlesOnAnOverviewThatEndsEmpty_data();
+    void modeSwitchSettlesOnAnOverviewThatEndsEmpty();
     void hiddenWaveformFetchesTheDetailItsFirstSwitchNeeds_data();
     void hiddenWaveformFetchesTheDetailItsFirstSwitchNeeds();
     void levelMeterKeepsVisualizationHeightAndFollowsModes();
@@ -3997,6 +3999,104 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
         QVERIFY2(failure.isEmpty(), qPrintable(failure));
     }
     connection.stop();
+}
+
+void WaveformSmokeTest::modeSwitchSettlesOnAnOverviewThatEndsEmpty_data() {
+    QTest::addColumn<int>("viewMode");
+    QTest::addColumn<int>("displayMode");
+    QTest::addColumn<bool>("animated");
+    QTest::newRow("mixed, rolling") << 0 << 0 << true;
+    QTest::newRow("mixed, centered") << 0 << 1 << true;
+    QTest::newRow("per channel, centered") << 1 << 1 << true;
+    QTest::newRow("mixed, centered, animations off") << 0 << 1 << false;
+}
+
+// A switch to the waveform of a track whose spectrogram came, but whose
+// overview decode ended with no audio, as of a file the overview's
+// decoders cannot read, waited for that overview forever, with the
+// spectrogram on and "Analysing…" over it (#776). The bridge publishes such
+// an overview whole and empty: the switch then settles on the waveform,
+// empty, with nothing said over it.
+void WaveformSmokeTest::modeSwitchSettlesOnAnOverviewThatEndsEmpty() {
+    QFETCH(int, viewMode);
+    QFETCH(int, displayMode);
+    QFETCH(bool, animated);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *surface = window->findChild<QQuickItem *>(QStringLiteral("visualizationSurface"));
+    auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    auto *spectrogramSurface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *analysing = window->findChild<QQuickItem *>(QStringLiteral("plotAnalysingText"));
+    QVERIFY(bridge && viewer && surface && waveformSurface && spectrogramSurface && analysing);
+    auto *waveform = qobject_cast<WaveformEditorItem *>(
+        waveformSurface->property("waveformItem").value<QObject *>());
+    QVERIFY(waveform != nullptr);
+    auto *units = qobject_cast<Kirigami::Platform::Units *>(
+        evaluateOn(surface, QStringLiteral("Kirigami.Units")).value<QObject *>());
+    QVERIFY(units != nullptr);
+    if (!animated) {
+        units->setShortDuration(0);
+    }
+    SteppedAnimationDriver animations;
+    const auto settle = [&animations]() { (void)animations.step(300); };
+    // The file's detail cannot be read either.
+    waveform->m_decodeWindow = [](const QString &, double, double, int,
+                                  const std::shared_ptr<std::atomic_bool> &) {
+        return QByteArray("not a window");
+    };
+
+    // A stereo track playing, with its spectrogram and no overview yet.
+    constexpr int channels = 2;
+    bridge->setProperty("spectrogramViewMode", viewMode);
+    bridge->setProperty("spectrogramDisplayMode", displayMode);
+    bridge->setProperty("durationSeconds", 60.0);
+    bridge->setProperty("currentTrackChannels", channels);
+    bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/unreadable.flac"));
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    const int lanes = viewMode == 1 ? channels : 1;
+    QVERIFY(QMetaObject::invokeMethod(bridge, "precomputedSpectrogramChannelsReady",
+                                      Q_ARG(int, lanes), Q_ARG(bool, true)));
+    QList<QQuickItem *> panes;
+    QTRY_COMPARE((panes = itemsNamed(spectrogramSurface, QStringLiteral("spectrogramPaneItem"))).size(),
+                 lanes);
+    {
+        constexpr int bins = 4'097;
+        constexpr int columns = 2'000;
+        const QByteArray data(bins * columns * static_cast<int>(panes.size()), '\x80');
+        for (qsizetype index = 0; index < panes.size(); ++index) {
+            qobject_cast<SpectrogramItem *>(panes.at(index))
+                ->feedPrecomputedChunk(data, bins, static_cast<int>(index), columns, 0, columns,
+                                       48'000, 1'024, false, true, 1, false);
+        }
+    }
+    QTRY_VERIFY(!spectrogramSurface->property("awaitingData").toBool());
+    QVERIFY(waveformSurface->property("awaitingData").toBool());
+
+    // While the overview may still come, the switch waits for it, with the
+    // spectrogram whole.
+    QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
+    settle();
+    QTest::qWait(100);
+    settle();
+    QVERIFY(surface->property("modeSwitching").toBool());
+    QCOMPARE(spectrogramSurface->opacity(), 1.0);
+    QCOMPARE(waveformSurface->opacity(), 0.0);
+
+    // Its decode ends with no audio: whole and empty.
+    bridge->setProperty("waveformComplete", true);
+    QVERIFY(!waveformSurface->property("awaitingData").toBool());
+    QVERIFY(soon([&]() { return waveform->pictureReady(); }));
+    settle();
+    QTRY_VERIFY(!surface->property("modeSwitching").toBool());
+    QCOMPARE(waveformSurface->opacity(), 1.0);
+    QTRY_COMPARE(spectrogramSurface->opacity(), 0.0);
+    // Well past the moment "Analysing…" waits before it shows (PlotLayer).
+    QTest::qWait(500);
+    QVERIFY(!analysing->isVisible());
 }
 
 void WaveformSmokeTest::hiddenWaveformFetchesTheDetailItsFirstSwitchNeeds_data() {
