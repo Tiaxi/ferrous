@@ -787,6 +787,8 @@ if(BUILD_TESTING)
     set(FERROUS_QML_SMOKE_AREAS
         spectrogram 180
         waveform 120
+        waveform_scene_graph 120
+        waveform_follow 120
         waveform_coverage 120
         library_queue 120
         transport_input 120
@@ -806,9 +808,12 @@ if(BUILD_TESTING)
     # 89-103 s of its 120 s on a busy machine. Its tests have grown since:
     # 158 cases, 202 s in all, so three shards took 66-70 s each alone and
     # one ran out its 120 s beside another build. It runs in five (about
-    # 40 s each).
+    # 40 s each). The waveform's classes ran as one area until it ran out
+    # its 120 s in the Debug CI job (#808); each class is now an area, and
+    # the largest, `waveform` (62-69 s there), runs in two shards.
     set(FERROUS_QML_SMOKE_SHARDED_AREAS
         transport_input 5 40
+        waveform 2 22
     )
     set(ferrous_smoke_area_names "")
     list(LENGTH FERROUS_QML_SMOKE_AREAS ferrous_smoke_area_values)
@@ -1183,7 +1188,8 @@ if(BUILD_TESTING)
     foreach(test_and_cost IN ITEMS
             ferrous_qml_smoke_album_art:18
             ferrous_qml_smoke_tag_editor:36
-            ferrous_qml_smoke_waveform:27
+            ferrous_qml_smoke_waveform_scene_graph:15
+            ferrous_qml_smoke_waveform_follow:9
             ferrous_qml_smoke_errors:18
             ferrous_qml_smoke_spectrogram:14
             ferrous_accessibility_tests:14
