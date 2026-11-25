@@ -460,11 +460,30 @@ impl WorkerLibrary {
         if changes.is_empty() && self.published_status.as_ref() == Some(&self.status) {
             return;
         }
+        self.send(changes, read_after, false, event_tx);
+    }
+
+    /// Sends the worker's last event, whose status says why it stops: the
+    /// receiver takes the end of the events that follows for that, not for
+    /// a crash.
+    pub(super) fn publish_stop(&mut self, event_tx: &Sender<LibraryEvent>) {
+        let (changes, read_after) = self.take_changes();
+        self.send(changes, read_after, true, event_tx);
+    }
+
+    fn send(
+        &mut self,
+        changes: LibraryChanges,
+        read_after: u64,
+        stopped: bool,
+        event_tx: &Sender<LibraryEvent>,
+    ) {
         self.published_status = Some(self.status.clone());
         let _ = event_tx.send(LibraryEvent {
             changes,
             status: self.status.clone(),
             read_after,
+            stopped,
         });
     }
 }
