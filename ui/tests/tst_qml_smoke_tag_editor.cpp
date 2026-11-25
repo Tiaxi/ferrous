@@ -2875,6 +2875,11 @@ void TagEditorSmokeTest::renamePreviewShowsANameThatStaysWhole() {
     QVERIFY(QTest::qWaitForWindowExposed(previewWindow));
     QHash<QString, QQuickItem *> oldNames;
     QTRY_VERIFY(visibleItemsNamed(previewWindow->contentItem(), QStringLiteral("renamePreviewOldName")).size() == 4);
+    // The list builds a row below the ones it shows in the background, and
+    // has it among its items, visible but not drawn, while it is half made:
+    // its new name had no place or size yet (#791). The rows are checked
+    // once they are made and the list has placed them.
+    QVERIFY(finishIncubation(fixture.engine));
     for (QQuickItem *item : visibleItemsNamed(previewWindow->contentItem(), QStringLiteral("renamePreviewOldName"))) {
         oldNames.insert(item->property("text").toString(), item);
     }
@@ -2895,6 +2900,7 @@ void TagEditorSmokeTest::renamePreviewShowsANameThatStaysWhole() {
                  qPrintable(QString::number(previewWindow->width())));
     }
     // One column of outcomes, and no row over the next.
+    QVERIFY(QQuickTest::qWaitForPolish(previewWindow));
     QList<QQuickItem *> rows = visibleItemsNamed(previewWindow->contentItem(), QStringLiteral("renamePreviewFileRow"));
     QCOMPARE(rows.size(), 4);
     std::sort(rows.begin(), rows.end(),
