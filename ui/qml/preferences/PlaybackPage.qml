@@ -18,7 +18,7 @@ Preferences.PreferencesPage {
 
     title: I18n.i18nc("@title preferences page", "Playback")
 
-    readonly property int replayGainMode: Math.max(0, Math.min(2,
+    readonly property int replayGainMode: Math.max(0, Math.min(3,
         Number(root.settings.value("replayGainMode")) || 0))
     readonly property bool replayGainOn: root.replayGainMode > 0
 
@@ -60,7 +60,8 @@ Preferences.PreferencesPage {
         model: [
             I18n.i18nc("@item:inlistbox ReplayGain mode", "Off"),
             I18n.i18nc("@item:inlistbox ReplayGain mode", "Track gain"),
-            I18n.i18nc("@item:inlistbox ReplayGain mode", "Album gain")
+            I18n.i18nc("@item:inlistbox ReplayGain mode", "Album gain"),
+            I18n.i18nc("@item:inlistbox ReplayGain mode", "Auto")
         ]
         currentIndex: root.replayGainMode
         onActivated: function(index) { root.settings.setValue("replayGainMode", index) }
@@ -71,6 +72,7 @@ Preferences.PreferencesPage {
         uiPalette: root.uiPalette
         text: I18n.i18nc("@info", "Plays tracks at a similar loudness, using the gain tags in their files. "
             + "Album gain keeps the tracks of an album as loud as each other, as they were mastered. "
+            + "Auto uses album gain, and track gain for tracks that shuffle picks. "
             + "Ferrous doesn’t measure files; a tagger such as rsgain adds the tags.")
     }
 

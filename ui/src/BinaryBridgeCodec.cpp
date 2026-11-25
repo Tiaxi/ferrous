@@ -220,12 +220,14 @@ bool decodePlaybackSection(const QByteArray &payload, DecodedPlayback *out) {
     float replayGainPreampDb = 0.0f;
     float replayGainAppliedDb = 0.0f;
     quint8 replayGainPeakLimited = 0;
+    quint8 replayGainAuto = ReplayGainChoiceNone;
     quint64 replayGainTrackToken = 0;
     if (!reader.atEnd()
         && (!reader.readU8(&replayGainSource) || replayGainSource > ReplayGainSourceLast
             || !reader.readF32(&replayGainDb) || !reader.readF32(&replayGainPreampDb)
             || !reader.readF32(&replayGainAppliedDb) || !reader.readU8(&replayGainPeakLimited)
-            || replayGainPeakLimited > 1 || !reader.readU64(&replayGainTrackToken))) {
+            || replayGainPeakLimited > 1 || !reader.readU8(&replayGainAuto)
+            || replayGainAuto > ReplayGainChoiceLast || !reader.readU64(&replayGainTrackToken))) {
         return false;
     }
     if (!reader.atEnd()) {
@@ -236,6 +238,7 @@ bool decodePlaybackSection(const QByteArray &payload, DecodedPlayback *out) {
     out->replayGainPreampDb = replayGainPreampDb;
     out->replayGainAppliedDb = replayGainAppliedDb;
     out->replayGainPeakLimited = replayGainPeakLimited != 0;
+    out->replayGainAuto = static_cast<int>(replayGainAuto);
     out->replayGainTrackToken = replayGainTrackToken;
     out->present = true;
     out->state = static_cast<int>(state);
@@ -729,7 +732,7 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     if (out->hasReplayGain) {
         quint8 mode = ReplayGainOff;
         quint8 showInStatusBar = 1;
-        if (!reader.readU8(&mode) || mode > ReplayGainAlbum
+        if (!reader.readU8(&mode) || mode > ReplayGainAuto
             || !reader.readF32(&out->replayGainPreampDb)
             || !reader.readF32(&out->replayGainUntaggedDb) || !reader.readU8(&showInStatusBar)
             || !std::isfinite(out->replayGainPreampDb)

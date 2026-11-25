@@ -36,6 +36,7 @@ use super::stream_volume::{self, StreamVolumeChange, StreamVolumeReport, StreamV
 use super::{
     EngineExit, FileStamp, PathRenames, PlaybackCommand, PlaybackError, PlaybackErrorOutcome,
     PlaybackEvent, PlaybackSnapshot, PlaybackState, RepeatMode, ReplayGainReport, TrackChangeKind,
+    TrackPick,
 };
 use crate::file_identity::{self, file_id, FileId, ResolvedPath, WatchedFile};
 
@@ -2108,6 +2109,13 @@ impl GstPlaybackRuntime {
         if let Ok(mut durations) = self.stream_durations.lock() {
             durations.start_run(path.to_path_buf());
         }
+        // The queue's committed track is the one the run plays, also when
+        // a restart drops a successor that has started at the output.
+        let pick = self
+            .queue_state
+            .lock()
+            .map_or(TrackPick::default(), |queue| queue.current_pick());
+        self.gain_stage.start_run(pick);
         self.playbin.set_property("uri", uri);
     }
 
@@ -3257,6 +3265,7 @@ fn connect_about_to_finish(runtime: &GstPlaybackRuntime) {
     let analysis_tx = runtime.analysis_tx.clone();
     let input_switches = Arc::clone(&runtime.input_switches);
     let source_activation = Arc::clone(&runtime.source_activation);
+    let gain_stage = Arc::clone(&runtime.gain_stage);
     #[cfg(test)]
     let calls = Arc::clone(&runtime.about_to_finish);
     // Runs on a streaming thread once the pipeline has read all of the
@@ -3273,10 +3282,16 @@ fn connect_about_to_finish(runtime: &GstPlaybackRuntime) {
             {
                 // Not while the run ends, which drops the successor anyway.
                 let handed_over = input_switches.hand_over(|| {
-                    stage_successor(&queue_state, &stream_durations, &analysis_tx, |uri| {
-                        // Activates the successor's source.
-                        source_activation.hand_over(|| playbin.set_property("uri", uri));
-                    })
+                    stage_successor(
+                        &queue_state,
+                        &stream_durations,
+                        &analysis_tx,
+                        &gain_stage,
+                        |uri| {
+                            // Activates the successor's source.
+                            source_activation.hand_over(|| playbin.set_property("uri", uri));
+                        },
+                    )
                 });
                 if let Some(stream) = handed_over.flatten() {
                     record_opened(&stream_durations, &stream);
@@ -3448,6 +3463,7 @@ fn stage_successor(
     queue_state: &Mutex<GaplessQueue>,
     stream_durations: &Mutex<StreamDurations>,
     analysis_tx: &Sender<AnalysisCommand>,
+    gain_stage: &GainStage,
     hand_over: impl FnOnce(&str),
 ) -> Option<OpenedStream> {
     let mut queue = match queue_state.lock() {
@@ -3482,6 +3498,8 @@ fn stage_successor(
         .lock()
         .ok()
         .map(|mut durations| durations.hand_over(staged.path));
+    // Before the successor's stream can reach the output.
+    gain_stage.hand_over(staged.pick);
     // Opens the file; see `OpenedFile`.
     hand_over(&uri);
     stream
@@ -4964,7 +4982,7 @@ mod tests {
         durations.lock().unwrap().start_run(a);
         let (analysis_tx, analysis_rx) = unbounded();
         let mut handed = None;
-        stage_successor(&queue, &durations, &analysis_tx, |uri| {
+        stage_successor(&queue, &durations, &analysis_tx, &GainStage::new(), |uri| {
             // A rename cannot reach the queue between staging and handover.
             assert!(matches!(queue.try_lock(), Err(TryLockError::WouldBlock)));
             handed = Some(uri.to_owned());
@@ -5005,7 +5023,7 @@ mod tests {
         let durations = Mutex::new(StreamDurations::default());
         durations.lock().unwrap().start_run(a);
         let (analysis_tx, _analysis_rx) = unbounded();
-        let stream = stage_successor(&queue, &durations, &analysis_tx, |_| {
+        let stream = stage_successor(&queue, &durations, &analysis_tx, &GainStage::new(), |_| {
             std::fs::write(&b, b"").unwrap();
         })
         .expect("B handed over");
@@ -14580,7 +14598,7 @@ mod engine_tests {
 
         use super::*;
         use crate::playback::gain_fixtures::{encode, wav_bytes, write_tag, Encoding};
-        use crate::playback::replay_gain::{db_to_linear, GainSource};
+        use crate::playback::replay_gain::{db_to_linear, GainChoice, GainSource};
         use crate::playback::{ReplayGainMode, ReplayGainSettings};
 
         /// The loudest sample of the sawtooth of the FLAC fixtures, at 16 bits.
@@ -14884,6 +14902,258 @@ mod engine_tests {
             engine.wait_until("a gain was reported while off", |engine| {
                 engine.snapshot.replay_gain.is_none()
             });
+        }
+
+        /// The track gain and the album gain of [`album_track`], 6 dB apart,
+        /// so the output's level tells which one plays.
+        const TRACK_DB: f64 = -6.02;
+        const ALBUM_DB: f64 = -12.04;
+
+        fn album_track(fixtures: &Fixtures, name: &str, millis: u32) -> PathBuf {
+            fixtures.tagged_flac(
+                name,
+                millis,
+                &[
+                    (ItemKey::ReplayGainTrackGain, "-6.02 dB"),
+                    (ItemKey::ReplayGainAlbumGain, "-12.04 dB"),
+                ],
+            )
+        }
+
+        /// The gains Auto chose that the engine reported for the track of
+        /// `token`, in the order reported, each once.
+        fn auto_choices(engine: &Engine, token: u64) -> Vec<Option<GainChoice>> {
+            let mut choices = Vec::new();
+            for report in engine.snapshots.iter().filter_map(|s| s.replay_gain) {
+                if report.track_token == token && choices.last() != Some(&report.applied.auto) {
+                    choices.push(report.applied.auto);
+                }
+            }
+            choices
+        }
+
+        /// How a stream starts at the output.
+        #[derive(Debug, Clone, Copy)]
+        enum Start {
+            /// A gapless successor: at its gain from its first sample.
+            Gapless,
+            /// A new run, which the engine starts silent and fades in: quieter
+            /// for its first few buffers.
+            Run,
+        }
+
+        /// The most buffers of 4608 frames, about 96 ms each, that a new run
+        /// takes to come up to its level.
+        const RUN_RISE_BUFFERS: usize = 6;
+
+        /// Assert that each stream played at its gain in `expected`, every
+        /// buffer of a gapless one and every buffer after the rise of a run.
+        #[track_caller]
+        fn assert_streams_at(streams: &[Vec<Played>], expected: &[(f64, Start)]) {
+            assert_eq!(streams.len(), expected.len(), "{streams:?}");
+            for (index, (stream, (db, start))) in streams.iter().zip(expected).enumerate() {
+                let peak = peak_at(*db);
+                let rise = match start {
+                    Start::Gapless => 0,
+                    Start::Run => stream
+                        .iter()
+                        .take(RUN_RISE_BUFFERS)
+                        .take_while(|played| played.peak < peak - 1)
+                        .count(),
+                };
+                assert!(
+                    stream.len() > rise + 10
+                        && stream[rise..].iter().all(|played| plays_at(*played, peak)),
+                    "stream {index} at {db} dB is not all at {peak} after {rise} buffers: \
+                     {stream:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn auto_plays_a_track_in_order_at_album_gain_and_its_shuffled_successor_at_track_gain() {
+            let fixtures = Fixtures::new("replay-gain-auto-gapless");
+            let first = album_track(&fixtures, "first.flac", 4_000);
+            let picked = album_track(&fixtures, "picked.flac", 4_000);
+            let mut engine = Engine::start();
+            let streams = record_streams(&engine.playbin);
+            engine.send(PlaybackCommand::SetReplayGain(settings(
+                ReplayGainMode::Auto,
+                0.0,
+                0.0,
+            )));
+            // The first row plays as loaded; shuffle picks the one after it.
+            engine.send(PlaybackCommand::SetShuffle(true));
+            engine.send(PlaybackCommand::LoadQueue(vec![first, picked.clone()]));
+            engine.send(PlaybackCommand::Play);
+            assert_change(&engine.wait_for_changes(2), &picked, 1, Expect::Gapless);
+            engine.wait_until("the queue did not play to its end", |engine| {
+                engine.snapshot.state == PlaybackState::Stopped
+            });
+
+            // Each gain from its stream's first sample to its last.
+            assert_streams_at(
+                &streams.lock().unwrap(),
+                &[(ALBUM_DB, Start::Run), (TRACK_DB, Start::Gapless)],
+            );
+            assert_eq!(
+                auto_choices(&engine, engine.changes[0].token),
+                [Some(GainChoice::Album)]
+            );
+            assert_eq!(
+                auto_choices(&engine, engine.changes[1].token),
+                [Some(GainChoice::Track)]
+            );
+        }
+
+        #[test]
+        fn auto_gives_a_track_the_user_picks_album_gain_also_with_shuffle_on() {
+            let fixtures = Fixtures::new("replay-gain-auto-user-pick");
+            let rows: Vec<PathBuf> = ["a.flac", "b.flac", "c.flac"]
+                .iter()
+                .map(|name| album_track(&fixtures, name, 12_000))
+                .collect();
+            let mut engine = Engine::start();
+            let streams = record_streams(&engine.playbin);
+            engine.send(PlaybackCommand::SetReplayGain(settings(
+                ReplayGainMode::Auto,
+                0.0,
+                0.0,
+            )));
+            engine.send(PlaybackCommand::SetShuffle(true));
+            engine.send(PlaybackCommand::LoadQueue(rows));
+            engine.send(PlaybackCommand::Play);
+            let wait_for_choice = |engine: &mut Engine, change: usize, choice: GainChoice| {
+                let token = engine.wait_for_changes(change + 1).token;
+                engine.wait_until(&format!("{choice:?} gain was not reported"), |engine| {
+                    engine.snapshot.replay_gain.is_some_and(|report| {
+                        report.track_token == token && report.applied.auto == Some(choice)
+                    })
+                });
+                engine.wait_until("the stream did not play", |_| {
+                    let streams = streams.lock().unwrap();
+                    streams.len() == change + 1 && streams[change].len() > 10
+                });
+            };
+            wait_for_choice(&mut engine, 0, GainChoice::Album);
+            // Next picks at random.
+            engine.send(PlaybackCommand::Next);
+            wait_for_choice(&mut engine, 1, GainChoice::Track);
+            // The user picks a row.
+            let picked = (engine.changes[1].index + 1) % 3;
+            engine.send(PlaybackCommand::PlayAt(picked));
+            wait_for_choice(&mut engine, 2, GainChoice::Album);
+            assert_eq!(engine.changes[2].index, picked);
+
+            assert_streams_at(
+                &streams.lock().unwrap(),
+                &[
+                    (ALBUM_DB, Start::Run),
+                    (TRACK_DB, Start::Run),
+                    (ALBUM_DB, Start::Run),
+                ],
+            );
+        }
+
+        #[test]
+        fn auto_keeps_a_shuffle_picks_track_gain_on_each_repeat_one_pass() {
+            let fixtures = Fixtures::new("replay-gain-auto-repeat-one");
+            let first = album_track(&fixtures, "first.flac", 3_000);
+            let picked = album_track(&fixtures, "picked.flac", 3_000);
+            let mut engine = Engine::start();
+            let streams = record_streams(&engine.playbin);
+            engine.send(PlaybackCommand::SetReplayGain(settings(
+                ReplayGainMode::Auto,
+                0.0,
+                0.0,
+            )));
+            engine.send(PlaybackCommand::SetShuffle(true));
+            engine.send(PlaybackCommand::SetRepeatMode(RepeatMode::One));
+            engine.send(PlaybackCommand::LoadQueue(vec![first, picked.clone()]));
+            engine.send(PlaybackCommand::Play);
+            let token = engine.wait_for_changes(1).token;
+            engine.wait_until("album gain was not reported", |engine| {
+                engine.snapshot.replay_gain.is_some_and(|report| {
+                    report.track_token == token && report.applied.auto == Some(GainChoice::Album)
+                })
+            });
+            // Next picks the other row at random, which Repeat-One plays again.
+            engine.send(PlaybackCommand::Next);
+            let next = engine.wait_for_changes(2);
+            assert_change(&next, &picked, 1, Expect::Manual);
+            let replay = engine.wait_for_changes(3);
+            assert_change(&replay, &picked, 1, Expect::Gapless);
+            engine.wait_until("the second pass did not play", |engine| {
+                engine
+                    .snapshot
+                    .replay_gain
+                    .is_some_and(|report| report.track_token == replay.token)
+                    && streams
+                        .lock()
+                        .unwrap()
+                        .last()
+                        .is_some_and(|pass| pass.len() > 12)
+            });
+
+            let streams = streams.lock().unwrap().clone();
+            let passes = &streams[streams.len() - 2..];
+            assert_streams_at(
+                passes,
+                &[(TRACK_DB, Start::Run), (TRACK_DB, Start::Gapless)],
+            );
+            for change in [&next, &replay] {
+                assert_eq!(
+                    auto_choices(&engine, change.token),
+                    [Some(GainChoice::Track)],
+                    "{change:?}"
+                );
+            }
+        }
+
+        /// Turning shuffle on drops the successor staged in the queue's
+        /// order, which the pipeline was given, and restarts the current
+        /// track: the track keeps its album gain, and the shuffle pick
+        /// staged in the successor's place plays at its track gain.
+        #[test]
+        fn auto_takes_the_pick_of_the_successor_staged_after_a_shuffle_change() {
+            let fixtures = Fixtures::new("replay-gain-auto-restaged");
+            let first = album_track(&fixtures, "first.flac", 4_000);
+            let next = album_track(&fixtures, "next.flac", 4_000);
+            let mut engine = Engine::start();
+            let streams = record_streams(&engine.playbin);
+            engine.send(PlaybackCommand::SetReplayGain(settings(
+                ReplayGainMode::Auto,
+                0.0,
+                0.0,
+            )));
+            engine.send(PlaybackCommand::LoadQueue(vec![first, next.clone()]));
+            engine.send(PlaybackCommand::Play);
+            engine.wait_for_settled_window(&next);
+            assert_eq!(streams.lock().unwrap().len(), 1);
+            engine.send(PlaybackCommand::SetShuffle(true));
+            assert_change(&engine.wait_for_changes(2), &next, 1, Expect::Gapless);
+            engine.wait_until("the queue did not play to its end", |engine| {
+                engine.snapshot.state == PlaybackState::Stopped
+            });
+
+            // The first track, the restart of it, then its successor.
+            let streams = streams.lock().unwrap().clone();
+            assert_streams_at(
+                &streams,
+                &[
+                    (ALBUM_DB, Start::Run),
+                    (ALBUM_DB, Start::Run),
+                    (TRACK_DB, Start::Gapless),
+                ],
+            );
+            assert_eq!(
+                auto_choices(&engine, engine.changes[0].token),
+                [Some(GainChoice::Album)]
+            );
+            assert_eq!(
+                auto_choices(&engine, engine.changes[1].token),
+                [Some(GainChoice::Track)]
+            );
         }
 
         /// Record the format and samples of every buffer of 24-bit mono audio

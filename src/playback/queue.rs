@@ -13,7 +13,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use super::{PathRenames, RepeatMode};
+use super::{PathRenames, RepeatMode, TrackPick};
 
 /// A queue position together with the shuffle navigation and random state
 /// that led to it. An advance is planned on a copy, so committing installs
@@ -25,6 +25,10 @@ struct Cursor {
     shuffle_forward: Vec<usize>,
     shuffle_pool: Vec<usize>,
     rng_state: u64,
+    /// How the track at `index` came to play. Repeat-One keeps it, and a
+    /// change to the queue or its rules leaves it as it is, so the track
+    /// keeps the gain that Auto mode chose for it.
+    pick: TrackPick,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +102,7 @@ impl Cursor {
                             self.shuffle_forward.push(self.index);
                         }
                         self.index = previous;
+                        self.pick = TrackPick::Shuffle;
                         return true;
                     }
                 }
@@ -122,6 +127,11 @@ impl Cursor {
         } else {
             return false;
         };
+        if target != self.index {
+            // The only row, which plays again as it came to play, is no
+            // move in the queue's order.
+            self.pick = TrackPick::Other;
+        }
         self.index = target;
         self.rebuild_shuffle_pool(len);
         true
@@ -133,6 +143,7 @@ impl Cursor {
                 self.shuffle_history.push(self.index);
             }
             self.index = next;
+            self.pick = TrackPick::Shuffle;
             return true;
         }
         self.advance_shuffle_random(len, rules)
@@ -141,6 +152,7 @@ impl Cursor {
     fn advance_shuffle_random(&mut self, len: usize, rules: Rules) -> bool {
         let allow_repeat_cycle = rules.repeat_mode == RepeatMode::All;
         if len == 1 {
+            // The only row plays again, as it came to play: no pick.
             return allow_repeat_cycle || rules.repeat_mode == RepeatMode::One;
         }
         if self.shuffle_pool.is_empty() {
@@ -159,6 +171,7 @@ impl Cursor {
             self.shuffle_history.push(self.index);
         }
         self.index = next;
+        self.pick = TrackPick::Shuffle;
         true
     }
 }
@@ -224,6 +237,8 @@ pub(crate) struct StagedAdvance {
     /// Ask analysis to prepare a spectrogram continuation. Only the
     /// gapless successor of the audible track is prepared.
     pub(crate) staged_spectrogram: bool,
+    /// How the successor came to play.
+    pub(crate) pick: TrackPick,
 }
 
 /// A staged successor whose audio has started.
@@ -353,6 +368,13 @@ impl GaplessQueue {
         (!self.queue.is_empty()).then_some(self.cursor.index)
     }
 
+    /// How the committed track came to play. The simulated backend applies
+    /// no gain.
+    #[cfg(any(test, feature = "gst"))]
+    pub(crate) fn current_pick(&self) -> TrackPick {
+        self.cursor.pick
+    }
+
     /// Path of the row at `index`.
     #[cfg(feature = "gst")]
     pub(crate) fn path_at(&self, index: usize) -> Option<&Path> {
@@ -437,6 +459,7 @@ impl GaplessQueue {
         let cancelled = self.cancel_pending();
         self.queue = queue;
         self.cursor.index = 0;
+        self.cursor.pick = TrackPick::Other;
         self.cursor.reset_navigation(self.queue.len());
         cancelled
     }
@@ -506,6 +529,8 @@ impl GaplessQueue {
         let path = self.queue.get(idx).cloned()?;
         let cancelled = self.cancel_pending();
         self.cursor.index = idx;
+        // The user's pick, also with shuffle on.
+        self.cursor.pick = TrackPick::Other;
         self.cursor.reset_navigation(self.queue.len());
         Some(ManualMove {
             path,
@@ -537,6 +562,10 @@ impl GaplessQueue {
         self.cursor.index =
             super::remove_queue_indices(&mut self.queue, Some(self.cursor.index), &removed)
                 .unwrap_or(0);
+        if current_removed {
+            // The row that takes the removed one's place, in queue order.
+            self.cursor.pick = TrackPick::Other;
+        }
         let len = self.queue.len();
         self.for_each_cursor(|cursor| cursor.reset_navigation(len));
         Removal {
@@ -687,6 +716,11 @@ impl GaplessQueue {
                 return None;
             }
             if !self.row_failed(cursor.index) {
+                if !rules.shuffle_enabled && cursor.index == from.index {
+                    // Past failed rows, back to the row it started from,
+                    // which plays again as it came to play.
+                    cursor.pick = from.pick;
+                }
                 return Some(cursor);
             }
         }
@@ -732,6 +766,7 @@ impl GaplessQueue {
             handoff(&finishing, &path)
         };
         let staged_spectrogram = handoff == Handoff::Gapless && self.pending.is_empty();
+        let pick = cursor.pick;
         self.pending.push_back(PendingAdvance {
             path: path.clone(),
             cursor,
@@ -743,6 +778,7 @@ impl GaplessQueue {
             path,
             handoff,
             staged_spectrogram,
+            pick,
         })
     }
 
@@ -858,7 +894,7 @@ mod tests {
 
     use super::{
         same_audio_extension, Advance, CancelledAdvance, GaplessQueue, Handoff, PathRenames,
-        RepeatMode,
+        RepeatMode, TrackPick,
     };
 
     fn paths(count: usize) -> Vec<PathBuf> {
@@ -901,6 +937,181 @@ mod tests {
         assert!(!queue.successor_handed_to_pipeline());
         assert_eq!(queue.current_index(), Some(1));
         assert!(queue.pending.is_empty());
+    }
+
+    #[test]
+    fn each_track_keeps_how_it_came_to_play() {
+        let (mut queue, _) = queue_of(6);
+        queue.seed_shuffle(7);
+        assert_eq!(queue.current_pick(), TrackPick::Other);
+        // In the queue's order.
+        assert_eq!(queue.stage_natural(gapless).unwrap().pick, TrackPick::Other);
+        queue.commit_gapless();
+        assert_eq!(queue.current_pick(), TrackPick::Other);
+
+        // Turning shuffle on leaves the current track as it came to play;
+        // the next one is a shuffle pick.
+        queue.set_shuffle_enabled(true);
+        assert_eq!(queue.current_pick(), TrackPick::Other);
+        assert_eq!(
+            queue.stage_natural(gapless).unwrap().pick,
+            TrackPick::Shuffle
+        );
+        queue.commit_gapless();
+        assert_eq!(queue.current_pick(), TrackPick::Shuffle);
+
+        // Repeat-One plays it again as it first came to play.
+        queue.set_repeat_mode(RepeatMode::One);
+        let current = queue.current_index();
+        let again = queue.stage_natural(gapless).unwrap();
+        assert_eq!(again.pick, TrackPick::Shuffle);
+        assert_eq!(committed_index(&mut queue), current);
+        assert_eq!(queue.current_pick(), TrackPick::Shuffle);
+
+        // Turning shuffle off, or editing the queue, leaves it too; the
+        // next track in order is not a shuffle pick.
+        queue.set_repeat_mode(RepeatMode::All);
+        queue.set_shuffle_enabled(false);
+        assert_eq!(queue.current_pick(), TrackPick::Shuffle);
+        let current = queue.current_index().unwrap();
+        let other = (current + 3) % 6;
+        queue.move_item(other, (other + 1) % 6);
+        assert_eq!(queue.current_pick(), TrackPick::Shuffle);
+        assert_eq!(queue.stage_natural(gapless).unwrap().pick, TrackPick::Other);
+        queue.commit_gapless();
+        assert_eq!(queue.current_pick(), TrackPick::Other);
+
+        // A successor dropped before it starts leaves the current track's.
+        queue.set_shuffle_enabled(true);
+        assert_eq!(
+            queue.stage_natural(gapless).unwrap().pick,
+            TrackPick::Shuffle
+        );
+        assert_eq!(queue.cancel_pending(), HANDED);
+        assert_eq!(queue.current_pick(), TrackPick::Other);
+
+        // A shuffle pick that starts at end of stream keeps its pick.
+        let staged = queue.stage_natural(|_, _| Handoff::AtEos).unwrap();
+        assert_eq!(staged.pick, TrackPick::Shuffle);
+        queue.take_eos_successor().unwrap();
+        assert_eq!(queue.current_pick(), TrackPick::Shuffle);
+    }
+
+    #[test]
+    fn the_only_row_plays_again_as_it_came_to_play() {
+        let (mut queue, _) = queue_of(1);
+        queue.set_shuffle_enabled(true);
+        queue.set_repeat_mode(RepeatMode::All);
+        assert_eq!(queue.stage_natural(gapless).unwrap().pick, TrackPick::Other);
+        // Repeat-One keeps that replay, which keeps the first pass's pick.
+        assert_eq!(queue.set_repeat_mode(RepeatMode::One), None);
+        queue.commit_gapless().unwrap();
+        assert_eq!(queue.current_pick(), TrackPick::Other);
+        assert_eq!(queue.next_manual().unwrap().index, 0);
+        assert_eq!(queue.current_pick(), TrackPick::Other);
+
+        // A shuffle pick left as the only row, with shuffle off, plays again
+        // as a shuffle pick too.
+        let (mut queue, _) = queue_of(3);
+        queue.set_shuffle_enabled(true);
+        let picked = queue.next_manual().unwrap().index;
+        assert_eq!(queue.current_pick(), TrackPick::Shuffle);
+        let others: Vec<usize> = (0..3).filter(|row| *row != picked).collect();
+        assert!(!queue.remove_many(&others).current_removed);
+        queue.set_shuffle_enabled(false);
+        queue.set_repeat_mode(RepeatMode::All);
+        assert_eq!(
+            queue.stage_natural(gapless).unwrap().pick,
+            TrackPick::Shuffle
+        );
+        assert_eq!(queue.set_repeat_mode(RepeatMode::One), None);
+        queue.commit_gapless().unwrap();
+        assert_eq!(queue.current_pick(), TrackPick::Shuffle);
+        queue.set_repeat_mode(RepeatMode::All);
+        assert_eq!(queue.previous_manual().unwrap().index, 0);
+        assert_eq!(queue.current_pick(), TrackPick::Shuffle);
+
+        // So does one whose other rows failed: the search steps past them
+        // back to it.
+        let (mut queue, paths) = queue_of(3);
+        queue.set_shuffle_enabled(true);
+        let picked = queue.next_manual().unwrap().index;
+        for (row, path) in paths.iter().enumerate() {
+            if row != picked {
+                queue.mark_failed(path.clone());
+            }
+        }
+        queue.set_shuffle_enabled(false);
+        queue.set_repeat_mode(RepeatMode::All);
+        let replay = queue.stage_natural(gapless).unwrap();
+        assert_eq!(replay.path, paths[picked]);
+        assert_eq!(replay.pick, TrackPick::Shuffle);
+        assert_eq!(queue.set_repeat_mode(RepeatMode::One), None);
+        queue.commit_gapless().unwrap();
+        assert_eq!(queue.current_pick(), TrackPick::Shuffle);
+    }
+
+    #[test]
+    fn a_track_the_user_picks_is_no_shuffle_pick_also_with_shuffle_on() {
+        let (mut queue, paths) = queue_of(6);
+        queue.set_shuffle_enabled(true);
+        queue.next_manual().unwrap();
+        assert_eq!(
+            queue.current_pick(),
+            TrackPick::Shuffle,
+            "Next picks at random"
+        );
+
+        queue.set_current(3).unwrap();
+        assert_eq!(queue.current_pick(), TrackPick::Other);
+
+        queue.next_manual().unwrap();
+        assert_eq!(queue.current_pick(), TrackPick::Shuffle);
+        let _ = queue.set_queue(paths.clone());
+        assert_eq!(queue.current_pick(), TrackPick::Other);
+
+        // Removing the current track plays the row in its place.
+        queue.next_manual().unwrap();
+        let removal = queue.remove_many(&[queue.current_index().unwrap()]);
+        assert!(removal.current_removed);
+        assert_eq!(queue.current_pick(), TrackPick::Other);
+
+        queue.next_manual().unwrap();
+        let _ = queue.clear();
+        assert_eq!(queue.current_pick(), TrackPick::Other);
+    }
+
+    #[test]
+    fn steps_through_shuffle_history_are_shuffle_picks_and_steps_in_order_are_not() {
+        let (mut queue, _) = queue_of(6);
+        // Previous from the first row wraps to the last.
+        queue.set_repeat_mode(RepeatMode::All);
+        queue.set_shuffle_enabled(true);
+        queue.set_current(2).unwrap();
+        let picked = queue.next_manual().unwrap().index;
+        assert_eq!(queue.current_pick(), TrackPick::Shuffle);
+
+        // Back through the history, then forward again.
+        assert_eq!(queue.previous_manual().unwrap().index, 2);
+        assert_eq!(queue.current_pick(), TrackPick::Shuffle);
+        assert_eq!(queue.next_manual().unwrap().index, picked);
+        assert_eq!(queue.current_pick(), TrackPick::Shuffle);
+
+        // Previous with no history left steps back in the queue's order.
+        assert_eq!(queue.previous_manual().unwrap().index, 2);
+        let in_order = queue.previous_manual().unwrap();
+        assert_eq!(in_order.index, 1);
+        assert_eq!(queue.current_pick(), TrackPick::Other);
+
+        queue.set_shuffle_enabled(false);
+        queue.next_manual().unwrap();
+        assert_eq!(queue.current_pick(), TrackPick::Other);
+        queue.set_shuffle_enabled(true);
+        queue.next_manual().unwrap();
+        assert_eq!(queue.current_pick(), TrackPick::Shuffle);
+        queue.set_shuffle_enabled(false);
+        queue.previous_manual().unwrap();
+        assert_eq!(queue.current_pick(), TrackPick::Other);
     }
 
     #[test]

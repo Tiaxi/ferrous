@@ -328,6 +328,7 @@ ApplicationWindow {
         property double replayGainAppliedPreampDb: 0
         property double replayGainAppliedDb: 0
         property bool replayGainPeakLimited: false
+        property int replayGainAuto: 0
         property bool lastFmScrobblingPaused: false
         property int lastFmScrobbleState: 0
         property int lastFmScrobbleIneligibility: 0

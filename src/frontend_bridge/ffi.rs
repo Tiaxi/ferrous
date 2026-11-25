@@ -33,7 +33,8 @@ use crate::panic_guard;
 #[cfg(test)]
 use crate::panic_guard::test_hooks;
 use crate::playback::{
-    PathRenames, PlaybackState, RepeatMode, ReplayGainMode, ReplayGainReport, ReplayGainSettings,
+    GainChoice, PathRenames, PlaybackState, RepeatMode, ReplayGainMode, ReplayGainReport,
+    ReplayGainSettings,
 };
 use crate::save_cause::SaveCause;
 use crate::tag_editor;
@@ -3120,14 +3121,17 @@ fn encode_playback_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
 /// it was chosen (0 none, while off or before the track plays; 1 the track
 /// gain, 2 the album gain, 3 the track gain for want of an album gain, 4
 /// the gain for untagged files), the f32 gain, the f32 preamp and the f32
-/// gain applied, in dB, a u8 that is 1 when the peak lowered it, and the
-/// u64 token of the track it applies to. Zeros without one.
+/// gain applied, in dB, a u8 that is 1 when the peak lowered it, a u8 for
+/// the gain Auto mode chose (0 in the other modes, 1 the track gain, 2 the
+/// album gain), and the u64 token of the track it applies to. Zeros
+/// without one.
 fn push_replay_gain_report(out: &mut Vec<u8>, report: Option<&ReplayGainReport>) {
     let Some(report) = report else {
         push_u8(out, 0);
         push_f32(out, 0.0);
         push_f32(out, 0.0);
         push_f32(out, 0.0);
+        push_u8(out, 0);
         push_u8(out, 0);
         push_u64(out, 0);
         return;
@@ -3140,6 +3144,7 @@ fn push_replay_gain_report(out: &mut Vec<u8>, report: Option<&ReplayGainReport>)
     push_f32(out, db(applied.preamp_db));
     push_f32(out, db(applied.applied_db));
     push_u8(out, u8::from(applied.peak_limited));
+    push_u8(out, applied.auto.map_or(0, GainChoice::to_u8));
     push_u64(out, report.track_token);
 }
 
@@ -3406,7 +3411,7 @@ fn encode_settings_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
 }
 
 /// The `ReplayGain` settings as command 81 lays them out: the u8 mode (0
-/// off, 1 track, 2 album), then the f32 preamp and the f32 gain for files
+/// off, 1 track, 2 album, 3 auto), then the f32 preamp and the f32 gain for files
 /// without gain tags, in dB.
 fn push_replay_gain_settings(out: &mut Vec<u8>, settings: &ReplayGainSettings) {
     push_u8(out, settings.mode.to_u8());
@@ -3419,6 +3424,7 @@ fn read_replay_gain_settings(reader: &mut BinaryReader<'_>) -> Result<ReplayGain
         0 => ReplayGainMode::Off,
         1 => ReplayGainMode::Track,
         2 => ReplayGainMode::Album,
+        3 => ReplayGainMode::Auto,
         _ => return Err("unknown ReplayGain mode".to_string()),
     };
     let preamp_db = reader.read_f32()?;
@@ -6271,6 +6277,7 @@ mod tests {
             (0, ReplayGainMode::Off),
             (1, ReplayGainMode::Track),
             (2, ReplayGainMode::Album),
+            (3, ReplayGainMode::Auto),
         ] {
             let cmd = parsed(&replay_gain_payload(code, -2.5, 6.0))
                 .expect("parse ReplayGain settings")
@@ -6309,7 +6316,7 @@ mod tests {
             if settings.preamp_db == 15.0 && settings.untagged_db == -15.0));
         assert!(parsed(&replay_gain_payload(1, f32::NAN, 0.0)).is_err());
         assert!(parsed(&replay_gain_payload(1, 0.0, f32::INFINITY)).is_err());
-        assert!(parsed(&replay_gain_payload(3, 0.0, 0.0)).is_err());
+        assert!(parsed(&replay_gain_payload(4, 0.0, 0.0)).is_err());
         assert!(parsed(&replay_gain_payload(1, 0.0, 0.0)[..8]).is_err());
         let mut long = replay_gain_payload(1, 0.0, 0.0);
         long.push(0);
@@ -6334,31 +6341,39 @@ mod tests {
         let none = encode_playback_section(&snapshot);
         let mut expected = vec![0];
         expected.extend([0; 12]);
-        expected.push(0);
+        expected.extend([0, 0]);
         expected.extend([0; 8]);
         assert!(none.ends_with(&expected), "{none:?}");
 
-        snapshot.playback.replay_gain = Some(ReplayGainReport {
-            applied: AppliedGain {
-                source: GainSource::TrackWithoutAlbum,
-                gain_db: -6.4,
-                preamp_db: 1.5,
-                applied_db: -4.9,
-                peak_limited: true,
-                linear: 0.57,
-            },
-            track_token: 7,
-        });
-        let section = encode_playback_section(&snapshot);
-        assert_eq!(section.len(), none.len());
-        let mut reader = BinaryReader::new(&section[section.len() - expected.len()..]);
-        assert_eq!(reader.read_u8().unwrap(), 3);
-        assert!((reader.read_f32().unwrap() + 6.4).abs() < 1e-6);
-        assert!((reader.read_f32().unwrap() - 1.5).abs() < 1e-6);
-        assert!((reader.read_f32().unwrap() + 4.9).abs() < 1e-6);
-        assert_eq!(reader.read_u8().unwrap(), 1);
-        assert_eq!(reader.read_u64().unwrap(), 7);
-        reader.expect_done().unwrap();
+        for (auto, code) in [
+            (None, 0),
+            (Some(GainChoice::Track), 1),
+            (Some(GainChoice::Album), 2),
+        ] {
+            snapshot.playback.replay_gain = Some(ReplayGainReport {
+                applied: AppliedGain {
+                    source: GainSource::TrackWithoutAlbum,
+                    gain_db: -6.4,
+                    preamp_db: 1.5,
+                    applied_db: -4.9,
+                    peak_limited: true,
+                    linear: 0.57,
+                    auto,
+                },
+                track_token: 7,
+            });
+            let section = encode_playback_section(&snapshot);
+            assert_eq!(section.len(), none.len());
+            let mut reader = BinaryReader::new(&section[section.len() - expected.len()..]);
+            assert_eq!(reader.read_u8().unwrap(), 3);
+            assert!((reader.read_f32().unwrap() + 6.4).abs() < 1e-6);
+            assert!((reader.read_f32().unwrap() - 1.5).abs() < 1e-6);
+            assert!((reader.read_f32().unwrap() + 4.9).abs() < 1e-6);
+            assert_eq!(reader.read_u8().unwrap(), 1);
+            assert_eq!(reader.read_u8().unwrap(), code, "{auto:?}");
+            assert_eq!(reader.read_u64().unwrap(), 7);
+            reader.expect_done().unwrap();
+        }
     }
 
     #[test]
@@ -8946,8 +8961,8 @@ mod tests {
             result.playback_play_serial = u64::from_le_bytes(s[p..p + 8].try_into().unwrap());
             p += 8;
             // The applied ReplayGain: its source, three gains, whether the
-            // peak limited it, and its track.
-            p += 1 + 12 + 1 + 8;
+            // peak limited it, the gain Auto chose, and its track.
+            p += 1 + 12 + 1 + 1 + 8;
             assert_eq!(p, section_len, "the ReplayGain ends the playback section");
             offset += section_len;
         }

@@ -103,8 +103,9 @@ ToolBar {
         ? I18n.i18nc("@info:status %1 is a gain such as −6.4 dB", "ReplayGain %1",
             FormatUtils.formatGainDb(root.uiBridge.replayGainAppliedDb))
         : ""
-    // The format's tooltip: the gain, how it was chosen, and whether the
-    // peak lowered it. Nothing while ReplayGain applies none.
+    // The format's tooltip: the gain, how it was chosen, which gain Auto
+    // chose, and whether the peak lowered it. Nothing while ReplayGain
+    // applies none.
     readonly property string replayGainToolTipText: {
         if (root.replayGainSource <= 0) {
             return ""
@@ -122,8 +123,8 @@ ToolBar {
                 "Album gain %1, preamp %2", gain, preamp)
             break
         case 3:
-            chosen = I18n.i18nc("@info:tooltip ReplayGain in Album mode for a file without an album "
-                + "gain; %1 and %2 are gains such as −6.4 dB",
+            chosen = I18n.i18nc("@info:tooltip ReplayGain with album gain chosen, for a file without "
+                + "an album gain; %1 and %2 are gains such as −6.4 dB",
                 "Track gain %1 (no album gain), preamp %2", gain, preamp)
             break
         default:
@@ -132,6 +133,18 @@ ToolBar {
                 "No gain tags: untagged gain %1, preamp %2", gain, preamp)
         }
         const lines = [root.replayGainText, chosen]
+        // A BinaryBridgeCodec::ReplayGainChoice: 0 in the modes other than
+        // Auto.
+        switch (Number(root.uiBridge.replayGainAuto || 0)) {
+        case 1:
+            lines.push(I18n.i18nc("@info:tooltip ReplayGain Auto mode",
+                "Auto chose track gain: shuffle picked the track"))
+            break
+        case 2:
+            lines.push(I18n.i18nc("@info:tooltip ReplayGain Auto mode",
+                "Auto chose album gain: shuffle did not pick the track"))
+            break
+        }
         if (root.uiBridge.replayGainPeakLimited === true) {
             lines.push(I18n.i18nc("@info:tooltip ReplayGain", "Limited by the peak to avoid clipping"))
         }

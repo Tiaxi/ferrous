@@ -1580,6 +1580,7 @@ mod tests {
                 applied_db: -6.0,
                 peak_limited: false,
                 linear: 0.5,
+                auto: None,
             },
             track_token: 3,
         };

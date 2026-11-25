@@ -943,6 +943,28 @@ mod tests {
     }
 
     #[test]
+    fn replay_gain_auto_mode_is_saved_and_read_back() {
+        let mut settings = BridgeSettings::default();
+        settings.replay_gain.mode = ReplayGainMode::Auto;
+        let text = format_settings_text(&settings);
+        assert!(
+            text.lines().any(|line| line == "replaygain_mode=auto"),
+            "{text}"
+        );
+        let mut parsed = BridgeSettings::default();
+        parse_settings_text(&mut parsed, &text);
+        assert_eq!(parsed.replay_gain.mode, ReplayGainMode::Auto);
+        // As the mode's code too.
+        let mut parsed = BridgeSettings::default();
+        parse_settings_text(
+            &mut parsed,
+            "replaygain_mode=3
+",
+        );
+        assert_eq!(parsed.replay_gain.mode, ReplayGainMode::Auto);
+    }
+
+    #[test]
     fn replay_gain_settings_out_of_range_are_clamped_and_unknown_values_ignored() {
         let mut parsed = BridgeSettings::default();
         parse_settings_text(

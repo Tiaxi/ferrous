@@ -2187,6 +2187,10 @@ bool BridgeClient::replayGainPeakLimited() const {
     return m_replayGainPeakLimited;
 }
 
+int BridgeClient::replayGainAuto() const {
+    return m_replayGainAuto;
+}
+
 bool BridgeClient::lastFmScrobblingPaused() const {
     return m_lastFmScrobblingPaused;
 }
@@ -3239,7 +3243,7 @@ void BridgeClient::sendReplayGain() {
 
 void BridgeClient::setReplayGainMode(int mode) {
     const int clamped = std::clamp(mode, int(BinaryBridgeCodec::ReplayGainOff),
-        int(BinaryBridgeCodec::ReplayGainAlbum));
+        int(BinaryBridgeCodec::ReplayGainAuto));
     if (m_replayGainMode != clamped) {
         m_replayGainMode = clamped;
         scheduleSnapshotChanged();
@@ -6159,14 +6163,17 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         const double preampDb = current ? playback.replayGainPreampDb : 0.0;
         const double appliedDb = current ? playback.replayGainAppliedDb : 0.0;
         const bool peakLimited = current && playback.replayGainPeakLimited;
+        const int autoChoice = current ? playback.replayGainAuto
+                                       : int(BinaryBridgeCodec::ReplayGainChoiceNone);
         if (m_replayGainSource != source || m_replayGainSourceDb != sourceDb
             || m_replayGainAppliedPreampDb != preampDb || m_replayGainAppliedDb != appliedDb
-            || m_replayGainPeakLimited != peakLimited) {
+            || m_replayGainPeakLimited != peakLimited || m_replayGainAuto != autoChoice) {
             m_replayGainSource = source;
             m_replayGainSourceDb = sourceDb;
             m_replayGainAppliedPreampDb = preampDb;
             m_replayGainAppliedDb = appliedDb;
             m_replayGainPeakLimited = peakLimited;
+            m_replayGainAuto = autoChoice;
             changed = true;
             playbackSignalChanged = true;
         }
