@@ -3472,6 +3472,7 @@ mod tests {
                     ..crate::library::LibraryStatus::default()
                 },
                 read_after: 0,
+                stopped: false,
             }],
             &mut state,
         );

@@ -1398,6 +1398,9 @@ struct BridgeLoopRuntime {
     persisted_state_enabled: bool,
     /// How often each worker was restarted after it stopped.
     worker_restarts: HashMap<Worker, u32>,
+    /// The workers whose last result said that they stop, and why: the end
+    /// of their results that follows is no crash to report.
+    stops_explained: HashSet<Worker>,
     /// How often the loop woke because a worker had stopped.
     #[cfg(test)]
     stopped_worker_wakes: usize,
@@ -1663,6 +1666,7 @@ impl BridgeLoopRuntime {
             deferred_tree_rebuild_at: None,
             persisted_state_enabled: options.persisted_state_enabled,
             worker_restarts: HashMap::new(),
+            stops_explained: HashSet::new(),
             #[cfg(test)]
             stopped_worker_wakes: 0,
             #[cfg(test)]
@@ -2032,8 +2036,11 @@ impl BridgeLoopRuntime {
         {
             self.stopped_worker_wakes += 1;
         }
+        // A worker that said why it stops, which the user has seen, is not
+        // restarted to fail again, nor reported as having crashed.
+        let explained = self.stops_explained.contains(&worker);
         let restarts = self.worker_restarts.entry(worker).or_insert(0);
-        let restart = worker.restartable() && *restarts < MAX_WORKER_RESTARTS;
+        let restart = !explained && worker.restartable() && *restarts < MAX_WORKER_RESTARTS;
         if restart {
             *restarts += 1;
         }
@@ -2092,6 +2099,9 @@ impl BridgeLoopRuntime {
                     );
                 }
             }
+        }
+        if explained {
+            return;
         }
         let message = if restart {
             format!(
@@ -2381,6 +2391,9 @@ impl BridgeLoopRuntime {
             .into_iter()
             .chain(self.library_rx.try_iter())
             .collect();
+        if events.iter().any(|event| event.stopped) {
+            self.stops_explained.insert(Worker::Library);
+        }
         // A rename on its way that read its files before these rows were
         // read must not replace them, nor older rows kept for it. Without
         // one, a rename sent later takes a higher number than theirs.
@@ -3541,6 +3554,88 @@ mod tests {
             })
             .count();
         assert_eq!(reports, 1, "{errors:?}");
+    }
+
+    /// Runs the loop's wakes until the library worker's channel closes,
+    /// with the other engines cut off.
+    fn run_until_the_library_worker_stops(
+        runtime: &mut BridgeLoopRuntime,
+        event_tx: &Sender<BridgeEvent>,
+    ) {
+        cut_off_workers(runtime, &[Worker::Library]);
+        let (_cmd_tx, cmd_rx) = unbounded();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            assert!(Instant::now() < deadline, "the library worker stops");
+            let wake = runtime.wait_for_wake(&cmd_rx);
+            let stopped = matches!(wake, BridgeLoopWake::WorkerStopped(Worker::Library));
+            runtime.handle_wake(wake, event_tx);
+            if stopped {
+                return;
+            }
+        }
+    }
+
+    #[test]
+    fn a_library_that_could_not_be_opened_is_reported_once_not_as_a_crash() {
+        let _guard = test_guard();
+        // A folder where the database should be cannot be opened (#774).
+        let db = crate::paths::test_root().join("bridge-unopenable-library/library.sqlite3");
+        std::fs::create_dir_all(&db).expect("folder in the database's place");
+        let mut runtime = BridgeLoopRuntime::new(
+            BridgeRuntimeOptions {
+                library_db: Some(db),
+                ..BridgeRuntimeOptions::default()
+            },
+            None,
+        );
+        let (event_tx, event_rx) = unbounded();
+
+        run_until_the_library_worker_stops(&mut runtime, &event_tx);
+
+        let open_error = runtime.state.library_status.last_error.clone();
+        assert!(
+            open_error
+                .as_deref()
+                .is_some_and(|error| error.contains("could not open the library database")),
+            "{open_error:?}"
+        );
+        let errors = error_messages(&event_rx);
+        assert!(
+            !errors
+                .iter()
+                .any(|message| message.contains("stopped unexpectedly")),
+            "the worker said why it stopped: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_library_worker_that_stops_without_saying_so_is_reported_as_stopped() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        // An error the worker goes on after, and then its thread ends, as
+        // when it panics: the error does not say that it stops.
+        let (library_tx, library_rx) = unbounded();
+        library_tx
+            .send(LibraryEvent {
+                status: crate::library::LibraryStatus {
+                    last_error: Some("could not open the library database".to_string()),
+                    ..crate::library::LibraryStatus::default()
+                },
+                ..LibraryEvent::default()
+            })
+            .unwrap();
+        drop(library_tx);
+        runtime.library_rx = library_rx;
+        let (event_tx, event_rx) = unbounded();
+
+        run_until_the_library_worker_stops(&mut runtime, &event_tx);
+
+        let errors = error_messages(&event_rx);
+        assert_eq!(
+            errors,
+            ["The library stopped unexpectedly. Restart Ferrous to use it again."],
+        );
     }
 
     #[test]
@@ -7821,6 +7916,7 @@ mod tests {
             },
             status: crate::library::LibraryStatus::default(),
             read_after,
+            stopped: false,
         }
     }
 

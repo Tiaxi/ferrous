@@ -56,9 +56,10 @@ pub(super) fn run(
         Ok(opened) => opened,
         Err(err) => {
             // The library was not read, so it is not `loaded`: the UI shows
-            // the error, and offers no first run for it.
+            // the error, and offers no first run for it. The worker stops
+            // having said why, which is no crash to report as well (#774).
             library.status.last_error = Some(err);
-            library.publish(event_tx);
+            library.publish_stop(event_tx);
             return;
         }
     };

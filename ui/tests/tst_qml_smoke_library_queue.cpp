@@ -3478,6 +3478,26 @@ void LibraryQueueSmokeTest::aLibraryThatCannotBeOpenedOffersNoFirstRun() {
         return false;
     };
     QTRY_VERIFY(inRecentIssues());
+    // The worker said why it stopped, so its end is not reported as a crash
+    // as well (#774). The bridge answers a save after it has handled that
+    // end, so whatever it reported of it has arrived by then.
+    QSignalSpy saved(&bridge, &BridgeClient::stateSaveFinished);
+    const quint32 save = bridge.saveStateBeforeQuit();
+    QTRY_VERIFY(std::any_of(saved.cbegin(), saved.cend(), [save](const QList<QVariant> &answer) {
+        return answer.value(0).value<quint32>() == save;
+    }));
+    const int categoryRole = entries->roleNames().key("category", -1);
+    QVERIFY(categoryRole >= 0);
+    QStringList libraryIssues;
+    for (int row = 0; row < entries->rowCount(); ++row) {
+        const QModelIndex entry = entries->index(row, 0);
+        if (entry.data(categoryRole).toInt() == BinaryBridgeCodec::ErrorCategoryLibrary) {
+            libraryIssues.append(entry.data(messageRole).toString());
+        }
+    }
+    QVERIFY2(libraryIssues.size() == 1, qPrintable(libraryIssues.join(QStringLiteral(" | "))));
+    QVERIFY2(libraryIssues.first().contains(QStringLiteral("could not open the library database")),
+             qPrintable(libraryIssues.first()));
     QQuickItem *statusButton = window->findChild<QQuickItem *>(QStringLiteral("statusBarErrorsButton"));
     QVERIFY(statusButton != nullptr);
     QTRY_VERIFY(statusButton->isVisible());

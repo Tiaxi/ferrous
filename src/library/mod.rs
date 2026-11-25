@@ -351,6 +351,9 @@ pub struct LibraryEvent {
     /// A [`next_file_sequence`] number taken before the rows in `changes`
     /// were read, from the files or the database.
     pub read_after: u64,
+    /// The worker's last event: it stops on purpose, having said why in
+    /// `status`, so its channel closing after this is no crash.
+    pub stopped: bool,
 }
 
 #[cfg(test)]
@@ -370,6 +373,7 @@ impl LibraryEvent {
                 ..LibraryStatus::default()
             },
             read_after: 0,
+            stopped: false,
         }
     }
 }

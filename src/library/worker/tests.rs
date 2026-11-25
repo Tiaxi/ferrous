@@ -704,7 +704,13 @@ fn the_worker_publishes_an_empty_library_it_read_as_loaded() {
     let fixture = Fixture::new("empty", &[]);
     let (service, mut events) = service_on(&fixture.db);
 
-    let first = next_snapshot(&mut events, |_| true);
+    let event = events
+        .rx
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the library is sent");
+    assert!(!event.stopped, "the worker goes on");
+    events.mirror.apply(&event);
+    let first = events.view();
 
     assert!(first.loaded, "no roots, as read from the database");
     assert!(first.roots.is_empty());
@@ -720,7 +726,21 @@ fn a_database_the_worker_cannot_open_is_an_error_and_no_library() {
     fs::create_dir_all(&fixture.db).expect("folder in the database's place");
     let (service, mut events) = service_on(&fixture.db);
 
-    let first = next_snapshot(&mut events, |_| true);
+    let event = events
+        .rx
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the failure is sent");
+    // It is the worker's last: it stops, having said why (#774).
+    assert!(event.stopped, "the worker says it stops");
+    assert!(
+        matches!(
+            events.rx.recv_timeout(Duration::from_secs(20)),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+        ),
+        "nothing follows"
+    );
+    events.mirror.apply(&event);
+    let first = events.view();
 
     let error = first.last_error.expect("the failure is shown");
     assert!(
