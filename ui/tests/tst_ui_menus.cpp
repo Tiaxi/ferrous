@@ -716,7 +716,7 @@ void UiMenusTest::libraryFolderMenuNamesTheFolder() {
                 && menu->property("opened").toBool());
     QCOMPARE(rowsOf(menu).mid(0, 2),
              (QStringList{QStringLiteral("hint|Play Folder|Enter|media-playback-start"),
-                          QStringLiteral("item|Add Folder to Queue||media-playlist-append")}));
+                          QStringLiteral("hint|Add Folder to Queue|Ctrl+Enter|media-playlist-append")}));
     QVERIFY(QMetaObject::invokeMethod(menu, "close"));
     QTRY_VERIFY(!menu->property("visible").toBool());
 }
@@ -2699,7 +2699,7 @@ void UiMenusTest::checkLibraryContextMenuNamesWhatItActsOn(MainWindowFixture &ma
     QCOMPARE(rowsOf(menu),
              (QStringList{
                  QStringLiteral("hint|Play Album|Enter|media-playback-start"),
-                 QStringLiteral("item|Add Album to Queue||media-playlist-append"),
+                 QStringLiteral("hint|Add Album to Queue|Ctrl+Enter|media-playlist-append"),
                  QStringLiteral("sep"),
                  QStringLiteral("item|Open Folder||folder-open"),
                  QStringLiteral("item|Edit Tags…||document-edit"),
@@ -2712,7 +2712,7 @@ void UiMenusTest::checkLibraryContextMenuNamesWhatItActsOn(MainWindowFixture &ma
     QVERIFY(menu != nullptr);
     QCOMPARE(rowsOf(menu).mid(0, 2),
              (QStringList{QStringLiteral("hint|Play Track|Enter|media-playback-start"),
-                          QStringLiteral("item|Add Track to Queue||media-playlist-append")}));
+                          QStringLiteral("hint|Add Track to Queue|Ctrl+Enter|media-playlist-append")}));
     QVERIFY(close(menu));
 
     // The artist has no tags of its own to edit.
@@ -2721,7 +2721,7 @@ void UiMenusTest::checkLibraryContextMenuNamesWhatItActsOn(MainWindowFixture &ma
     const QStringList artistRows = rowsOf(menu);
     QCOMPARE(artistRows.mid(0, 2),
              (QStringList{QStringLiteral("hint|Play Artist|Enter|media-playback-start"),
-                          QStringLiteral("item|Add Artist to Queue||media-playlist-append")}));
+                          QStringLiteral("hint|Add Artist to Queue|Ctrl+Enter|media-playlist-append")}));
     QVERIFY(!artistRows.contains(QStringLiteral("item|Edit Tags…||document-edit")));
     QVERIFY(close(menu));
 
@@ -2735,7 +2735,7 @@ void UiMenusTest::checkLibraryContextMenuNamesWhatItActsOn(MainWindowFixture &ma
     QVERIFY(menu != nullptr);
     QCOMPARE(rowsOf(menu).mid(0, 2),
              (QStringList{QStringLiteral("hint|Play Selection|Enter|media-playback-start"),
-                          QStringLiteral("item|Add Selection to Queue||media-playlist-append")}));
+                          QStringLiteral("hint|Add Selection to Queue|Ctrl+Enter|media-playlist-append")}));
     QVERIFY(close(menu));
 }
 

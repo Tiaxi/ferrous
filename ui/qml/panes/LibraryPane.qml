@@ -418,9 +418,11 @@ Rectangle {
                 }
 
                 // Typing selects by type-ahead, before shortcuts of a
-                // single letter, such as F, see the key.
+                // single letter, such as F, see the key; Ctrl+Enter adds the
+                // selection to the queue, before a shortcut stored for it.
                 Keys.onShortcutOverride: function(event) {
                     event.accepted = KeyUtils.isTypedCharacter(event)
+                        || root.controller.isQueueKey(event)
                 }
                 Keys.onPressed: function(event) {
                     if (event.key === Qt.Key_Menu
@@ -1021,7 +1023,7 @@ Rectangle {
                         onTriggered: root.controller.playRowItems(libraryContextMenu.rowMap)
                     }
 
-                    Components.AppMenuItem {
+                    Components.KeyHintMenuItem {
                         objectName: "libraryQueueItem"
                         text: {
                             if (libraryContextMenu.actsOnSelection) {
@@ -1042,6 +1044,8 @@ Rectangle {
                             }
                         }
                         icon.name: "media-playlist-append"
+                        // What Ctrl+Enter does in the library.
+                        keyHint: I18n.i18nc("@info:shortcut key name", "Ctrl+Enter")
                         enabled: root.controller.isActionableRow(libraryContextMenu.rowMap)
                         onTriggered: root.controller.appendRowItems(libraryContextMenu.rowMap)
                     }

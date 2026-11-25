@@ -35,6 +35,7 @@ private slots:
     void shiftSelectingTenThousandLibraryRowsStaysFast();
     void librarySelectionFollowsItsRowsThroughTreeUpdates();
     void playingALibrarySelectionSendsOneBatch();
+    void ctrlEnterAddsTheLibrarySelectionToTheQueue();
     void revealKeyExpandsADeepKeyInOneCall();
     void revealKeyWaitsForRowsTheBackendHasNotSentWithoutTimers();
     void revealKeyOpensTheCollapsedLibraryFolderOfTheRow();
@@ -2466,7 +2467,13 @@ Item {
     property var appended: []
     property var inserted: []
     property var insertedRows: []
+    property bool lastAccepted: false
 
+    function pressKey(key, modifiers) {
+        const event = { key: key, modifiers: modifiers, text: "\r", accepted: false }
+        controller.handleKeyPress(event)
+        lastAccepted = event.accepted
+    }
     function clickRow(row, modifiers) {
         controller.handleRowSelection(
             row, testLibraryModel.rowDataForRow(row), Qt.LeftButton, modifiers)
@@ -2726,6 +2733,100 @@ void LibraryQueueSmokeTest::playingALibrarySelectionSendsOneBatch() {
     QCOMPARE(recordedItems(harness.get(), "inserted"),
              (QVector<BinaryBridgeCodec::LibraryQueueItems>{{pathsItem({a, b})}}));
     QCOMPARE(harness->property("insertedRows").toList(), (QVariantList{7}));
+}
+
+// Ctrl+Enter, on either Enter key, adds the library's selection to the
+// end of the queue, as the context menu's Add to Queue does: a selected
+// row, a range as one batch in tree order, or, with nothing selected, the
+// focused row, which it selects. Playback and the selection stay; Ctrl
+// with another modifier does nothing.
+void LibraryQueueSmokeTest::ctrlEnterAddsTheLibrarySelectionToTheQueue() {
+    const QString a = QStringLiteral("/music/Artist/Album/01.flac");
+    const QString b = QStringLiteral("/music/Artist/Album/02.flac");
+    QVector<BinaryTreeRow> rows;
+    rows.push_back(BinaryTreeRow{1, 0, -1, 0, 1, QStringLiteral("Artist"),
+        QStringLiteral("artist|/music|Artist"), QStringLiteral("Artist"),
+        QStringLiteral("/music/Artist"), {}, {}, {}});
+    rows.push_back(BinaryTreeRow{2, 1, -1, 0, 2, QStringLiteral("Album"),
+        QStringLiteral("album|/music|Artist|Album"), QStringLiteral("Artist"),
+        QStringLiteral("/music/Artist/Album"), {}, {}, QStringList{a, b}});
+    for (const QString &path : {a, b}) {
+        rows.push_back(BinaryTreeRow{4, 2, -1, 1, 0, QFileInfo(path).fileName(),
+            QStringLiteral("track|") + path, QStringLiteral("Artist"), path, {}, path,
+            QStringList{path}});
+    }
+    LibraryTreeModel model;
+    model.setExpandedKeys(QStringList{QStringLiteral("artist|/music|Artist"),
+                                      QStringLiteral("album|/music|Artist|Album")});
+    QVERIFY(applyLibraryTree(model, encodeRows(rows)));
+    QCOMPARE(model.rowCount(), 4);
+
+    QQmlApplicationEngine engine;
+    QString errorText;
+    QScopedPointer<QObject> harness(createLibraryControllerHarness(engine, model, &errorText));
+    QVERIFY2(harness != nullptr, qPrintable(errorText));
+    QObject *controller = harness->property("controllerRef").value<QObject *>();
+    QVERIFY(controller != nullptr);
+    const auto press = [&harness](Qt::Key key, Qt::KeyboardModifiers modifiers) {
+        callWith(harness.get(), "pressKey", int(key), modifiers.toInt());
+        return harness->property("lastAccepted").toBool();
+    };
+    const QString trackA = QStringLiteral("track|") + a;
+    using Calls = QVector<BinaryBridgeCodec::LibraryQueueItems>;
+
+    // A selected row.
+    callWith(harness.get(), "clickRow", 2, int(Qt::NoModifier));
+    QVERIFY(press(Qt::Key_Return, Qt::ControlModifier));
+    QCOMPARE(recordedItems(harness.get(), "appended"), (Calls{{pathsItem({a})}}));
+    QCOMPARE(model.selectedKeys(), QStringList{trackA});
+
+    // A range selected from the last row up, as one batch in tree order,
+    // with the keypad's Enter.
+    callWith(harness.get(), "clickRow", 3, int(Qt::NoModifier));
+    callWith(harness.get(), "clickRow", 0, int(Qt::ShiftModifier));
+    const QStringList range = model.selectedKeys();
+    QCOMPARE(range.size(), 4);
+    QVERIFY(press(Qt::Key_Enter, Qt::ControlModifier | Qt::KeypadModifier));
+    BinaryBridgeCodec::LibraryQueueItem artist;
+    artist.kind = BinaryBridgeCodec::LibraryQueueItem::Artist;
+    artist.value = QStringLiteral("artist|/music|Artist");
+    const BinaryBridgeCodec::LibraryQueueItems all{
+        artist, pathsItem({a, b}), pathsItem({a}), pathsItem({b})};
+    QCOMPARE(recordedItems(harness.get(), "appended"), (Calls{{pathsItem({a})}, all}));
+    QCOMPARE(model.selectedKeys(), range);
+
+    // With Shift, Alt or Meta as well as Ctrl, or Alt alone, nothing.
+    for (const Qt::KeyboardModifiers modifiers :
+         {Qt::KeyboardModifiers(Qt::ControlModifier | Qt::ShiftModifier),
+          Qt::KeyboardModifiers(Qt::ControlModifier | Qt::AltModifier),
+          Qt::KeyboardModifiers(Qt::ControlModifier | Qt::MetaModifier), Qt::KeyboardModifiers(Qt::AltModifier)}) {
+        QVERIFY(!press(Qt::Key_Return, modifiers));
+        QVERIFY(!press(Qt::Key_Enter, modifiers | Qt::KeypadModifier));
+    }
+    QCOMPARE(recordedItems(harness.get(), "appended").size(), 2);
+    QCOMPARE(model.selectedKeys(), range);
+
+    // Nothing selected: the focused row, which it selects. A row still
+    // being revealed gives way, as to Enter.
+    callWith(harness.get(), "clickRow", 2, int(Qt::NoModifier));
+    callWith(harness.get(), "clickRow", 2, int(Qt::ControlModifier));
+    QCOMPARE(model.selectionCount(), 0);
+    QCOMPARE(controller->property("focusSelectionKey").toString(), trackA);
+    QVERIFY(controller->setProperty("pendingRevealKey", QStringLiteral("track|") + b));
+    QVERIFY(controller->setProperty("pendingRevealPurpose", QStringLiteral("select")));
+    QVERIFY(press(Qt::Key_Return, Qt::ControlModifier));
+    QCOMPARE(recordedItems(harness.get(), "appended"), (Calls{{pathsItem({a})}, all, {pathsItem({a})}}));
+    QCOMPARE(model.selectedKeys(), QStringList{trackA});
+    QVERIFY(controller->property("pendingRevealKey").toString().isEmpty());
+
+    // Playback never changed.
+    QVERIFY(recordedItems(harness.get(), "played").isEmpty());
+
+    // An empty library takes no key.
+    QVERIFY(applyLibraryTree(model, QByteArray{}));
+    QCOMPARE(model.rowCount(), 0);
+    QVERIFY(!press(Qt::Key_Return, Qt::ControlModifier));
+    QCOMPARE(recordedItems(harness.get(), "appended").size(), 3);
 }
 
 void LibraryQueueSmokeTest::revealKeyExpandsADeepKeyInOneCall() {

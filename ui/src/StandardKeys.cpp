@@ -75,7 +75,11 @@ QString StandardKeys::keptKeyRole(const QVariant &sequence) {
     switch (combination.key()) {
     case Qt::Key_Return:
     case Qt::Key_Enter:
-        return alone ? QStringLiteral("activate") : QString();
+        if (alone) {
+            return QStringLiteral("activate");
+        }
+        // The library and search add their selection to the queue with it.
+        return modifiers == Qt::ControlModifier ? QStringLiteral("queue") : QString();
     case Qt::Key_Delete:
     case Qt::Key_Backspace:
         return alone ? QStringLiteral("delete") : QString();
