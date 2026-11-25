@@ -25,6 +25,7 @@ use crate::raw_audio::{
 use super::channel_mix::ChannelMix;
 use super::clock::{self, MonotonicClock, MonotonicTime};
 use super::file_source::{opened_file_upstream, Releases};
+use super::gain_stage::GainStage;
 use super::parsebin_stall;
 use super::queue::{
     same_audio_extension, CancelledAdvance, CommittedAdvance, GaplessQueue, Handoff, ManualMove,
@@ -34,7 +35,7 @@ use super::source_activation::SourceActivation;
 use super::stream_volume::{self, StreamVolumeChange, StreamVolumeReport, StreamVolumeWatch};
 use super::{
     EngineExit, FileStamp, PathRenames, PlaybackCommand, PlaybackError, PlaybackErrorOutcome,
-    PlaybackEvent, PlaybackSnapshot, PlaybackState, RepeatMode, TrackChangeKind,
+    PlaybackEvent, PlaybackSnapshot, PlaybackState, RepeatMode, ReplayGainReport, TrackChangeKind,
 };
 use crate::file_identity::{self, file_id, FileId, ResolvedPath, WatchedFile};
 
@@ -446,6 +447,9 @@ struct GstPlaybackRuntime {
     output_mix: Arc<OutputMix>,
     /// The channels of the output stream when the mix last followed it.
     mix_channels: u32,
+    /// Shared with the output's `ReplayGain` probe, which applies the gain of
+    /// each stream; see `gain_stage`.
+    gain_stage: Arc<GainStage>,
     /// Tracks that failed since a track last played to its end or a
     /// command started or navigated playback.
     consecutive_failures: u32,
@@ -693,6 +697,7 @@ impl GstPlaybackRuntime {
             playing_state_timeout: Self::PLAYING_STATE_TIMEOUT,
             output_mix,
             mix_channels: 0,
+            gain_stage: GainStage::new(),
             consecutive_failures: 0,
             missing_plugin: None,
             missing_on_open: None,
@@ -1009,12 +1014,14 @@ impl GstPlaybackRuntime {
 
     /// Report a track change with the snapshot it leaves, as one event.
     fn emit_track_changed(
-        &self,
+        &mut self,
         path: PathBuf,
         queue_index: usize,
         kind: TrackChangeKind,
         track_token: u64,
     ) {
+        // The previous track's gain is not the new one's.
+        self.follow_replay_gain();
         let _ = self.event_tx.send(PlaybackEvent::TrackChanged {
             path,
             queue_index,
@@ -1051,6 +1058,44 @@ impl GstPlaybackRuntime {
         self.snapshot.muted_channels_mask = muted;
         self.snapshot.soloed_channels_mask = soloed;
         changed
+    }
+
+    /// Bring the snapshot's `ReplayGain` up to what the output applies to the
+    /// current track. Returns whether that changed it.
+    ///
+    /// The output starts a stream before the pipeline tells the engine of
+    /// it, so it can apply the next track's gain while the engine still
+    /// plays the previous one: what it applies counts only once the
+    /// stream it applies it to is the current track's, and the gain of the
+    /// previous track is kept until then, but not past a track change.
+    fn follow_replay_gain(&mut self) -> bool {
+        let output = self.gain_stage.output();
+        let track_token = self.snapshot.track_token;
+        let report = if self.snapshot.state == PlaybackState::Stopped {
+            None
+        } else if output.playing
+            && output.group == self.last_stream_group
+            && !self.awaiting_run_stream_start
+        {
+            output.applied.map(|applied| ReplayGainReport {
+                applied,
+                track_token,
+            })
+        } else {
+            self.snapshot
+                .replay_gain
+                .filter(|report| report.track_token == track_token)
+        };
+        let changed = self.snapshot.replay_gain != report;
+        self.snapshot.replay_gain = report;
+        changed
+    }
+
+    fn set_replay_gain(&mut self, settings: super::ReplayGainSettings) {
+        self.gain_stage.set_settings(settings);
+        if self.follow_replay_gain() {
+            self.emit_snapshot();
+        }
     }
 
     fn switch_to_path(
@@ -1483,6 +1528,7 @@ impl GstPlaybackRuntime {
         self.set_position_sample(Duration::ZERO, false);
         self.snapshot.current_queue_index = None;
         self.snapshot.current_bitrate_kbps = None;
+        self.snapshot.replay_gain = None;
     }
 
     /// Handle `requests` Seek commands in a row, of which only the last
@@ -2078,6 +2124,8 @@ impl GstPlaybackRuntime {
         }
         if !current_continues {
             self.abandon_seeks();
+            // The run that applied it is over; the next one reports its own.
+            self.snapshot.replay_gain = None;
         }
         self.awaiting_run_stream_start = true;
         self.last_stream_group = None;
@@ -2484,6 +2532,7 @@ impl GstPlaybackRuntime {
             snapshot_changed |= self.refresh_duration();
         }
         snapshot_changed |= self.follow_output_mix();
+        snapshot_changed |= self.follow_replay_gain();
         if self.check_stuck_state_change() {
             // Pipeline was stuck; recovery already emitted a snapshot.
             return;
@@ -2861,6 +2910,7 @@ impl GstPlaybackRuntime {
             PlaybackCommand::Seek(pos) => self.seek(pos, 1),
             PlaybackCommand::Cue { position, expected } => self.cue(position, expected),
             PlaybackCommand::SetVolume(volume) => self.set_volume(volume),
+            PlaybackCommand::SetReplayGain(settings) => self.set_replay_gain(settings),
             PlaybackCommand::SetRepeatMode(mode) => self.set_repeat_mode(mode),
             PlaybackCommand::SetShuffle(enabled) => self.set_shuffle(enabled),
             PlaybackCommand::ToggleChannelMute(ch) => {
@@ -3015,6 +3065,7 @@ impl GstPlaybackRuntime {
                         changed |= self.refresh_duration();
                     }
                     changed |= self.follow_output_mix();
+                    changed |= self.follow_replay_gain();
                     if changed {
                         self.emit_snapshot();
                     }
@@ -3154,10 +3205,12 @@ fn start_gst_engine(
     playbin.set_property("auto-flush-bus", false);
 
     let output_mix = Arc::new(OutputMix::default());
+    let gain_stage = GainStage::new();
 
     let output = build_output()?;
     let output_segments = OutputSegments::observe(&output);
-    let analysis_sink = build_audio_output_bin(analysis_tx.clone(), &output_mix, &output)?;
+    let analysis_sink =
+        build_audio_output_bin(analysis_tx.clone(), &output_mix, &gain_stage, &output)?;
     playbin.set_property("audio-sink", &analysis_sink);
 
     // Strip leading partial-frame data and trailing APEv2 tags from raw
@@ -3187,6 +3240,7 @@ fn start_gst_engine(
         stream_ends,
     );
     runtime.output_segments = output_segments;
+    runtime.gain_stage = gain_stage;
     runtime.input_switches.connect(&runtime.playbin);
     runtime
         .stream_volume
@@ -4606,7 +4660,8 @@ fn install_caps_change_probe(element: &gst::Element, analysis_tx: Sender<Analysi
 }
 
 /// The bin that playbin plays to: it reports format changes to analysis,
-/// converts to a format `sink` takes, and silences muted channels.
+/// converts to a format `sink` takes, applies `ReplayGain`, and silences
+/// muted channels.
 ///
 /// The bin holds no queue. Playsink already reads ahead into its own queue,
 /// which also gives the output its own streaming thread. When `sink`
@@ -4618,6 +4673,7 @@ fn install_caps_change_probe(element: &gst::Element, analysis_tx: Sender<Analysi
 fn build_audio_output_bin(
     analysis_tx: Sender<AnalysisCommand>,
     output_mix: &Arc<OutputMix>,
+    gain_stage: &Arc<GainStage>,
     sink: &gst::Element,
 ) -> anyhow::Result<gst::Bin> {
     let bin = gst::Bin::new();
@@ -4637,6 +4693,13 @@ fn build_audio_output_bin(
         .context("failed to add audio output elements")?;
     gst::Element::link_many(elements).context("failed to link audio output")?;
     install_caps_change_probe(&input_capsfilter, analysis_tx);
+    // In the format `sink` plays, and before the channels are silenced, as
+    // the gain would scale the silence's noise away.
+    gain_stage.install(
+        &output_capsfilter
+            .static_pad("sink")
+            .context("missing output capsfilter pad")?,
+    );
     install_channel_mute_probe(&output_capsfilter, output_mix);
     let ingress = input_capsfilter
         .static_pad("sink")
@@ -5173,6 +5236,7 @@ fn file_uri(path: &Path) -> Option<String> {
 mod gst_integration_tests {
     use super::*;
     use crate::playback::pipeline_trace::PipelineTrace;
+    use crate::playback::replay_gain::GainTags;
     use crate::playback::source_activation::race::{
         race_type_finding_with_activation, ActivationRace,
     };
@@ -5219,7 +5283,9 @@ mod gst_integration_tests {
                 .property("sync", false)
                 .build()
                 .unwrap();
-            let bin = build_audio_output_bin(analysis_tx, &Arc::default(), &sink).unwrap();
+            let bin =
+                build_audio_output_bin(analysis_tx, &Arc::default(), &GainStage::new(), &sink)
+                    .unwrap();
             let factories: Vec<_> = bin
                 .children()
                 .iter()
@@ -5738,7 +5804,7 @@ mod gst_integration_tests {
             .property("sync", false)
             .build()
             .unwrap();
-        build_audio_output_bin(analysis_tx, &Arc::default(), &sink).unwrap()
+        build_audio_output_bin(analysis_tx, &Arc::default(), &GainStage::new(), &sink).unwrap()
     }
 
     /// Full app pipeline pattern: custom typefinders, source probe and
@@ -5797,6 +5863,166 @@ mod gst_integration_tests {
         }
         let _ = set_state(gst::State::Null);
         std::fs::remove_file(test_path).unwrap();
+    }
+
+    /// The gain tags of one stream that reached the output.
+    #[derive(Debug, Default)]
+    struct OutputStream {
+        /// The tags it sent before its first buffer.
+        tags: GainTags,
+        buffers: usize,
+    }
+
+    /// Play `path` twice in a row, as Repeat-One does, through the output
+    /// bin with `stage` to a fake sink, and tell what each stream sent the
+    /// sink.
+    fn play_twice_through_the_output(path: &Path, stage: &Arc<GainStage>) -> Vec<OutputStream> {
+        gst::init().unwrap();
+        let (analysis_tx, _analysis_rx) = unbounded();
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("sync", false)
+            .build()
+            .unwrap();
+        let streams = Arc::new(Mutex::new(Vec::<OutputStream>::new()));
+        let recorded = Arc::clone(&streams);
+        sink.static_pad("sink").unwrap().add_probe(
+            gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
+            move |_, info| {
+                let mut streams = recorded.lock().unwrap();
+                match &info.data {
+                    Some(gst::PadProbeData::Event(event)) => match event.view() {
+                        gst::EventView::StreamStart(_) => streams.push(OutputStream::default()),
+                        gst::EventView::Tag(tag) => {
+                            if let Some(stream) = streams.last_mut().filter(|s| s.buffers == 0) {
+                                stream.tags.merge(GainTags::from_tag_list(tag.tag()));
+                            }
+                        }
+                        _ => {}
+                    },
+                    Some(gst::PadProbeData::Buffer(_)) => {
+                        if let Some(stream) = streams.last_mut() {
+                            stream.buffers += 1;
+                        }
+                    }
+                    _ => {}
+                }
+                gst::PadProbeReturn::Ok
+            },
+        );
+        let output = build_audio_output_bin(analysis_tx, &Arc::default(), stage, &sink).unwrap();
+        let playbin = gst::ElementFactory::make("playbin3").build().unwrap();
+        playbin.set_property("audio-sink", &output);
+        let uri = file_uri(path).unwrap();
+        playbin.set_property("uri", &uri);
+        let again = std::sync::atomic::AtomicBool::new(true);
+        playbin.connect("about-to-finish", false, move |values| {
+            if again.swap(false, Ordering::SeqCst) {
+                let playbin = values[0].get::<gst::Element>().unwrap();
+                playbin.set_property("uri", &uri);
+            }
+            None
+        });
+        playbin.set_state(gst::State::Playing).unwrap();
+        let message = playbin.bus().unwrap().timed_pop_filtered(
+            gst::ClockTime::from_seconds(30),
+            &[gst::MessageType::Eos, gst::MessageType::Error],
+        );
+        playbin.set_state(gst::State::Null).unwrap();
+        assert!(
+            matches!(
+                message.as_ref().map(|message| message.view()),
+                Some(gst::MessageView::Eos(_))
+            ),
+            "{}: {message:?}",
+            path.display()
+        );
+        let streams = std::mem::take(&mut *streams.lock().unwrap());
+        streams
+    }
+
+    /// Each format's demuxer or decoder sends the file's gain tags with its
+    /// stream, before its audio, and again when the same file plays again:
+    /// what the gain stage applies, also for Repeat-One. WAV files are the
+    /// exception, as `wavparse` leaves out their ID3 tags, so they play at
+    /// the gain for untagged files.
+    #[test]
+    fn gain_tags_reach_the_output_before_the_audio_also_when_the_file_plays_again() {
+        use crate::playback::gain_fixtures::{
+            encode, replay_gain_items, wav_bytes, write_r128, write_tag, Encoding,
+        };
+        use lofty::tag::TagType;
+
+        let dir = std::env::temp_dir().join(format!("ferrous-gain-tags-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let samples: Vec<i32> = (0..48_000)
+            .map(|frame| (frame % 40) * 400 - 8_000)
+            .collect();
+        let wav = wav_bytes(48_000, 16, &samples);
+        let items = replay_gain_items("-6.40 dB", "0.500000", "-3.00 dB", "0.600000");
+        let all = GainTags {
+            track_gain: Some(-6.4),
+            track_peak: Some(0.5),
+            album_gain: Some(-3.0),
+            album_peak: Some(0.6),
+        };
+        let tagged = |name: &str, encoding: Encoding, tag_type: TagType| {
+            let path = encode(&dir, name, &wav, encoding);
+            write_tag(&path, tag_type, &items);
+            path
+        };
+        let r128 = encode(&dir, "r128.opus", &wav, Encoding::Opus);
+        write_r128(&r128, -1792, 256);
+        let cases = [
+            (
+                tagged("a.flac", Encoding::Flac, TagType::VorbisComments),
+                all,
+            ),
+            (
+                tagged("a.ogg", Encoding::Vorbis, TagType::VorbisComments),
+                all,
+            ),
+            (
+                tagged("a.opus", Encoding::Opus, TagType::VorbisComments),
+                all,
+            ),
+            (
+                r128,
+                GainTags {
+                    track_gain: Some(-2.0),
+                    album_gain: Some(6.0),
+                    ..GainTags::default()
+                },
+            ),
+            (tagged("id3.mp3", Encoding::Mp3, TagType::Id3v2), all),
+            (tagged("ape.mp3", Encoding::Mp3, TagType::Ape), all),
+            (tagged("a.m4a", Encoding::M4a, TagType::Mp4Ilst), all),
+            (
+                tagged("a.wav", Encoding::Wav, TagType::Id3v2),
+                GainTags::default(),
+            ),
+        ];
+        for (path, expected) in cases {
+            let stage = GainStage::new();
+            stage.set_settings(super::super::ReplayGainSettings {
+                mode: super::super::ReplayGainMode::Album,
+                ..Default::default()
+            });
+            let streams = play_twice_through_the_output(&path, &stage);
+            assert_eq!(streams.len(), 2, "{}: {streams:?}", path.display());
+            for stream in &streams {
+                assert!(stream.buffers > 0, "{}: {streams:?}", path.display());
+                assert_eq!(stream.tags, expected, "{}", path.display());
+            }
+            let applied = stage.output().applied.unwrap();
+            let expected_db = expected.album_gain.unwrap_or(0.0);
+            assert!(
+                (applied.gain_db - expected_db).abs() < 1e-9,
+                "{}: {applied:?}",
+                path.display()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -14346,5 +14572,409 @@ mod engine_tests {
         assert!(problem.contains(&a.display().to_string()), "{problem}");
         hold.release();
         wait_until_reader_ends(&a);
+    }
+
+    /// The `ReplayGain` stage against a real playbin3, measured at the output.
+    mod replay_gain {
+        use lofty::tag::{ItemKey, TagType};
+
+        use super::*;
+        use crate::playback::gain_fixtures::{encode, wav_bytes, write_tag, Encoding};
+        use crate::playback::replay_gain::{db_to_linear, GainSource};
+        use crate::playback::{ReplayGainMode, ReplayGainSettings};
+
+        /// The loudest sample of the sawtooth of the FLAC fixtures, at 16 bits.
+        const SAWTOOTH_PEAK: f64 = 8_000.0;
+
+        /// A buffer that reached the output: its frames and loudest sample.
+        #[derive(Debug, Clone, Copy)]
+        struct Played {
+            frames: usize,
+            peak: i32,
+        }
+
+        /// Record the buffers of each stream that reaches the output, which
+        /// plays 16-bit mono audio.
+        fn record_streams(playbin: &gst::Element) -> Arc<Mutex<Vec<Vec<Played>>>> {
+            let streams = Arc::new(Mutex::new(Vec::new()));
+            let recorded = Arc::clone(&streams);
+            output_sink_pad(playbin).add_probe(
+                gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
+                move |pad, info| {
+                    let mut streams = recorded.lock().unwrap();
+                    match &info.data {
+                        Some(gst::PadProbeData::Event(event))
+                            if event.type_() == gst::EventType::StreamStart =>
+                        {
+                            streams.push(Vec::new());
+                        }
+                        Some(gst::PadProbeData::Buffer(buffer)) => {
+                            let caps = pad.current_caps().unwrap();
+                            let structure = caps.structure(0).unwrap();
+                            assert_eq!(structure.get::<&str>("format").unwrap(), "S16LE");
+                            assert_eq!(structure.get::<i32>("channels").unwrap(), 1);
+                            let map = buffer.map_readable().unwrap();
+                            let peak = map
+                                .chunks_exact(2)
+                                .map(|s| i32::from(i16::from_le_bytes([s[0], s[1]])).abs())
+                                .max()
+                                .unwrap_or(0);
+                            if let Some(stream) = streams.last_mut() {
+                                stream.push(Played {
+                                    frames: map.len() / 2,
+                                    peak,
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                    gst::PadProbeReturn::Ok
+                },
+            );
+            streams
+        }
+
+        /// The loudest sample of the sawtooth at `db`.
+        fn peak_at(db: f64) -> i32 {
+            #[allow(clippy::cast_possible_truncation)]
+            let peak = (SAWTOOTH_PEAK * db_to_linear(db)).round() as i32;
+            peak
+        }
+
+        /// Whether the buffer plays the sawtooth at the loudest sample `peak`.
+        /// A buffer shorter than the sawtooth's period of 40 frames may miss its
+        /// loudest sample.
+        fn plays_at(played: Played, peak: i32) -> bool {
+            if played.frames >= 40 {
+                played.peak.abs_diff(peak) <= 1
+            } else {
+                played.peak <= peak + 1
+            }
+        }
+
+        fn settings(mode: ReplayGainMode, preamp_db: f32, untagged_db: f32) -> ReplayGainSettings {
+            ReplayGainSettings {
+                mode,
+                preamp_db,
+                untagged_db,
+            }
+        }
+
+        impl Fixtures {
+            /// The sawtooth of [`Fixtures::flac`] with Vorbis comments `items`.
+            fn tagged_flac(&self, name: &str, millis: u32, items: &[(ItemKey, &str)]) -> PathBuf {
+                let path = self.flac(name, millis);
+                write_tag(&path, TagType::VorbisComments, items);
+                path
+            }
+        }
+
+        #[test]
+        fn each_gapless_successor_plays_at_its_own_gain_from_its_first_sample() {
+            let fixtures = Fixtures::new("replay-gain-gapless");
+            let loud = fixtures.tagged_flac(
+                "loud.flac",
+                4_000,
+                &[(ItemKey::ReplayGainTrackGain, "-6.02 dB")],
+            );
+            let quiet = fixtures.tagged_flac(
+                "quiet.flac",
+                4_000,
+                &[(ItemKey::ReplayGainTrackGain, "-12.04 dB")],
+            );
+            let untagged = fixtures.flac("untagged.flac", 4_500);
+            let mut engine = Engine::start();
+            let streams = record_streams(&engine.playbin);
+            engine.send(PlaybackCommand::SetReplayGain(settings(
+                ReplayGainMode::Track,
+                0.0,
+                -9.0,
+            )));
+            engine.send(PlaybackCommand::LoadQueue(vec![
+                loud,
+                quiet.clone(),
+                untagged.clone(),
+            ]));
+            engine.send(PlaybackCommand::Play);
+            engine.wait_for_changes(3);
+            assert_change(&engine.changes[1], &quiet, 1, Expect::Gapless);
+            assert_change(&engine.changes[2], &untagged, 2, Expect::Gapless);
+            engine.wait_until("the untagged track's gain was not reported", |engine| {
+                engine.snapshot.replay_gain.is_some_and(|report| {
+                    report.track_token == engine.changes[2].token
+                        && report.applied.source == GainSource::Untagged
+                })
+            });
+            engine.wait_until("the queue did not play to its end", |engine| {
+                engine.snapshot.state == PlaybackState::Stopped
+            });
+
+            let gains = [-6.02, -12.04, -9.0];
+            let streams = streams.lock().unwrap().clone();
+            assert_eq!(streams.len(), 3, "{streams:?}");
+            for (index, (stream, db)) in streams.iter().zip(gains).enumerate() {
+                let peak = peak_at(db);
+                assert!(
+                    stream.len() > 10 && stream.iter().all(|played| plays_at(*played, peak)),
+                    "stream {index} at {db} dB is not all at {peak}: {stream:?}"
+                );
+            }
+            // The engine reported each track's gain with its own track, never
+            // the previous one's.
+            let mut reported = [false; 3];
+            for snapshot in &engine.snapshots {
+                let Some(report) = snapshot.replay_gain else {
+                    continue;
+                };
+                assert_eq!(report.track_token, snapshot.track_token, "{snapshot:?}");
+                let index = engine
+                    .changes
+                    .iter()
+                    .position(|change| change.token == report.track_token)
+                    .expect("a reported track");
+                assert!(
+                    (report.applied.applied_db - gains[index]).abs() < 1e-9,
+                    "{index}: {report:?}"
+                );
+                reported[index] = true;
+            }
+            assert_eq!(reported, [true; 3]);
+        }
+
+        #[test]
+        fn repeat_one_plays_each_pass_at_the_tracks_gain() {
+            let fixtures = Fixtures::new("replay-gain-repeat-one");
+            let track = fixtures.tagged_flac(
+                "track.flac",
+                4_000,
+                &[(ItemKey::ReplayGainTrackGain, "-6.02 dB")],
+            );
+            let mut engine = Engine::start();
+            let streams = record_streams(&engine.playbin);
+            engine.send(PlaybackCommand::SetReplayGain(settings(
+                ReplayGainMode::Track,
+                0.0,
+                0.0,
+            )));
+            engine.send(PlaybackCommand::SetRepeatMode(RepeatMode::One));
+            engine.send(PlaybackCommand::LoadQueue(vec![track]));
+            engine.send(PlaybackCommand::Play);
+            let replay = engine.wait_for_changes(2);
+            engine.wait_until("the second pass did not play", |engine| {
+                engine.snapshot.position > Duration::from_millis(500)
+                    && engine
+                        .snapshot
+                        .replay_gain
+                        .is_some_and(|report| report.track_token == replay.token)
+            });
+            let streams = streams.lock().unwrap().clone();
+            assert!(streams.len() >= 2, "{streams:?}");
+            for (index, stream) in streams.iter().enumerate() {
+                assert!(
+                    !stream.is_empty()
+                        && stream
+                            .iter()
+                            .all(|played| plays_at(*played, peak_at(-6.02))),
+                    "pass {index}: {stream:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_settings_change_applies_from_the_next_buffer_and_a_seek_keeps_the_gain() {
+            let fixtures = Fixtures::new("replay-gain-change");
+            let track = fixtures.tagged_flac(
+                "track.flac",
+                12_000,
+                &[
+                    (ItemKey::ReplayGainTrackGain, "-6.02 dB"),
+                    (ItemKey::ReplayGainTrackPeak, "0.500000"),
+                    (ItemKey::ReplayGainAlbumGain, "-12.04 dB"),
+                ],
+            );
+            let mut engine = Engine::start();
+            let streams = record_streams(&engine.playbin);
+            let played = || streams.lock().unwrap().concat();
+            engine.send(PlaybackCommand::SetReplayGain(settings(
+                ReplayGainMode::Track,
+                0.0,
+                0.0,
+            )));
+            engine.send(PlaybackCommand::LoadQueue(vec![track]));
+            engine.send(PlaybackCommand::Play);
+            engine.wait_until("track gain was not reported", |engine| {
+                engine
+                    .snapshot
+                    .replay_gain
+                    .is_some_and(|report| report.applied.source == GainSource::Track)
+            });
+            let wait_for_peak = |engine: &mut Engine, peak: i32| {
+                engine.wait_until(&format!("the output did not play at {peak}"), |_| {
+                    played()
+                        .last()
+                        .is_some_and(|last| last.frames >= 40 && plays_at(*last, peak))
+                });
+            };
+            wait_for_peak(&mut engine, peak_at(-6.02));
+
+            engine.send(PlaybackCommand::SetReplayGain(settings(
+                ReplayGainMode::Album,
+                0.0,
+                0.0,
+            )));
+            wait_for_peak(&mut engine, peak_at(-12.04));
+            engine.wait_until("album gain was not reported", |engine| {
+                engine
+                    .snapshot
+                    .replay_gain
+                    .is_some_and(|report| report.applied.source == GainSource::Album)
+            });
+            // Every buffer plays at one gain or the other, the track gain's
+            // before the album gain's.
+            let buffers = played();
+            let switch = buffers
+                .iter()
+                .position(|played| plays_at(*played, peak_at(-12.04)) && played.frames >= 40)
+                .unwrap();
+            assert!(
+                buffers[..switch]
+                    .iter()
+                    .all(|played| plays_at(*played, peak_at(-6.02)))
+                    && buffers[switch..]
+                        .iter()
+                        .all(|played| plays_at(*played, peak_at(-12.04))),
+                "{buffers:?}"
+            );
+
+            let before_seek = played().len();
+            engine.send(PlaybackCommand::Seek(Duration::from_secs(1)));
+            engine.wait_until("the seek did not land", |engine| !engine.seeked.is_empty());
+            engine.wait_until("the output did not play after the seek", |_| {
+                played().len() > before_seek + 10
+            });
+            let after = played();
+            assert!(
+                after[switch..]
+                    .iter()
+                    .all(|played| plays_at(*played, peak_at(-12.04))),
+                "{after:?}"
+            );
+
+            // The preamp would take the track to +9 dB, which the peak of 0.5
+            // keeps at +6 dB.
+            engine.send(PlaybackCommand::SetReplayGain(settings(
+                ReplayGainMode::Track,
+                15.0,
+                0.0,
+            )));
+            wait_for_peak(&mut engine, 16_000);
+            engine.wait_until("the peak's limit was not reported", |engine| {
+                engine
+                    .snapshot
+                    .replay_gain
+                    .is_some_and(|report| report.applied.peak_limited)
+            });
+
+            engine.send(PlaybackCommand::SetReplayGain(settings(
+                ReplayGainMode::Off,
+                15.0,
+                0.0,
+            )));
+            wait_for_peak(&mut engine, peak_at(0.0));
+            engine.wait_until("a gain was reported while off", |engine| {
+                engine.snapshot.replay_gain.is_none()
+            });
+        }
+
+        /// Record the format and samples of every buffer of 24-bit mono audio
+        /// in 32 bits that reaches the output.
+        fn record_samples(playbin: &gst::Element) -> Arc<Mutex<(Vec<String>, Vec<i32>)>> {
+            let recorded = Arc::new(Mutex::new((Vec::new(), Vec::new())));
+            let samples = Arc::clone(&recorded);
+            output_sink_pad(playbin).add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+                let Some(gst::PadProbeData::Buffer(buffer)) = &info.data else {
+                    return gst::PadProbeReturn::Ok;
+                };
+                let caps = pad.current_caps().unwrap();
+                let format = caps.structure(0).unwrap().get::<String>("format").unwrap();
+                let map = buffer.map_readable().unwrap();
+                let mut samples = samples.lock().unwrap();
+                if format == "S24_32LE" {
+                    samples.1.extend(
+                        map.chunks_exact(4)
+                            .map(|s| i32::from_le_bytes(s.try_into().unwrap())),
+                    );
+                }
+                samples.0.push(format);
+                gst::PadProbeReturn::Ok
+            });
+            recorded
+        }
+
+        /// With `ReplayGain` off, the output plays the decoder's samples as they
+        /// are, in its format; with a gain, it still plays them in that format.
+        /// The output controls its stream's volume, as the sound server's does,
+        /// so the pipeline adds no volume element that takes other formats.
+        #[test]
+        fn off_plays_24_bit_audio_bit_for_bit_and_a_gain_keeps_its_format() {
+            let fixtures = Fixtures::new("replay-gain-off");
+            let samples: Vec<i32> = (0..48_000)
+                .map(|frame| (frame % 40) * 100_000 - 2_000_000)
+                .collect();
+            let track = encode(
+                &fixtures.dir,
+                "deep.flac",
+                &wav_bytes(48_000, 24, &samples),
+                Encoding::Flac,
+            );
+            write_tag(
+                &track,
+                TagType::VorbisComments,
+                &[(ItemKey::ReplayGainTrackGain, "-6.02 dB")],
+            );
+            let mut engine = Engine::start_with_output(volume_applying_output);
+            let recorded = record_samples(&engine.playbin);
+            let play_through = |engine: &mut Engine| {
+                *recorded.lock().unwrap() = (Vec::new(), Vec::new());
+                engine.send(PlaybackCommand::Play);
+                engine.wait_until("the track did not play to its end", |_| {
+                    recorded.lock().unwrap().1.len() >= samples.len()
+                });
+                engine.wait_until("the track did not stop", |engine| {
+                    engine.snapshot.state == PlaybackState::Stopped
+                });
+                let (formats, played) = recorded.lock().unwrap().clone();
+                assert!(
+                    formats.iter().all(|format| format == "S24_32LE"),
+                    "{formats:?}"
+                );
+                played
+            };
+            engine.send(PlaybackCommand::SetReplayGain(ReplayGainSettings::default()));
+            engine.send(PlaybackCommand::LoadQueue(vec![track]));
+            assert_eq!(play_through(&mut engine), samples);
+            assert_eq!(engine.snapshot.replay_gain, None);
+
+            engine.send(PlaybackCommand::SetReplayGain(settings(
+                ReplayGainMode::Track,
+                0.0,
+                0.0,
+            )));
+            let gain = db_to_linear(-6.02);
+            #[allow(clippy::cast_possible_truncation)]
+            let scaled: Vec<i32> = samples
+                .iter()
+                .map(|sample| (f64::from(*sample) * gain).round() as i32)
+                .collect();
+            assert_eq!(play_through(&mut engine), scaled);
+            assert!(
+                engine.snapshots.iter().any(|snapshot| snapshot
+                    .replay_gain
+                    .is_some_and(|report| report.applied.source == GainSource::Track)),
+                "the track's gain was reported while it played"
+            );
+            // The track played to its end: it reports no gain stopped.
+            assert_eq!(engine.snapshot.replay_gain, None);
+        }
     }
 }

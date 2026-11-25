@@ -78,6 +78,18 @@ function formatSampleRateText(sampleRateHz) {
     return FerrousUi.I18n.i18nc("@info sample rate", "%1 Hz", Math.round(value).toString())
 }
 
+// A gain in dB to one decimal, with a true minus sign for a cut and a plus
+// for a boost: "−6.4 dB", "+2.0 dB", "0.0 dB".
+function formatGainDb(db) {
+    const tenths = Math.round(Number(db) * 10)
+    if (!isFinite(tenths)) {
+        return ""
+    }
+    const magnitude = (Math.abs(tenths) / 10).toFixed(1)
+    const signed = tenths < 0 ? "\u2212" + magnitude : tenths > 0 ? "+" + magnitude : magnitude
+    return FerrousUi.I18n.i18nc("@info gain in decibels", "%1 dB", signed)
+}
+
 function formatBitDepthSampleRateText(bitDepth, sampleRateHz) {
     const parts = []
     const bitDepthValue = Number(bitDepth)

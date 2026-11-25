@@ -319,6 +319,15 @@ ApplicationWindow {
         property int lastFmDroppedScrobbleCount: 0
         property string lastFmStatusText: ""
         property bool lastFmShowScrobbleProgress: true
+        property int replayGainMode: 0
+        property double replayGainPreampDb: 0
+        property double replayGainUntaggedDb: 0
+        property bool showReplayGainInStatusBar: true
+        property int replayGainSource: 0
+        property double replayGainSourceDb: 0
+        property double replayGainAppliedPreampDb: 0
+        property double replayGainAppliedDb: 0
+        property bool replayGainPeakLimited: false
         property bool lastFmScrobblingPaused: false
         property int lastFmScrobbleState: 0
         property int lastFmScrobbleIneligibility: 0
@@ -435,7 +444,8 @@ ApplicationWindow {
                 showSpectrogramScale: false, channelButtonsVisibility: 1,
                 spectrogramZoomEnabled: true, libraryWatchEnabled: true,
                 spectrogramFrequencyCap: false, lastFmShowScrobbleProgress: true,
-                lastFmScrobblingEnabled: false
+                lastFmScrobblingEnabled: false, replayGainMode: 0, replayGainPreampDb: 0,
+                replayGainUntaggedDb: 0, showReplayGainInStatusBar: true
             }
         }
         function setShowSpectrogramCrosshair(value) { showSpectrogramCrosshair = value }
@@ -453,6 +463,10 @@ ApplicationWindow {
         function disconnectLastFm() {}
         function setLastFmScrobblingPaused(value) { lastFmScrobblingPaused = value }
         function setLastFmShowScrobbleProgress(value) { lastFmShowScrobbleProgress = value }
+        function setReplayGainMode(value) { replayGainMode = value }
+        function setReplayGainPreampDb(value) { replayGainPreampDb = value }
+        function setReplayGainUntaggedDb(value) { replayGainUntaggedDb = value }
+        function setShowReplayGainInStatusBar(value) { showReplayGainInStatusBar = value }
         function playAt(index) {}
         function selectQueueIndex(index) { selectedQueueIndex = index }
         // The queue edits asked for, for tests.

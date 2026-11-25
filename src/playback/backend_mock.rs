@@ -257,6 +257,8 @@ impl MockPlaybackRuntime {
             PlaybackCommand::SetVolume(vol) => {
                 self.snapshot.volume = vol.clamp(0.0, 1.0);
             }
+            // The mock plays no audio, so it applies and reports no gain.
+            PlaybackCommand::SetReplayGain(_) => {}
             PlaybackCommand::SetRepeatMode(mode) => {
                 let cancelled = self.queue.set_repeat_mode(mode);
                 self.continue_after_cancelled_advance(cancelled);

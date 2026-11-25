@@ -157,6 +157,12 @@ ApplicationWindow {
         property int lastFmScrobbleThresholdMs: 0
         property string lastFmScrobbleMessage: ""
         property int lastFmPendingScrobbleCount: 0
+        property bool showReplayGainInStatusBar: true
+        property int replayGainSource: 0
+        property real replayGainSourceDb: 0
+        property real replayGainAppliedPreampDb: 0
+        property real replayGainAppliedDb: 0
+        property bool replayGainPeakLimited: false
         function setLastFmScrobblingPaused(paused) { lastFmScrobblingPaused = paused }
         signal trackIdentityChanged()
     }
@@ -582,6 +588,7 @@ private slots:
     void statusBarShowsRepeatAndShuffleInWords();
     void statusBarShowsTheFormatGroupWithoutThePosition();
     void statusBarFormatShowsWhatFitsWhole();
+    void statusBarShowsTheReplayGainAfterTheFormatAndInItsTooltip();
     void statusBarFormatKeepsItsPlace_data();
     void statusBarFormatKeepsItsPlace();
     void statusBarGroupsAreEvenlySpacedAfterTheBitrate_data();
@@ -3561,6 +3568,75 @@ void TransportStatusTest::statusBarShowsTheFormatGroupWithoutThePosition() {
     }
     harness.bridge->setProperty("playbackState", QStringLiteral("Stopped"));
     QCOMPARE(format->property("text").toString(), QString());
+}
+
+// The gain ReplayGain applies to the track, after its format in the
+// format's style, and how it was chosen in the format's tooltip; only there
+// when the status bar is not to show it, and nowhere while ReplayGain is off.
+void TransportStatusTest::statusBarShowsTheReplayGainAfterTheFormatAndInItsTooltip() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *format = harness.item(QStringLiteral("statusBarFormat"));
+    QVERIFY(format != nullptr);
+    QObject *tip = statusToolTip(format);
+    QVERIFY(tip != nullptr);
+    const QString trackFormat = QStringLiteral("FLAC · 16-bit / 44.1 kHz · Stereo · 557 kbps");
+    QObject *bridge = harness.bridge;
+    // Off: nothing in the bar, and no tooltip.
+    QCOMPARE(format->property("text").toString(), trackFormat);
+    QCOMPARE(tip->property("message").toString(), QString());
+    showToolTipsAtOnce(format);
+    QTest::mouseMove(harness.window, sceneCentre(format));
+    QTest::qWait(50);
+    QVERIFY(!tip->property("visible").toBool());
+
+    struct Case {
+        int source;
+        double gain;
+        double preamp;
+        double applied;
+        bool limited;
+        const char *status;
+        const char *toolTip;
+    };
+    const QList<Case> cases{
+        {1, -6.4, 0.0, -6.4, false, "ReplayGain −6.4 dB", "Track gain −6.4 dB, preamp 0.0 dB"},
+        {2, -6.44, 0.0, -6.44, false, "ReplayGain −6.4 dB", "Album gain −6.4 dB, preamp 0.0 dB"},
+        {3, -6.4, 1.5, -4.9, false, "ReplayGain −4.9 dB",
+         "Track gain −6.4 dB (no album gain), preamp +1.5 dB"},
+        {4, 0.0, 0.0, 0.0, false, "ReplayGain 0.0 dB", "No gain tags: untagged gain 0.0 dB, preamp 0.0 dB"},
+        {1, 6.0, 3.0, 6.02, true, "ReplayGain +6.0 dB",
+         "Track gain +6.0 dB, preamp +3.0 dB\nLimited by the peak to avoid clipping"},
+    };
+    for (const Case &c : cases) {
+        QVERIFY(bridge->setProperty("replayGainSource", c.source));
+        QVERIFY(bridge->setProperty("replayGainSourceDb", c.gain));
+        QVERIFY(bridge->setProperty("replayGainAppliedPreampDb", c.preamp));
+        QVERIFY(bridge->setProperty("replayGainAppliedDb", c.applied));
+        QVERIFY(bridge->setProperty("replayGainPeakLimited", c.limited));
+        const QString status = QString::fromUtf8(c.status);
+        QTRY_COMPARE(format->property("text").toString(), trackFormat + QStringLiteral(" · ") + status);
+        QCOMPARE(tip->property("message").toString(), status + QLatin1Char('\n') + QString::fromUtf8(c.toolTip));
+    }
+    QTest::mouseMove(harness.window, sceneCentre(format) + QPoint(1, 0));
+    QTRY_VERIFY(tip->property("visible").toBool());
+
+    // Only in the tooltip: the bar shows the format alone.
+    QVERIFY(bridge->setProperty("showReplayGainInStatusBar", false));
+    QTRY_COMPARE(format->property("text").toString(), trackFormat);
+    QVERIFY(tip->property("message").toString().startsWith(QStringLiteral("ReplayGain +6.0 dB\n")));
+    QTRY_VERIFY(tip->property("visible").toBool());
+
+    // Stopped, or off again: nothing anywhere.
+    QVERIFY(bridge->setProperty("showReplayGainInStatusBar", true));
+    QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Stopped")));
+    QTRY_COMPARE(format->property("text").toString(), QString());
+    QCOMPARE(tip->property("message").toString(), QString());
+    QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Playing")));
+    QVERIFY(bridge->setProperty("replayGainSource", 0));
+    QTRY_COMPARE(format->property("text").toString(), trackFormat);
+    QCOMPARE(tip->property("message").toString(), QString());
+    QTRY_VERIFY(!tip->property("visible").toBool());
 }
 
 // The format group shows what fits whole, not what the window's width

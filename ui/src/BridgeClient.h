@@ -140,6 +140,23 @@ class BridgeClient : public QObject {
     // the 64-bit mask itself stays in C++.
     Q_PROPERTY(QList<bool> mutedChannels READ mutedChannels NOTIFY playbackChanged)
     Q_PROPERTY(QList<bool> soloedChannels READ soloedChannels NOTIFY playbackChanged)
+    // How ReplayGain levels playback: a BinaryBridgeCodec::ReplayGainMode,
+    // the preamp and the gain for files without gain tags, in dB, and
+    // whether the status bar shows the gain it applies.
+    Q_PROPERTY(int replayGainMode READ replayGainMode NOTIFY snapshotChanged)
+    Q_PROPERTY(double replayGainPreampDb READ replayGainPreampDb NOTIFY snapshotChanged)
+    Q_PROPERTY(double replayGainUntaggedDb READ replayGainUntaggedDb NOTIFY snapshotChanged)
+    Q_PROPERTY(bool showReplayGainInStatusBar READ showReplayGainInStatusBar NOTIFY snapshotChanged)
+    // The gain ReplayGain applies to the current track: how it was chosen, a
+    // BinaryBridgeCodec::ReplayGainSource, which is ReplayGainSourceNone
+    // while ReplayGain is off or before the track's audio plays; the tag's
+    // gain (or the gain for untagged files), the preamp, and what plays, in
+    // dB; and whether the peak lowered it.
+    Q_PROPERTY(int replayGainSource READ replayGainSource NOTIFY playbackChanged)
+    Q_PROPERTY(double replayGainSourceDb READ replayGainSourceDb NOTIFY playbackChanged)
+    Q_PROPERTY(double replayGainAppliedPreampDb READ replayGainAppliedPreampDb NOTIFY playbackChanged)
+    Q_PROPERTY(double replayGainAppliedDb READ replayGainAppliedDb NOTIFY playbackChanged)
+    Q_PROPERTY(bool replayGainPeakLimited READ replayGainPeakLimited NOTIFY playbackChanged)
     Q_PROPERTY(int channelButtonsVisibility READ channelButtonsVisibility NOTIFY snapshotChanged)
     Q_PROPERTY(bool showFps READ showFps NOTIFY snapshotChanged)
     Q_PROPERTY(bool showLevelMeter READ showLevelMeter NOTIFY snapshotChanged)
@@ -374,6 +391,15 @@ public:
     QString lastFmStatusText() const;
     int lastFmDroppedScrobbleCount() const;
     bool lastFmShowScrobbleProgress() const;
+    int replayGainMode() const;
+    double replayGainPreampDb() const;
+    double replayGainUntaggedDb() const;
+    bool showReplayGainInStatusBar() const;
+    int replayGainSource() const;
+    double replayGainSourceDb() const;
+    double replayGainAppliedPreampDb() const;
+    double replayGainAppliedDb() const;
+    bool replayGainPeakLimited() const;
     bool lastFmScrobblingPaused() const;
     int lastFmScrobbleState() const;
     int lastFmScrobbleIneligibility() const;
@@ -522,6 +548,11 @@ public:
     Q_INVOKABLE void disconnectLastFm();
     Q_INVOKABLE void setLastFmScrobblingPaused(bool value);
     Q_INVOKABLE void setLastFmShowScrobbleProgress(bool value);
+    // Each sends all three ReplayGain settings, with the one changed.
+    Q_INVOKABLE void setReplayGainMode(int mode);
+    Q_INVOKABLE void setReplayGainPreampDb(double db);
+    Q_INVOKABLE void setReplayGainUntaggedDb(double db);
+    Q_INVOKABLE void setShowReplayGainInStatusBar(bool value);
     Q_INVOKABLE void playAt(int index);
     Q_INVOKABLE void selectQueueIndex(int index);
     Q_INVOKABLE void removeAt(int index);
@@ -962,6 +993,8 @@ private:
     bool openUrlInFileBrowser(const QString &path, bool containingFolder) const;
     // Returns whether the bridge took the command.
     bool sendBinaryCommand(const QByteArray &payload);
+    // CmdSetReplayGain with the ReplayGain settings as they are here.
+    void sendReplayGain();
     // Reports a command that could not be sent; once the backend has
     // stopped, only to the diagnostics log.
     void reportCommandNotSent(const QByteArray &payload, const QString &message);
@@ -1112,6 +1145,15 @@ private:
     int m_lastFmDroppedScrobbleCount{0};
     QString m_lastFmAuthUrl;
     bool m_lastFmShowScrobbleProgress{true};
+    int m_replayGainMode{BinaryBridgeCodec::ReplayGainOff};
+    double m_replayGainPreampDb{0.0};
+    double m_replayGainUntaggedDb{0.0};
+    bool m_showReplayGainInStatusBar{true};
+    int m_replayGainSource{BinaryBridgeCodec::ReplayGainSourceNone};
+    double m_replayGainSourceDb{0.0};
+    double m_replayGainAppliedPreampDb{0.0};
+    double m_replayGainAppliedDb{0.0};
+    bool m_replayGainPeakLimited{false};
     bool m_lastFmScrobblingPaused{false};
     int m_lastFmScrobbleState{0};
     int m_lastFmScrobbleIneligibility{0};

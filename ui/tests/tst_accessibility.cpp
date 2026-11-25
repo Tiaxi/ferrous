@@ -503,7 +503,7 @@ void AccessibilityTest::checkEveryPreferencesPageIsReachableByTab(QQuickWindow *
     QVERIFY(pageList != nullptr);
     QCOMPARE(accessibleRole(pageList), QAccessible::PageTabList);
     QTRY_VERIFY(pageList->hasActiveFocus());
-    const int pageCount = 4;
+    const int pageCount = 5;
     for (int i = 0; i < pageCount; ++i) {
         QQuickItem *page = nullptr;
         QTRY_VERIFY((page = visibleItemNamed(prefs, QStringLiteral("preferencesPage_%1").arg(i))) != nullptr);
@@ -531,8 +531,10 @@ void AccessibilityTest::checkEveryPreferencesPageIsReachableByTab(QQuickWindow *
 
     // The check boxes on the pages take focus too, and Space toggles them;
     // OK applies the change.
-    QTest::keyClick(prefs, Qt::Key_PageUp, Qt::ControlModifier);
-    QTRY_COMPARE(pages->property("currentIndex").toInt(), 1);
+    for (int i = pageCount - 3; i >= 1; --i) {
+        QTest::keyClick(prefs, Qt::Key_PageUp, Qt::ControlModifier);
+        QTRY_COMPARE(pages->property("currentIndex").toInt(), i);
+    }
     QQuickItem *levelMeterBox = visibleItemNamed(prefs, QStringLiteral("showLevelMeterCheckBox"));
     QVERIFY(levelMeterBox != nullptr);
     // Off by default for a new install.

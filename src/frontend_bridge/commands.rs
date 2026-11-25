@@ -209,6 +209,9 @@ fn handle_load_settings_from_disk(state: &mut BridgeState, context: &mut BridgeC
     state.lastfm.enabled = state.settings.integrations.lastfm_scrobbling_enabled;
     let volume = state.settings.volume;
     command_volume(state, context.playback, volume);
+    context
+        .playback
+        .command(PlaybackCommand::SetReplayGain(state.settings.replay_gain));
     apply_analysis_spectrogram_settings(state, context.analysis);
     context.lastfm.command(LastFmCommand::SetEnabled(
         state.settings.integrations.lastfm_scrobbling_enabled,
@@ -314,6 +317,17 @@ fn handle_settings_bridge_command(
         BridgeSettingsCommand::SetVolume(volume) => {
             state.volume_requests_taken = state.volume_requests_taken.wrapping_add(1);
             command_volume(state, context.playback, *volume);
+            *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::SetReplayGain(settings) => {
+            state.settings.replay_gain = settings.clamped();
+            context
+                .playback
+                .command(PlaybackCommand::SetReplayGain(state.settings.replay_gain));
+            *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::SetShowReplayGainInStatusBar(show) => {
+            state.settings.show_replay_gain_in_status_bar = *show;
             *context.settings_dirty = true;
         }
         BridgeSettingsCommand::SetFftSize(size) => set_fft_size(state, context, *size),

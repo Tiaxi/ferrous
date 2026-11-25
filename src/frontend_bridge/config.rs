@@ -10,7 +10,7 @@ use serde_json::json;
 use crate::analysis::{SpectrogramDisplayMode, SpectrogramViewMode};
 use crate::playback::{
     volume_gain_to_level, volume_level_to_gain, FileStamp, PlaybackCommand, PlaybackEngine,
-    PlaybackState, RepeatMode,
+    PlaybackState, RepeatMode, ReplayGainMode,
 };
 use crate::save_cause::SaveProblem;
 
@@ -524,6 +524,46 @@ fn parse_unit_f32(value: &str) -> Option<f32> {
         .map(|x| x.clamp(0.0, 1.0))
 }
 
+/// Apply the settings line `key=value` to the `ReplayGain` settings, if it
+/// is one of theirs. Returns whether it is.
+fn parse_replay_gain_setting(settings: &mut BridgeSettings, key: &str, value: &str) -> bool {
+    match key {
+        "replaygain_mode" => {
+            if let Some(mode) = ReplayGainMode::parse_settings_value(value) {
+                settings.replay_gain.mode = mode;
+            }
+        }
+        "replaygain_preamp_db" => {
+            if let Some(db) = parse_replay_gain_db(value) {
+                settings.replay_gain.preamp_db = db;
+            }
+        }
+        "replaygain_untagged_db" => {
+            if let Some(db) = parse_replay_gain_db(value) {
+                settings.replay_gain.untagged_db = db;
+            }
+        }
+        "replaygain_show_in_status_bar" => {
+            parse_flag(value, &mut settings.show_replay_gain_in_status_bar);
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// A `ReplayGain` gain in dB, clamped to the range the settings offer.
+fn parse_replay_gain_db(value: &str) -> Option<f32> {
+    let db = value.parse::<f32>().ok().filter(|db| db.is_finite())?;
+    Some(
+        crate::playback::ReplayGainSettings {
+            preamp_db: db,
+            ..Default::default()
+        }
+        .clamped()
+        .preamp_db,
+    )
+}
+
 /// Apply the settings line `key=value` to the settings only the UI uses, if
 /// it is one of theirs. Returns whether it is.
 fn parse_ui_setting(settings: &mut BridgeSettings, key: &str, value: &str) -> bool {
@@ -631,6 +671,7 @@ pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
                 settings.integrations.lastfm_username = value.to_string();
             }
             "library_watch_enabled" => parse_flag(value, &mut settings.library_watch_enabled),
+            _ if parse_replay_gain_setting(settings, key, value) => {}
             _ if parse_ui_setting(settings, key, value) => {}
             // Kept for the build that wrote it.
             _ => settings.unknown_lines.push(line.to_string()),
@@ -712,7 +753,7 @@ fn write_config_file(path: &Path, bytes: &[u8]) -> Result<(), SaveFailure> {
 pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
     // `volume` keeps the linear gain so older builds play at the same loudness.
     let mut text = format!(
-        "volume_cubic={:.4}\nvolume={:.6}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nshow_level_meter={}\nprevent_display_sleep_in_fullscreen={}\nshow_fullscreen_title_strip={}\nshow_spectrogram_crosshair={}\nshow_spectrogram_scale={}\nchannel_buttons_visibility={}\nspectrogram_zoom_enabled={}\nspectrogram_frequency_cap={}\nstretch_short_tracks={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\nlastfm_show_scrobble_progress={}\nlibrary_watch_enabled={}\n",
+        "volume_cubic={:.4}\nvolume={:.6}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nshow_level_meter={}\nprevent_display_sleep_in_fullscreen={}\nshow_fullscreen_title_strip={}\nshow_spectrogram_crosshair={}\nshow_spectrogram_scale={}\nchannel_buttons_visibility={}\nspectrogram_zoom_enabled={}\nspectrogram_frequency_cap={}\nstretch_short_tracks={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\nlastfm_show_scrobble_progress={}\nlibrary_watch_enabled={}\nreplaygain_mode={}\nreplaygain_preamp_db={:.1}\nreplaygain_untagged_db={:.1}\nreplaygain_show_in_status_bar={}\n",
         settings.volume,
         volume_level_to_gain(settings.volume),
         settings.fft_size,
@@ -737,6 +778,10 @@ pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
         settings.integrations.lastfm_username,
         i32::from(settings.integrations.lastfm_show_scrobble_progress),
         i32::from(settings.library_watch_enabled),
+        settings.replay_gain.mode.settings_value(),
+        settings.replay_gain.preamp_db,
+        settings.replay_gain.untagged_db,
+        i32::from(settings.show_replay_gain_in_status_bar),
     );
     super::window_layout::format_settings(&settings.window, &mut text);
     super::queue_columns::format_settings(&settings.queue_columns, &mut text);
@@ -803,6 +848,12 @@ mod tests {
     fn settings_roundtrip_text_format() {
         let settings = BridgeSettings {
             volume: 0.42,
+            replay_gain: crate::playback::ReplayGainSettings {
+                mode: ReplayGainMode::Album,
+                preamp_db: -2.5,
+                untagged_db: 4.0,
+            },
+            show_replay_gain_in_status_bar: false,
             fft_size: 2048,
             spectrogram_view_mode: SpectrogramViewMode::PerChannel,
             spectrogram_display_mode: SpectrogramDisplayMode::Rolling,
@@ -863,6 +914,53 @@ mod tests {
         assert_eq!(parsed.integrations.lastfm_username, "tester");
         assert!(!parsed.integrations.lastfm_show_scrobble_progress);
         assert!(!parsed.library_watch_enabled);
+        assert_eq!(parsed.replay_gain, settings.replay_gain);
+        assert!(!parsed.show_replay_gain_in_status_bar);
+    }
+
+    #[test]
+    fn replay_gain_is_off_by_default_and_shows_in_the_status_bar() {
+        let mut parsed = BridgeSettings::default();
+        parse_settings_text(&mut parsed, "volume_cubic=0.5\n");
+        assert_eq!(
+            parsed.replay_gain,
+            crate::playback::ReplayGainSettings {
+                mode: ReplayGainMode::Off,
+                preamp_db: 0.0,
+                untagged_db: 0.0,
+            }
+        );
+        assert!(parsed.show_replay_gain_in_status_bar);
+        let text = format_settings_text(&BridgeSettings::default());
+        for line in [
+            "replaygain_mode=off",
+            "replaygain_preamp_db=0.0",
+            "replaygain_untagged_db=0.0",
+            "replaygain_show_in_status_bar=1",
+        ] {
+            assert!(text.lines().any(|l| l == line), "{line} in {text}");
+        }
+    }
+
+    #[test]
+    fn replay_gain_settings_out_of_range_are_clamped_and_unknown_values_ignored() {
+        let mut parsed = BridgeSettings::default();
+        parse_settings_text(
+            &mut parsed,
+            "replaygain_mode=track\nreplaygain_preamp_db=40\nreplaygain_untagged_db=-99.5\n\
+             replaygain_unknown=1\n",
+        );
+        assert_eq!(parsed.replay_gain.mode, ReplayGainMode::Track);
+        assert!((parsed.replay_gain.preamp_db - 15.0).abs() < f32::EPSILON);
+        assert!((parsed.replay_gain.untagged_db + 15.0).abs() < f32::EPSILON);
+        assert_eq!(parsed.unknown_lines, ["replaygain_unknown=1"]);
+        parse_settings_text(
+            &mut parsed,
+            "replaygain_mode=loud\nreplaygain_preamp_db=nan\nreplaygain_untagged_db=x\n",
+        );
+        assert_eq!(parsed.replay_gain.mode, ReplayGainMode::Track);
+        assert!((parsed.replay_gain.preamp_db - 15.0).abs() < f32::EPSILON);
+        assert!((parsed.replay_gain.untagged_db + 15.0).abs() < f32::EPSILON);
     }
 
     #[test]

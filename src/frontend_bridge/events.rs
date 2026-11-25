@@ -181,6 +181,9 @@ pub(super) fn playback_snapshot_urgency(
         || previous.seek_landed_serial != next.seek_landed_serial
         // The UI stops or starts moving its playhead.
         || previous.position_advancing != next.position_advancing
+        // The status bar shows the gain, also while paused, when nothing
+        // else changes.
+        || previous.replay_gain != next.replay_gain
     {
         return SnapshotUrgency::Immediate;
     }
@@ -1556,6 +1559,41 @@ mod tests {
         };
         assert_eq!(
             playback_snapshot_urgency(&previous, &landed),
+            SnapshotUrgency::Immediate
+        );
+    }
+
+    #[test]
+    fn a_changed_replay_gain_reaches_the_ui_without_waiting_for_a_heartbeat() {
+        use crate::playback::{AppliedGain, GainSource, ReplayGainReport};
+
+        let previous = PlaybackSnapshot {
+            state: PlaybackState::Paused,
+            track_token: 3,
+            ..PlaybackSnapshot::default()
+        };
+        let report = ReplayGainReport {
+            applied: AppliedGain {
+                source: GainSource::Track,
+                gain_db: -6.0,
+                preamp_db: 0.0,
+                applied_db: -6.0,
+                peak_limited: false,
+                linear: 0.5,
+            },
+            track_token: 3,
+        };
+        let reported = PlaybackSnapshot {
+            replay_gain: Some(report),
+            ..previous.clone()
+        };
+        assert_eq!(
+            playback_snapshot_urgency(&previous, &reported),
+            SnapshotUrgency::Immediate
+        );
+        // Turned off.
+        assert_eq!(
+            playback_snapshot_urgency(&reported, &previous),
             SnapshotUrgency::Immediate
         );
     }

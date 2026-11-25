@@ -2151,6 +2151,42 @@ bool BridgeClient::lastFmShowScrobbleProgress() const {
     return m_lastFmShowScrobbleProgress;
 }
 
+int BridgeClient::replayGainMode() const {
+    return m_replayGainMode;
+}
+
+double BridgeClient::replayGainPreampDb() const {
+    return m_replayGainPreampDb;
+}
+
+double BridgeClient::replayGainUntaggedDb() const {
+    return m_replayGainUntaggedDb;
+}
+
+bool BridgeClient::showReplayGainInStatusBar() const {
+    return m_showReplayGainInStatusBar;
+}
+
+int BridgeClient::replayGainSource() const {
+    return m_replayGainSource;
+}
+
+double BridgeClient::replayGainSourceDb() const {
+    return m_replayGainSourceDb;
+}
+
+double BridgeClient::replayGainAppliedPreampDb() const {
+    return m_replayGainAppliedPreampDb;
+}
+
+double BridgeClient::replayGainAppliedDb() const {
+    return m_replayGainAppliedDb;
+}
+
+bool BridgeClient::replayGainPeakLimited() const {
+    return m_replayGainPeakLimited;
+}
+
 bool BridgeClient::lastFmScrobblingPaused() const {
     return m_lastFmScrobblingPaused;
 }
@@ -2608,6 +2644,10 @@ QVariantMap BridgeClient::settingDefaults() const {
         {QStringLiteral("libraryWatchEnabled"), defaults.libraryWatchEnabled},
         {QStringLiteral("spectrogramFrequencyCap"), defaults.spectrogramFrequencyCap},
         {QStringLiteral("lastFmShowScrobbleProgress"), defaults.lastFmShowScrobbleProgress},
+        {QStringLiteral("replayGainMode"), defaults.replayGainMode},
+        {QStringLiteral("replayGainPreampDb"), double(defaults.replayGainPreampDb)},
+        {QStringLiteral("replayGainUntaggedDb"), double(defaults.replayGainUntaggedDb)},
+        {QStringLiteral("showReplayGainInStatusBar"), defaults.showReplayGainInStatusBar},
         // Not in the settings section: scrobbling starts off.
         {QStringLiteral("lastFmScrobblingEnabled"), false},
     };
@@ -3175,6 +3215,63 @@ void BridgeClient::setLastFmShowScrobbleProgress(bool value) {
     }
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
         BinaryBridgeCodec::CmdSetLastFmShowScrobbleProgress,
+        static_cast<quint8>(value ? 1 : 0)));
+}
+
+namespace {
+
+// A ReplayGain gain the settings offer: in their range, in 0.5 dB steps.
+double replayGainSettingDb(double db) {
+    if (!std::isfinite(db)) {
+        return 0.0;
+    }
+    return std::clamp(std::round(db * 2.0) / 2.0, double(BinaryBridgeCodec::kMinReplayGainDb),
+        double(BinaryBridgeCodec::kMaxReplayGainDb));
+}
+
+} // namespace
+
+void BridgeClient::sendReplayGain() {
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandReplayGain(
+        static_cast<quint8>(m_replayGainMode), static_cast<float>(m_replayGainPreampDb),
+        static_cast<float>(m_replayGainUntaggedDb)));
+}
+
+void BridgeClient::setReplayGainMode(int mode) {
+    const int clamped = std::clamp(mode, int(BinaryBridgeCodec::ReplayGainOff),
+        int(BinaryBridgeCodec::ReplayGainAlbum));
+    if (m_replayGainMode != clamped) {
+        m_replayGainMode = clamped;
+        scheduleSnapshotChanged();
+    }
+    sendReplayGain();
+}
+
+void BridgeClient::setReplayGainPreampDb(double db) {
+    const double value = replayGainSettingDb(db);
+    if (m_replayGainPreampDb != value) {
+        m_replayGainPreampDb = value;
+        scheduleSnapshotChanged();
+    }
+    sendReplayGain();
+}
+
+void BridgeClient::setReplayGainUntaggedDb(double db) {
+    const double value = replayGainSettingDb(db);
+    if (m_replayGainUntaggedDb != value) {
+        m_replayGainUntaggedDb = value;
+        scheduleSnapshotChanged();
+    }
+    sendReplayGain();
+}
+
+void BridgeClient::setShowReplayGainInStatusBar(bool value) {
+    if (m_showReplayGainInStatusBar != value) {
+        m_showReplayGainInStatusBar = value;
+        scheduleSnapshotChanged();
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSetShowReplayGainInStatusBar,
         static_cast<quint8>(value ? 1 : 0)));
 }
 
@@ -6050,6 +6147,31 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         playbackSignalChanged = true;
     }
 
+    // The gain of the current track only: a report for another track is
+    // none for this one.
+    if (snapshot.playback.present) {
+        const auto &playback = snapshot.playback;
+        const bool current = playback.replayGainSource != BinaryBridgeCodec::ReplayGainSourceNone
+            && playback.replayGainTrackToken == playback.trackToken;
+        const int source = current ? playback.replayGainSource
+                                   : int(BinaryBridgeCodec::ReplayGainSourceNone);
+        const double sourceDb = current ? playback.replayGainDb : 0.0;
+        const double preampDb = current ? playback.replayGainPreampDb : 0.0;
+        const double appliedDb = current ? playback.replayGainAppliedDb : 0.0;
+        const bool peakLimited = current && playback.replayGainPeakLimited;
+        if (m_replayGainSource != source || m_replayGainSourceDb != sourceDb
+            || m_replayGainAppliedPreampDb != preampDb || m_replayGainAppliedDb != appliedDb
+            || m_replayGainPeakLimited != peakLimited) {
+            m_replayGainSource = source;
+            m_replayGainSourceDb = sourceDb;
+            m_replayGainAppliedPreampDb = preampDb;
+            m_replayGainAppliedDb = appliedDb;
+            m_replayGainPeakLimited = peakLimited;
+            changed = true;
+            playbackSignalChanged = true;
+        }
+    }
+
     // The backend's volume, once it has taken every volume request sent to
     // it: until then, the latest request shows.
     if (snapshot.settings.present && snapshot.settings.hasVolumeRequestsTaken) {
@@ -6609,6 +6731,23 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         m_spectrogramFrequencyCap = spectrogramFrequencyCap;
         changed = true;
         snapshotSignalChanged = true;
+    }
+
+    if (snapshot.settings.present && snapshot.settings.hasReplayGain) {
+        const int mode = snapshot.settings.replayGainMode;
+        const double preampDb = snapshot.settings.replayGainPreampDb;
+        const double untaggedDb = snapshot.settings.replayGainUntaggedDb;
+        const bool showInStatusBar = snapshot.settings.showReplayGainInStatusBar;
+        if (m_replayGainMode != mode || m_replayGainPreampDb != preampDb
+            || m_replayGainUntaggedDb != untaggedDb
+            || m_showReplayGainInStatusBar != showInStatusBar) {
+            m_replayGainMode = mode;
+            m_replayGainPreampDb = preampDb;
+            m_replayGainUntaggedDb = untaggedDb;
+            m_showReplayGainInStatusBar = showInStatusBar;
+            changed = true;
+            snapshotSignalChanged = true;
+        }
     }
 
     const bool lastFmShowScrobbleProgress = snapshot.settings.present

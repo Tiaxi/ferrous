@@ -18,7 +18,7 @@ Ferrous started as the player I wanted for my own music: one that feels at home 
 
 ## A look around
 
-**Playback and the queue.** Gapless playback, repeat and shuffle, and a queue that comes back where you left it. Clearing, removing, moving and replacing tracks can be undone.
+**Playback and the queue.** Gapless playback, ReplayGain from the tags in your files, repeat and shuffle, and a queue that comes back where you left it. Clearing, removing, moving and replacing tracks can be undone.
 
 **Library and search.** The library follows your music folders as files come and go. [Search](docs/SEARCH.md) finds artists, albums and tracks as you type.
 
@@ -36,7 +36,7 @@ The [feature guide](docs/FEATURES.md) goes into each part in more detail, with t
 
 ## Where it stands
 
-Ferrous is developed by one person, for Fedora with KDE Plasma first, and its direction follows my own priorities. I use it every day, and it is stable enough for that, but it is still growing: it lacks some features many players have, such as ReplayGain, an equalizer and a choice of output device. The [roadmap](docs/ROADMAP.md) lists what's missing and what I'd like to add. Feedback and contributions are welcome.
+Ferrous is developed by one person, for Fedora with KDE Plasma first, and its direction follows my own priorities. I use it every day, and it is stable enough for that, but it is still growing: it lacks some features many players have, such as an equalizer and a choice of output device. The [roadmap](docs/ROADMAP.md) lists what's missing and what I'd like to add. Feedback and contributions are welcome.
 
 ## Installation
 
