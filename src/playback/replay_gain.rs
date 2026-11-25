@@ -20,6 +20,12 @@ pub enum ReplayGainMode {
     /// as they were mastered. A track without an album gain takes its
     /// track gain.
     Album,
+    /// The album gain, as Album mode takes it, but the track gain for a
+    /// track that shuffle picked: shuffled tracks of different albums play
+    /// at the same loudness, and an album played in order as it was
+    /// mastered. Decided for each track by how it came to play, so the gain
+    /// never changes while a track plays.
+    Auto,
 }
 
 impl ReplayGainMode {
@@ -29,6 +35,7 @@ impl ReplayGainMode {
             Self::Off => 0,
             Self::Track => 1,
             Self::Album => 2,
+            Self::Auto => 3,
         }
     }
 
@@ -38,6 +45,7 @@ impl ReplayGainMode {
             Self::Off => "off",
             Self::Track => "track",
             Self::Album => "album",
+            Self::Auto => "auto",
         }
     }
 
@@ -47,7 +55,56 @@ impl ReplayGainMode {
             "off" | "0" => Some(Self::Off),
             "track" | "1" => Some(Self::Track),
             "album" | "2" => Some(Self::Album),
+            "auto" | "3" => Some(Self::Auto),
             _ => None,
+        }
+    }
+
+    /// The gain this mode takes for a track that came to play by `pick`,
+    /// or `None` when it is off.
+    #[must_use]
+    pub fn choice(self, pick: TrackPick) -> Option<GainChoice> {
+        match self {
+            Self::Off => None,
+            Self::Track => Some(GainChoice::Track),
+            Self::Album => Some(GainChoice::Album),
+            Self::Auto => Some(match pick {
+                TrackPick::Shuffle => GainChoice::Track,
+                TrackPick::Other => GainChoice::Album,
+            }),
+        }
+    }
+}
+
+/// How a track came to play, which decides the gain that Auto mode takes
+/// for it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TrackPick {
+    /// Anything but shuffle: the queue's order, Repeat-One playing a track
+    /// that was not a shuffle pick again, or the user's pick, also with
+    /// shuffle on.
+    #[default]
+    Other,
+    /// Shuffle picked the track at random, or Previous or Next went back or
+    /// forward through the tracks it picked.
+    Shuffle,
+}
+
+/// Which of a file's gains levels it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GainChoice {
+    /// The track gain.
+    Track,
+    /// The album gain, or the track gain of a file without one.
+    Album,
+}
+
+impl GainChoice {
+    #[must_use]
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Self::Track => 1,
+            Self::Album => 2,
         }
     }
 }
@@ -112,11 +169,12 @@ impl GainTags {
 /// How the applied gain was chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GainSource {
-    /// The track gain, in Track mode.
+    /// The track gain, in Track mode or as Auto mode chose it.
     Track,
-    /// The album gain, in Album mode.
+    /// The album gain, in Album mode or as Auto mode chose it.
     Album,
-    /// The track gain, in Album mode, as the file has no album gain.
+    /// The track gain, where the album gain was chosen but the file has
+    /// none.
     TrackWithoutAlbum,
     /// The gain for files without gain tags.
     Untagged,
@@ -150,33 +208,41 @@ pub struct AppliedGain {
     pub peak_limited: bool,
     /// The factor that each sample is multiplied by.
     pub linear: f64,
+    /// The gain that Auto mode chose, or `None` in the other modes.
+    pub auto: Option<GainChoice>,
 }
 
 /// The most that `ReplayGain` turns a stream up or down, in dB, whatever its
 /// tags say.
 const MAX_GAIN_DB: f64 = 60.0;
 
-/// The gain that `settings` give a stream with `tags`, or `None` when
-/// `ReplayGain` is off and the stream plays as it is.
+/// The gain that `settings` give a stream with `tags`, of a track that came
+/// to play by `pick`, or `None` when `ReplayGain` is off and the stream
+/// plays as it is.
 ///
-/// Album mode takes the album gain and Track mode the track gain; Album
-/// mode takes the track gain of a file without an album gain, and a file
+/// Album mode takes the album gain and Track mode the track gain, and Auto
+/// mode either one by `pick`; see [`ReplayGainMode::choice`]. The album
+/// gain falls back to the track gain of a file without one, and a file
 /// without the gain it needs takes the gain for untagged files. The preamp
 /// is added to every gain. Where a peak tag tells the stream's loudest
 /// sample, the gain stays low enough for that sample not to clip: there is
 /// no limiter.
 #[must_use]
-pub fn gain_for(settings: &ReplayGainSettings, tags: &GainTags) -> Option<AppliedGain> {
+pub fn gain_for(
+    settings: &ReplayGainSettings,
+    tags: &GainTags,
+    pick: TrackPick,
+) -> Option<AppliedGain> {
     let settings = settings.clamped();
     let untagged = (GainSource::Untagged, f64::from(settings.untagged_db));
-    let (source, gain_db) = match settings.mode {
-        ReplayGainMode::Off => return None,
-        ReplayGainMode::Album => match (tags.album_gain, tags.track_gain) {
+    let choice = settings.mode.choice(pick)?;
+    let (source, gain_db) = match choice {
+        GainChoice::Album => match (tags.album_gain, tags.track_gain) {
             (Some(gain), _) => (GainSource::Album, gain),
             (None, Some(gain)) => (GainSource::TrackWithoutAlbum, gain),
             (None, None) => untagged,
         },
-        ReplayGainMode::Track => tags
+        GainChoice::Track => tags
             .track_gain
             .map_or(untagged, |gain| (GainSource::Track, gain)),
     };
@@ -211,6 +277,7 @@ pub fn gain_for(settings: &ReplayGainSettings, tags: &GainTags) -> Option<Applie
         },
         peak_limited,
         linear,
+        auto: (settings.mode == ReplayGainMode::Auto).then_some(choice),
     })
 }
 
@@ -313,6 +380,12 @@ mod tests {
             album_gain: album,
             ..GainTags::default()
         }
+    }
+
+    /// The gain for a track that shuffle did not pick, which the modes
+    /// other than Auto do not look at.
+    fn gain_for(settings: &ReplayGainSettings, tags: &GainTags) -> Option<AppliedGain> {
+        super::gain_for(settings, tags, TrackPick::Other)
     }
 
     fn assert_db(applied: &AppliedGain, db: f64) {
@@ -537,17 +610,86 @@ mod tests {
 
     #[test]
     fn modes_round_trip_through_their_settings_values_and_codes() {
-        for mode in [
-            ReplayGainMode::Off,
-            ReplayGainMode::Track,
-            ReplayGainMode::Album,
+        for (mode, value, code) in [
+            (ReplayGainMode::Off, "off", 0),
+            (ReplayGainMode::Track, "track", 1),
+            (ReplayGainMode::Album, "album", 2),
+            (ReplayGainMode::Auto, "auto", 3),
         ] {
+            assert_eq!(mode.settings_value(), value);
+            assert_eq!(mode.to_u8(), code);
             assert_eq!(
                 ReplayGainMode::parse_settings_value(mode.settings_value()),
                 Some(mode)
             );
+            assert_eq!(
+                ReplayGainMode::parse_settings_value(&code.to_string()),
+                Some(mode)
+            );
         }
+        assert_eq!(
+            ReplayGainMode::parse_settings_value(" Auto "),
+            Some(ReplayGainMode::Auto)
+        );
         assert_eq!(ReplayGainMode::parse_settings_value("loud"), None);
+        assert_eq!(ReplayGainMode::parse_settings_value("4"), None);
+    }
+
+    #[test]
+    fn auto_mode_takes_the_track_gain_only_for_a_shuffle_pick() {
+        assert_eq!(ReplayGainMode::Off.choice(TrackPick::Shuffle), None);
+        for pick in [TrackPick::Other, TrackPick::Shuffle] {
+            assert_eq!(ReplayGainMode::Track.choice(pick), Some(GainChoice::Track));
+            assert_eq!(ReplayGainMode::Album.choice(pick), Some(GainChoice::Album));
+        }
+        assert_eq!(
+            ReplayGainMode::Auto.choice(TrackPick::Shuffle),
+            Some(GainChoice::Track)
+        );
+        assert_eq!(
+            ReplayGainMode::Auto.choice(TrackPick::Other),
+            Some(GainChoice::Album)
+        );
+        assert_eq!(TrackPick::default(), TrackPick::Other);
+
+        let auto = settings(ReplayGainMode::Auto, 1.0, -2.0);
+        let tags = tagged(-6.4, Some(-3.0));
+        let shuffled = super::gain_for(&auto, &tags, TrackPick::Shuffle).unwrap();
+        assert_eq!(shuffled.source, GainSource::Track);
+        assert_eq!(shuffled.auto, Some(GainChoice::Track));
+        assert_db(&shuffled, -5.4);
+        let in_order = super::gain_for(&auto, &tags, TrackPick::Other).unwrap();
+        assert_eq!(in_order.source, GainSource::Album);
+        assert_eq!(in_order.auto, Some(GainChoice::Album));
+        assert_db(&in_order, -2.0);
+
+        // The album gain falls back to the track gain, as in Album mode.
+        let applied = super::gain_for(&auto, &tagged(-6.4, None), TrackPick::Other).unwrap();
+        assert_eq!(applied.source, GainSource::TrackWithoutAlbum);
+        assert_eq!(applied.auto, Some(GainChoice::Album));
+        assert_db(&applied, -5.4);
+        // An untagged file still tells which gain Auto chose.
+        let applied = super::gain_for(&auto, &GainTags::default(), TrackPick::Shuffle).unwrap();
+        assert_eq!(applied.source, GainSource::Untagged);
+        assert_eq!(applied.auto, Some(GainChoice::Track));
+        assert_db(&applied, -1.0);
+
+        // The other modes tell no choice of Auto's, whatever the pick.
+        for mode in [ReplayGainMode::Track, ReplayGainMode::Album] {
+            let applied =
+                super::gain_for(&settings(mode, 0.0, 0.0), &tags, TrackPick::Shuffle).unwrap();
+            assert_eq!(applied.auto, None, "{mode:?}");
+        }
+        assert_eq!(
+            super::gain_for(
+                &settings(ReplayGainMode::Album, 0.0, 0.0),
+                &tags,
+                TrackPick::Shuffle
+            )
+            .unwrap()
+            .source,
+            GainSource::Album
+        );
     }
 
     #[cfg(feature = "gst")]

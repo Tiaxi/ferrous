@@ -151,12 +151,15 @@ class BridgeClient : public QObject {
     // BinaryBridgeCodec::ReplayGainSource, which is ReplayGainSourceNone
     // while ReplayGain is off or before the track's audio plays; the tag's
     // gain (or the gain for untagged files), the preamp, and what plays, in
-    // dB; and whether the peak lowered it.
+    // dB; whether the peak lowered it; and the gain Auto mode chose, a
+    // BinaryBridgeCodec::ReplayGainChoice, which is ReplayGainChoiceNone in
+    // the other modes.
     Q_PROPERTY(int replayGainSource READ replayGainSource NOTIFY playbackChanged)
     Q_PROPERTY(double replayGainSourceDb READ replayGainSourceDb NOTIFY playbackChanged)
     Q_PROPERTY(double replayGainAppliedPreampDb READ replayGainAppliedPreampDb NOTIFY playbackChanged)
     Q_PROPERTY(double replayGainAppliedDb READ replayGainAppliedDb NOTIFY playbackChanged)
     Q_PROPERTY(bool replayGainPeakLimited READ replayGainPeakLimited NOTIFY playbackChanged)
+    Q_PROPERTY(int replayGainAuto READ replayGainAuto NOTIFY playbackChanged)
     Q_PROPERTY(int channelButtonsVisibility READ channelButtonsVisibility NOTIFY snapshotChanged)
     Q_PROPERTY(bool showFps READ showFps NOTIFY snapshotChanged)
     Q_PROPERTY(bool showLevelMeter READ showLevelMeter NOTIFY snapshotChanged)
@@ -400,6 +403,7 @@ public:
     double replayGainAppliedPreampDb() const;
     double replayGainAppliedDb() const;
     bool replayGainPeakLimited() const;
+    int replayGainAuto() const;
     bool lastFmScrobblingPaused() const;
     int lastFmScrobbleState() const;
     int lastFmScrobbleIneligibility() const;
@@ -1154,6 +1158,7 @@ private:
     double m_replayGainAppliedPreampDb{0.0};
     double m_replayGainAppliedDb{0.0};
     bool m_replayGainPeakLimited{false};
+    int m_replayGainAuto{BinaryBridgeCodec::ReplayGainChoiceNone};
     bool m_lastFmScrobblingPaused{false};
     int m_lastFmScrobbleState{0};
     int m_lastFmScrobbleIneligibility{0};

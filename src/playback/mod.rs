@@ -12,7 +12,9 @@ use crate::analysis::AnalysisCommand;
 pub mod clock;
 pub use clock::{monotonic_now, MonotonicTime};
 pub mod replay_gain;
-pub use replay_gain::{AppliedGain, GainSource, ReplayGainMode, ReplayGainSettings};
+pub use replay_gain::{
+    AppliedGain, GainChoice, GainSource, ReplayGainMode, ReplayGainSettings, TrackPick,
+};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PlaybackState {

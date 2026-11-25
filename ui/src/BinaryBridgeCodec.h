@@ -217,6 +217,8 @@ enum ReplayGainMode : quint8 {
     ReplayGainOff = 0,
     ReplayGainTrack = 1,
     ReplayGainAlbum = 2,
+    // The album gain, but the track gain for a track that shuffle picked.
+    ReplayGainAuto = 3,
 };
 
 // How the gain ReplayGain applies to the current track was chosen. Mirrors
@@ -224,15 +226,26 @@ enum ReplayGainMode : quint8 {
 // off or before the track's audio plays.
 enum ReplayGainSource : quint8 {
     ReplayGainSourceNone = 0,
-    // The track gain, in Track mode.
+    // The track gain, in Track mode or as Auto mode chose it.
     ReplayGainSourceTrack = 1,
-    // The album gain, in Album mode.
+    // The album gain, in Album mode or as Auto mode chose it.
     ReplayGainSourceAlbum = 2,
-    // The track gain, in Album mode, as the file has no album gain.
+    // The track gain, where the album gain was chosen but the file has none.
     ReplayGainSourceTrackWithoutAlbum = 3,
     // The gain for files without gain tags.
     ReplayGainSourceUntagged = 4,
     ReplayGainSourceLast = ReplayGainSourceUntagged,
+};
+
+// The gain Auto mode chose for the current track. Mirrors GainChoice in
+// src/playback/replay_gain.rs; 0 is none, in the other modes.
+enum ReplayGainChoice : quint8 {
+    ReplayGainChoiceNone = 0,
+    // The track gain: shuffle picked the track.
+    ReplayGainChoiceTrack = 1,
+    // The album gain: shuffle did not pick the track.
+    ReplayGainChoiceAlbum = 2,
+    ReplayGainChoiceLast = ReplayGainChoiceAlbum,
 };
 
 // The lowest and highest ReplayGain preamp and gain for files without gain
@@ -341,12 +354,14 @@ struct DecodedPlayback {
     quint64 playSerial{0};
     // The gain ReplayGain applies to the track of replayGainTrackToken, or
     // ReplayGainSourceNone: the tag's gain (or the untagged gain), the
-    // preamp and what plays, in dB, and whether the peak lowered it.
+    // preamp and what plays, in dB, whether the peak lowered it, and the
+    // gain Auto mode chose (ReplayGainChoice).
     int replayGainSource{ReplayGainSourceNone};
     float replayGainDb{0.0f};
     float replayGainPreampDb{0.0f};
     float replayGainAppliedDb{0.0f};
     bool replayGainPeakLimited{false};
+    int replayGainAuto{ReplayGainChoiceNone};
     quint64 replayGainTrackToken{0};
 };
 

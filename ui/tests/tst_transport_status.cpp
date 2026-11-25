@@ -163,6 +163,7 @@ ApplicationWindow {
         property real replayGainAppliedPreampDb: 0
         property real replayGainAppliedDb: 0
         property bool replayGainPeakLimited: false
+        property int replayGainAuto: 0
         function setLastFmScrobblingPaused(paused) { lastFmScrobblingPaused = paused }
         signal trackIdentityChanged()
     }
@@ -3620,6 +3621,46 @@ void TransportStatusTest::statusBarShowsTheReplayGainAfterTheFormatAndInItsToolt
     }
     QTest::mouseMove(harness.window, sceneCentre(format) + QPoint(1, 0));
     QTRY_VERIFY(tip->property("visible").toBool());
+
+    // Auto names the gain it chose under the gain's line, also where the
+    // album gain it chose falls back to the track gain.
+    struct AutoCase {
+        int source;
+        int choice;
+        const char *toolTip;
+    };
+    const QList<AutoCase> autoCases{
+        {1, 1, "Track gain −6.4 dB, preamp 0.0 dB\nAuto chose track gain: shuffle picked the track"},
+        {2, 2, "Album gain −6.4 dB, preamp 0.0 dB\nAuto chose album gain: shuffle did not pick the track"},
+        {3, 2,
+         "Track gain −6.4 dB (no album gain), preamp 0.0 dB\n"
+         "Auto chose album gain: shuffle did not pick the track"},
+        {4, 1, "No gain tags: untagged gain −6.4 dB, preamp 0.0 dB\n"
+               "Auto chose track gain: shuffle picked the track"},
+    };
+    QVERIFY(bridge->setProperty("replayGainSourceDb", -6.4));
+    QVERIFY(bridge->setProperty("replayGainAppliedPreampDb", 0.0));
+    QVERIFY(bridge->setProperty("replayGainAppliedDb", -6.4));
+    QVERIFY(bridge->setProperty("replayGainPeakLimited", false));
+    for (const AutoCase &c : autoCases) {
+        QVERIFY(bridge->setProperty("replayGainSource", c.source));
+        QVERIFY(bridge->setProperty("replayGainAuto", c.choice));
+        QTRY_COMPARE(tip->property("message").toString(),
+            QStringLiteral("ReplayGain −6.4 dB\n") + QString::fromUtf8(c.toolTip));
+        // The status text is the same as in the other modes.
+        QCOMPARE(format->property("text").toString(), trackFormat + QStringLiteral(" · ReplayGain −6.4 dB"));
+    }
+    // Then the peak's limit.
+    QVERIFY(bridge->setProperty("replayGainPeakLimited", true));
+    QTRY_VERIFY(tip->property("message").toString().endsWith(
+        QStringLiteral("Auto chose track gain: shuffle picked the track\nLimited by the peak to avoid clipping")));
+    QVERIFY(bridge->setProperty("replayGainAuto", 0));
+    QVERIFY(bridge->setProperty("replayGainSource", 1));
+    QVERIFY(bridge->setProperty("replayGainSourceDb", 6.0));
+    QVERIFY(bridge->setProperty("replayGainAppliedPreampDb", 3.0));
+    QVERIFY(bridge->setProperty("replayGainAppliedDb", 6.02));
+    QTRY_COMPARE(tip->property("message").toString(),
+        QStringLiteral("ReplayGain +6.0 dB\nTrack gain +6.0 dB, preamp +3.0 dB\nLimited by the peak to avoid clipping"));
 
     // Only in the tooltip: the bar shows the format alone.
     QVERIFY(bridge->setProperty("showReplayGainInStatusBar", false));

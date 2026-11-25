@@ -1706,6 +1706,21 @@ void UiDialogsTest::playbackPageSetsReplayGainOnOkAndShowsItsSettings() {
     QQuickItem *show = visibleNamed(prefs, QStringLiteral("replayGainShowComboBox"));
     QVERIFY(preamp != nullptr && untagged != nullptr && show != nullptr);
     QCOMPARE(mode->property("displayText").toString(), QStringLiteral("Off"));
+    // Off, the three gains, and Auto last.
+    QCOMPARE(mode->property("count").toInt(), 4);
+    QStringList modes;
+    for (int index = 0; index < 4; ++index) {
+        QString text;
+        QVERIFY(QMetaObject::invokeMethod(mode, "textAt", Q_RETURN_ARG(QString, text), Q_ARG(int, index)));
+        modes.push_back(text);
+    }
+    QCOMPARE(modes, (QStringList{QStringLiteral("Off"), QStringLiteral("Track gain"),
+                        QStringLiteral("Album gain"), QStringLiteral("Auto")}));
+    QQuickItem *help = visibleNamed(prefs, QStringLiteral("replayGainHelp"));
+    QVERIFY(help != nullptr);
+    QVERIFY2(help->property("text").toString().contains(
+                 QStringLiteral("Auto uses album gain, and track gain for tracks that shuffle picks.")),
+        qPrintable(help->property("text").toString()));
     QCOMPARE(preamp->property("displayText").toString(), QStringLiteral("\u22122.5 dB"));
     QCOMPARE(untagged->property("displayText").toString(), QStringLiteral("+3.0 dB"));
     QCOMPARE(show->property("displayText").toString(), QStringLiteral("In the status bar"));
@@ -1752,6 +1767,17 @@ void UiDialogsTest::playbackPageSetsReplayGainOnOkAndShowsItsSettings() {
     QCOMPARE(preamp->property("displayText").toString(), QStringLiteral("0.0 dB"));
     QCOMPARE(untagged->property("displayText").toString(), QStringLiteral("0.0 dB"));
     QCOMPARE(show->property("displayText").toString(), QStringLiteral("In the status bar"));
+
+    // Auto is saved as the fourth mode and shown again.
+    QVERIFY(mode->setProperty("currentIndex", 3));
+    QVERIFY(QMetaObject::invokeMethod(mode, "activated", Q_ARG(int, 3)));
+    QTRY_VERIFY(preamp->isEnabled() && untagged->isEnabled() && show->isEnabled());
+    click(prefs, visibleNamed(prefs, QStringLiteral("preferencesOkButton")));
+    QTRY_VERIFY(!dialog->property("visible").toBool());
+    QCOMPARE(bridge->property("replayGainMode").toInt(), 3);
+    QVERIFY(QMetaObject::invokeMethod(dialog, "openPage", Q_ARG(QVariant, 3)));
+    QTRY_VERIFY(dialog->property("visible").toBool());
+    QTRY_COMPARE(mode->property("displayText").toString(), QStringLiteral("Auto"));
 }
 
 void UiDialogsTest::titleStripSettingIsOnlyForTheWholeScreen() {

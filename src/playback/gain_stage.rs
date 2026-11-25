@@ -10,18 +10,26 @@
 //! applies from its first sample and the previous stream's gain to its
 //! last. A seek starts no new stream and keeps the gain.
 //!
+//! Auto mode takes the track or the album gain by how each track came to
+//! play (see [`TrackPick`]), which travels outside the stream: the engine
+//! tells the stage the pick of each track it gives the pipeline, in the
+//! order the pipeline plays them, and the stage takes each one up at the
+//! start of the next new stream, as it reaches the output. So the pick too
+//! changes on the successor's first sample, and a seek keeps it.
+//!
 //! The stage multiplies the samples itself rather than through a `volume`
 //! element, which takes only some formats: with one in the output, a 24-bit
 //! FLAC or a big-endian AIFF would be converted even with `ReplayGain` off.
 //! With `ReplayGain` off, or at a gain of 1, buffers pass untouched.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_audio as gst_audio;
 
-use super::replay_gain::{gain_for, AppliedGain, GainTags, ReplayGainSettings};
+use super::replay_gain::{gain_for, AppliedGain, GainTags, ReplayGainSettings, TrackPick};
 
 /// What the stage applies, for the engine to report.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -40,6 +48,13 @@ struct StageState {
     settings: ReplayGainSettings,
     /// The gain tags the current stream has sent.
     tags: GainTags,
+    /// How the track of the current stream came to play.
+    pick: TrackPick,
+    /// How the tracks the pipeline was given and whose streams have not
+    /// reached the stage came to play, in the order they play.
+    pending_picks: VecDeque<TrackPick>,
+    /// The next stream is the first of a new run.
+    run_starting: bool,
     output: StageOutput,
     /// The format of the current stream's samples, from its caps.
     format: Option<gst_audio::AudioFormatInfo>,
@@ -61,6 +76,9 @@ impl GainStage {
             state: Mutex::new(StageState {
                 settings: ReplayGainSettings::default(),
                 tags: GainTags::default(),
+                pick: TrackPick::default(),
+                pending_picks: VecDeque::new(),
+                run_starting: false,
                 output: StageOutput {
                     group: None,
                     playing: false,
@@ -76,6 +94,26 @@ impl GainStage {
     /// tags.
     pub(super) fn set_settings(&self, settings: ReplayGainSettings) {
         self.update(|state| state.settings = settings.clamped());
+    }
+
+    /// A new pipeline run starts with a track that came to play by `pick`.
+    /// The tracks given to the previous run, whose streams will not reach
+    /// the stage, are forgotten. Call it before the run starts.
+    pub(super) fn start_run(&self, pick: TrackPick) {
+        if let Ok(mut state) = self.state.lock() {
+            state.pending_picks.clear();
+            state.pending_picks.push_back(pick);
+            state.run_starting = true;
+        }
+    }
+
+    /// The pipeline is given a successor that came to play by `pick`, after
+    /// the tracks it was given before. Call it before the pipeline can
+    /// start the successor's stream.
+    pub(super) fn hand_over(&self, pick: TrackPick) {
+        if let Ok(mut state) = self.state.lock() {
+            state.pending_picks.push_back(pick);
+        }
     }
 
     /// What the stage applies now.
@@ -96,7 +134,7 @@ impl GainStage {
             return;
         };
         change(&mut state);
-        state.output.applied = gain_for(&state.settings, &state.tags);
+        state.output.applied = gain_for(&state.settings, &state.tags, state.pick);
         state.scale = state
             .output
             .applied
@@ -106,6 +144,15 @@ impl GainStage {
 
     fn stream_started(&self, group: Option<gst::GroupId>) {
         self.update(|state| {
+            // A file's chained streams share its group, and a seek starts no
+            // new stream: only the next track's stream takes its pick. A new
+            // run can give its first stream the group of the previous run's.
+            let new_run = std::mem::take(&mut state.run_starting);
+            if new_run || group.is_none() || group != state.output.group {
+                if let Some(pick) = state.pending_picks.pop_front() {
+                    state.pick = pick;
+                }
+            }
             state.tags = GainTags::default();
             state.output.group = group;
             state.output.playing = false;
@@ -286,11 +333,168 @@ pub(super) fn scale_samples(data: &mut [u8], format: gst_audio::AudioFormatInfo,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::playback::replay_gain::{db_to_linear, GainChoice, GainSource, ReplayGainMode};
     use gst_audio::AudioFormat;
 
     fn info(format: AudioFormat) -> gst_audio::AudioFormatInfo {
         gst::init().unwrap();
         gst_audio::AudioFormatInfo::from_format(format)
+    }
+
+    fn auto_stage() -> Arc<GainStage> {
+        gst::init().unwrap();
+        let stage = GainStage::new();
+        stage.set_settings(ReplayGainSettings {
+            mode: ReplayGainMode::Auto,
+            ..ReplayGainSettings::default()
+        });
+        stage
+    }
+
+    fn album_and_track_tags() -> GainTags {
+        GainTags {
+            track_gain: Some(-6.0),
+            album_gain: Some(-12.0),
+            ..GainTags::default()
+        }
+    }
+
+    /// The gain Auto chose for the current stream.
+    fn chosen(stage: &GainStage) -> Option<GainChoice> {
+        stage.output().applied.and_then(|applied| applied.auto)
+    }
+
+    /// Start a stream of `group` and send it the gain tags.
+    fn start_stream(stage: &GainStage, group: gst::GroupId) {
+        stage.stream_started(Some(group));
+        stage.tags_arrived(album_and_track_tags());
+    }
+
+    #[test]
+    fn a_handed_over_pick_waits_for_the_next_stream_to_start() {
+        let stage = auto_stage();
+        stage.start_run(TrackPick::Other);
+        let first = gst::GroupId::next();
+        start_stream(&stage, first);
+        assert_eq!(chosen(&stage), Some(GainChoice::Album));
+        let applied = stage.output().applied.unwrap();
+        assert_eq!(applied.source, GainSource::Album);
+
+        // The successor's pick changes nothing while the stream plays, nor
+        // when a seek or a chained stream of the file starts it again.
+        stage.hand_over(TrackPick::Shuffle);
+        stage.tags_arrived(album_and_track_tags());
+        assert_eq!(chosen(&stage), Some(GainChoice::Album));
+        start_stream(&stage, first);
+        assert_eq!(chosen(&stage), Some(GainChoice::Album));
+
+        // It applies from the successor's own stream.
+        start_stream(&stage, gst::GroupId::next());
+        assert_eq!(chosen(&stage), Some(GainChoice::Track));
+        assert_eq!(stage.output().applied.unwrap().source, GainSource::Track);
+
+        // Repeat-One hands the same pick over for each pass.
+        stage.hand_over(TrackPick::Shuffle);
+        start_stream(&stage, gst::GroupId::next());
+        assert_eq!(chosen(&stage), Some(GainChoice::Track));
+        // A stream that the engine handed nothing over for keeps the pick.
+        start_stream(&stage, gst::GroupId::next());
+        assert_eq!(chosen(&stage), Some(GainChoice::Track));
+    }
+
+    #[test]
+    fn short_successors_take_their_picks_in_the_order_they_play() {
+        let stage = auto_stage();
+        // A short track hands over its successors before its own stream
+        // reaches the stage.
+        stage.start_run(TrackPick::Shuffle);
+        stage.hand_over(TrackPick::Other);
+        stage.hand_over(TrackPick::Shuffle);
+        let mut choices = Vec::new();
+        for _ in 0..3 {
+            start_stream(&stage, gst::GroupId::next());
+            choices.push(chosen(&stage));
+        }
+        assert_eq!(
+            choices,
+            [
+                Some(GainChoice::Track),
+                Some(GainChoice::Album),
+                Some(GainChoice::Track)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_new_run_forgets_the_successors_of_the_previous_one() {
+        let stage = auto_stage();
+        stage.start_run(TrackPick::Other);
+        start_stream(&stage, gst::GroupId::next());
+        // A shuffle pick is handed over, and its stream may even start at
+        // the output, before a change drops it and the engine restarts the
+        // current track.
+        stage.hand_over(TrackPick::Shuffle);
+        stage.hand_over(TrackPick::Shuffle);
+        start_stream(&stage, gst::GroupId::next());
+        assert_eq!(chosen(&stage), Some(GainChoice::Track));
+        stage.start_run(TrackPick::Other);
+        start_stream(&stage, gst::GroupId::next());
+        assert_eq!(chosen(&stage), Some(GainChoice::Album));
+        start_stream(&stage, gst::GroupId::next());
+        assert_eq!(
+            chosen(&stage),
+            Some(GainChoice::Album),
+            "no stale pick is left over"
+        );
+    }
+
+    #[test]
+    fn a_new_run_takes_its_pick_also_in_the_group_of_the_previous_run() {
+        // playbin3 can give the first stream of a run started after a stop
+        // the group of the previous run's stream.
+        let stage = auto_stage();
+        stage.start_run(TrackPick::Other);
+        let group = gst::GroupId::next();
+        start_stream(&stage, group);
+        assert_eq!(chosen(&stage), Some(GainChoice::Album));
+        stage.start_run(TrackPick::Shuffle);
+        start_stream(&stage, group);
+        assert_eq!(chosen(&stage), Some(GainChoice::Track));
+        // Within the run, the group again is the same stream.
+        stage.hand_over(TrackPick::Other);
+        start_stream(&stage, group);
+        assert_eq!(chosen(&stage), Some(GainChoice::Track));
+    }
+
+    #[test]
+    fn a_mode_change_applies_to_how_the_current_track_came_to_play_at_once() {
+        gst::init().unwrap();
+        let stage = GainStage::new();
+        stage.set_settings(ReplayGainSettings {
+            mode: ReplayGainMode::Track,
+            ..ReplayGainSettings::default()
+        });
+        stage.start_run(TrackPick::Other);
+        start_stream(&stage, gst::GroupId::next());
+        let applied = stage.output().applied.unwrap();
+        assert_eq!((applied.source, applied.auto), (GainSource::Track, None));
+
+        stage.set_settings(ReplayGainSettings {
+            mode: ReplayGainMode::Auto,
+            ..ReplayGainSettings::default()
+        });
+        let applied = stage.output().applied.unwrap();
+        assert_eq!(
+            (applied.source, applied.auto),
+            (GainSource::Album, Some(GainChoice::Album))
+        );
+        assert!((applied.applied_db + 12.0).abs() < 1e-9);
+        // The next buffer is scaled by it.
+        let scale = stage.state.lock().unwrap().scale;
+        assert!(
+            scale.is_some_and(|gain| (gain - db_to_linear(-12.0)).abs() < 1e-12),
+            "{scale:?}"
+        );
     }
 
     #[test]

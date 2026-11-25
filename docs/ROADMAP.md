@@ -4,7 +4,6 @@ These are open ideas, not a release schedule. Implemented features are described
 
 ## Playback
 
-- Add an Auto ReplayGain mode, with album gain while an album plays in order and track gain otherwise ([#805](https://github.com/Tiaxi/ferrous/issues/805)).
 - Level raw AC-3 and DTS files with the ReplayGain tags in their APEv2 tags ([#806](https://github.com/Tiaxi/ferrous/issues/806)).
 - Add output device selection with persistence.
 - Add optional crossfade and buffer tuning controls.
