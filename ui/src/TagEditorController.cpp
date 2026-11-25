@@ -43,8 +43,8 @@ QString fileLine(const QString &name, const QString &error) {
 // A failed save's or rename's cause in plain words, from the code the
 // backend sends beside the error (FailureCause in src/edit_failure.rs);
 // empty without a code or for one not known here. The error's own words are
-// never read for it. A batch's rename gives every file the error of the one
-// that failed (#741), so its causes name no file or folder.
+// never read for it. A batch's rename stops at the file that failed, which
+// gets the system's cause, and the others say what became of them (#741).
 QString failureCauseText(const QString &code) {
     if (code == QLatin1String("folderNotWritable")) {
         return i18nc("@info why a file could not be saved", "You don’t have permission to write in this folder.");
@@ -65,16 +65,28 @@ QString failureCauseText(const QString &code) {
         return i18nc("@info why a file could not be saved", "There isn’t enough free space on the disk.");
     }
     if (code == QLatin1String("renameNotPermitted")) {
-        return i18nc("@info why a batch of files could not be renamed; names no file or folder",
+        return i18nc("@info why the file a batch rename stopped at could not be renamed",
                      "Renaming stopped: you don’t have permission.");
     }
     if (code == QLatin1String("renameReadOnlyFileSystem")) {
-        return i18nc("@info why a batch of files could not be renamed; names no file or folder",
+        return i18nc("@info why the file a batch rename stopped at could not be renamed",
                      "Renaming stopped: a file system is read-only.");
     }
     if (code == QLatin1String("renameNoSpace")) {
-        return i18nc("@info why a batch of files could not be renamed; names no file or folder",
+        return i18nc("@info why the file a batch rename stopped at could not be renamed",
                      "Renaming stopped: there isn’t enough free space.");
+    }
+    if (code == QLatin1String("renameStoppedElsewhere")) {
+        return i18nc("@info why a file was not renamed with the others",
+                     "Not renamed: renaming stopped at another file.");
+    }
+    if (code == QLatin1String("renameUndone")) {
+        return i18nc("@info why a renamed file has its original name again",
+                     "Renamed back: renaming stopped at another file.");
+    }
+    if (code == QLatin1String("renameNotUndone")) {
+        return i18nc("@info why a file has a name it was not given",
+                     "Renaming stopped at another file, and this file couldn’t be renamed back.");
     }
     return {};
 }

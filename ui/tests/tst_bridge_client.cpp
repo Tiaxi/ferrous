@@ -1480,6 +1480,10 @@ void BridgeClientTest::tagEditorPutsACauseCodeInWords_data() {
     row("renameNotPermitted", QStringLiteral("Renaming stopped: you don’t have permission."));
     row("renameReadOnlyFileSystem", QStringLiteral("Renaming stopped: a file system is read-only."));
     row("renameNoSpace", QStringLiteral("Renaming stopped: there isn’t enough free space."));
+    row("renameStoppedElsewhere", QStringLiteral("Not renamed: renaming stopped at another file."));
+    row("renameUndone", QStringLiteral("Renamed back: renaming stopped at another file."));
+    row("renameNotUndone",
+        QStringLiteral("Renaming stopped at another file, and this file couldn’t be renamed back."));
     row("aCodeOfALaterBackend", QString());
     QTest::newRow("no code") << QString() << QString();
 }
@@ -1535,23 +1539,30 @@ void BridgeClientTest::tagEditorPutsACauseCodeInWords() {
 }
 
 // The backend's codes as they reach the editor: real saves and renames of
-// files whose permissions, or the folder's, refuse them.
+// files whose permissions, or the folder's, refuse them. A rename stops at
+// the first file, and the second is left as it was (#741).
 void BridgeClientTest::tagEditorShowsTheCauseOfARealFailure_data() {
     QTest::addColumn<int>("fileMode");
     QTest::addColumn<int>("folderMode");
     QTest::addColumn<bool>("rename");
     QTest::addColumn<QString>("cause");
+    QTest::addColumn<QString>("secondCause");
     const int file = int(QFile::ReadOwner | QFile::WriteOwner);
     const int folder = int(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
     const int readOnlyFolder = int(QFile::ReadOwner | QFile::ExeOwner);
-    QTest::newRow("read-only file") << int(QFile::ReadOwner) << folder << false
-                                    << QStringLiteral("You don’t have permission to change this file.");
-    QTest::newRow("read-only folder") << file << readOnlyFolder << false
-                                      << QStringLiteral("You don’t have permission to write in this folder.");
-    QTest::newRow("unreadable file") << int(QFile::WriteOwner) << folder << false
-                                     << QStringLiteral("You don’t have permission to read this file.");
-    QTest::newRow("rename in a read-only folder") << file << readOnlyFolder << true
-                                                  << QStringLiteral("Renaming stopped: you don’t have permission.");
+    const auto row = [](const char *name, int fileMode, int folderMode, bool rename, const QString &cause,
+                        const QString &secondCause) {
+        QTest::newRow(name) << fileMode << folderMode << rename << cause << secondCause;
+    };
+    const QString notWritable = QStringLiteral("You don’t have permission to change this file.");
+    row("read-only file", int(QFile::ReadOwner), folder, false, notWritable, notWritable);
+    const QString folderNotWritable = QStringLiteral("You don’t have permission to write in this folder.");
+    row("read-only folder", file, readOnlyFolder, false, folderNotWritable, folderNotWritable);
+    const QString notReadable = QStringLiteral("You don’t have permission to read this file.");
+    row("unreadable file", int(QFile::WriteOwner), folder, false, notReadable, notReadable);
+    row("rename in a read-only folder", file, readOnlyFolder, true,
+        QStringLiteral("Renaming stopped: you don’t have permission."),
+        QStringLiteral("Not renamed: renaming stopped at another file."));
 }
 
 void BridgeClientTest::tagEditorShowsTheCauseOfARealFailure() {
@@ -1559,6 +1570,7 @@ void BridgeClientTest::tagEditorShowsTheCauseOfARealFailure() {
     QFETCH(int, folderMode);
     QFETCH(bool, rename);
     QFETCH(QString, cause);
+    QFETCH(QString, secondCause);
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString folder = dir.filePath(QStringLiteral("album"));
@@ -1608,10 +1620,15 @@ void BridgeClientTest::tagEditorShowsTheCauseOfARealFailure() {
     const QVariantList items =
         editor.statusDetailSections().value(0).toMap().value(QStringLiteral("items")).toList();
     QCOMPARE(items.size(), 2);
+    QHash<QString, QString> causes;
     for (const QVariant &item : items) {
-        QCOMPARE(item.toMap().value(QStringLiteral("cause")).toString(), cause);
-        QVERIFY(!item.toMap().value(QStringLiteral("error")).toString().isEmpty());
+        const QVariantMap values = item.toMap();
+        causes.insert(values.value(QStringLiteral("name")).toString(),
+                      values.value(QStringLiteral("cause")).toString());
+        QVERIFY(!values.value(QStringLiteral("error")).toString().isEmpty());
     }
+    QCOMPARE(causes.value(QStringLiteral("a.flac")), cause);
+    QCOMPARE(causes.value(QStringLiteral("b.flac")), secondCause);
 }
 
 void BridgeClientTest::tagEditorKeepsExtraValuesUntilTheirFieldIsSaved() {

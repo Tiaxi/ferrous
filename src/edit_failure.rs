@@ -28,15 +28,12 @@ pub(crate) enum EditStep {
     Write,
     /// Renaming the finished copy over the file.
     Replace,
-    /// Renaming a file of a batch, which fails as a whole with one error.
+    /// Renaming a file of a batch, which stops at the first file that fails.
     Rename,
 }
 
 /// A cause as the tag editor's results send it, for the UI to put in words.
 /// Keep it in step with `failureCauseText` in `ui/src/TagEditorController.cpp`.
-///
-/// A batch rename gives its one error to all its files (#741), so the causes
-/// of a rename name no file or folder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum FailureCause {
@@ -49,6 +46,14 @@ pub(crate) enum FailureCause {
     RenameNotPermitted,
     RenameReadOnlyFileSystem,
     RenameNoSpace,
+    /// The file was not renamed, as renaming stopped at another file.
+    RenameStoppedElsewhere,
+    /// The file was renamed and then given its name back, as renaming
+    /// stopped at another file.
+    RenameUndone,
+    /// The file was renamed, and could not be given its name back when
+    /// renaming stopped at another file.
+    RenameNotUndone,
 }
 
 /// A failed save or rename: its message and, where the system refused a
@@ -247,6 +252,9 @@ mod tests {
             (Cause::RenameNotPermitted, "renameNotPermitted"),
             (Cause::RenameReadOnlyFileSystem, "renameReadOnlyFileSystem"),
             (Cause::RenameNoSpace, "renameNoSpace"),
+            (Cause::RenameStoppedElsewhere, "renameStoppedElsewhere"),
+            (Cause::RenameUndone, "renameUndone"),
+            (Cause::RenameNotUndone, "renameNotUndone"),
         ] {
             assert_eq!(serde_json::to_value(cause).expect("serialize"), code);
         }
