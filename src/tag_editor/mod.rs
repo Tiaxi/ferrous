@@ -1225,7 +1225,8 @@ fn failed_rename_results(
                 }
                 _ => (
                     match file {
-                        FileAfterFailedRename::Unchanged | FileAfterFailedRename::Restored => {
+                        FileAfterFailedRename::Unchanged => error.clone(),
+                        FileAfterFailedRename::Restored => {
                             format!("{error}; the file keeps its original name")
                         }
                         FileAfterFailedRename::Stranded(location) => format!(

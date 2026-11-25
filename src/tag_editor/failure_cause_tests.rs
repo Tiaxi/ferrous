@@ -305,7 +305,7 @@ fn a_failed_rename_blames_its_file_and_tells_what_became_of_the_others() {
         ),
         (
             format!(
-                "failed to rename {stopped_at} to {}: {}; the file keeps its original name",
+                "failed to rename {stopped_at} to {}: {}",
                 folder.join("02 - Two.flac").display(),
                 denied()
             ),
