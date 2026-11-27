@@ -67,6 +67,7 @@ pub(super) fn handle_bridge_command(
         // The runtime answers, resolves, or hands these to its workers
         // before commands get here.
         BridgeCommand::SaveState(_)
+        | BridgeCommand::QueueSearch { .. }
         | BridgeCommand::QueueAt { .. }
         | BridgeCommand::SelectQueueAt { .. }
         | BridgeCommand::Library(BridgeLibraryCommand::RefreshEditedPaths(_)) => false,

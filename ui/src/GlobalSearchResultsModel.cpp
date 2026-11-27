@@ -465,7 +465,7 @@ void GlobalSearchResultsModel::rebuildSearchRows() {
     emit searchRowsChanged();
 }
 
-QVector<bool> GlobalSearchResultsModel::matchedCharacters(const QString &text, const QString &query) const {
+QVector<bool> GlobalSearchResultsModel::matchedCharacters(const QString &text, const QString &query) {
     // Folds as the Rust search does (crate::collation::fold): base letters,
     // with the letters that have no decomposition spelled out.
     const auto fold = [](const QString &value) {
@@ -547,6 +547,10 @@ QString GlobalSearchResultsModel::highlightText(const QString &text, const QStri
 }
 
 QVariantList GlobalSearchResultsModel::highlightSegments(const QString &text, const QString &query) const {
+    return segmentsOf(text, query);
+}
+
+QVariantList GlobalSearchResultsModel::segmentsOf(const QString &text, const QString &query) {
     const auto matched = matchedCharacters(text, query);
     QVariantList segments;
     qsizetype start = 0;

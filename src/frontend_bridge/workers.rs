@@ -18,20 +18,34 @@ use crate::library::{
 use crate::worker_thread::spawn_worker;
 
 use super::config::config_base_path;
+use super::queue_search::{QueueSearchFrame, QueueSearchJob};
 use super::search::{run_search_worker, SearchWorkerQuery};
 use super::{ApplyAlbumArtEvent, ApplyAlbumArtRequest, BridgeSearchResultsFrame, BridgeSettings};
 
-/// Start the search worker, and return its query and result channels.
-pub(super) fn spawn_search_worker() -> (
-    Sender<SearchWorkerQuery>,
-    Receiver<BridgeSearchResultsFrame>,
-) {
+/// The search worker's channels: global search's queries and results, and
+/// Find in Queue's.
+pub(super) struct SearchWorkerChannels {
+    pub(super) query_tx: Sender<SearchWorkerQuery>,
+    pub(super) results_rx: Receiver<BridgeSearchResultsFrame>,
+    pub(super) queue_tx: Sender<QueueSearchJob>,
+    pub(super) queue_results_rx: Receiver<QueueSearchFrame>,
+}
+
+/// Start the search worker, and return its channels.
+pub(super) fn spawn_search_worker() -> SearchWorkerChannels {
     let (query_tx, query_rx) = unbounded();
     let (results_tx, results_rx) = unbounded();
+    let (queue_tx, queue_rx) = unbounded();
+    let (queue_results_tx, queue_results_rx) = unbounded();
     spawn_worker("ferrous-bridge-search", move || {
-        run_search_worker(&query_rx, &results_tx);
+        run_search_worker(&query_rx, &results_tx, &queue_rx, &queue_results_tx);
     });
-    (query_tx, results_rx)
+    SearchWorkerChannels {
+        query_tx,
+        results_rx,
+        queue_tx,
+        queue_results_rx,
+    }
 }
 
 /// Start the album art worker, and return its request and result channels.

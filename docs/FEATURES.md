@@ -8,6 +8,7 @@ What each part of Ferrous does, in more detail than the [README](../README.md). 
 - The queue comes back on the next launch, with the current track where you left it.
 - Clearing the queue, removing, moving or replacing tracks can be undone and redone until the queue changes another way ([details](SHORTCUTS.md#library-and-queue)).
 - **Play Next** marks queue tracks to play after the current one, in the order you mark them, without moving them and without turning shuffle off ([details](#play-next)).
+- **Find in Queue** finds tracks in the queue alone, then plays one without replacing the queue or marks it to play next ([details](#find-in-queue)).
 - Open files, add folders, import M3U and M3U8 playlists, and drag tracks to reorder them.
 
 ## Play Next
@@ -19,6 +20,15 @@ Play Next marks tracks in the queue to play next without moving them. With the w
 - **After the marked tracks.** With shuffle on, shuffle carries on, and the marked tracks count as played for its round. With shuffle off, the queue goes on from the last marked track that played. Previous goes back through the tracks that played, the marked ones too.
 - **What stays.** Marks follow their rows when tracks move or are removed, and a file in the queue twice is marked only in the row you chose. Stop, and playing another track yourself, keep them. Marking isn't a change you undo, but undoing a removal or a replacement brings back the marks the tracks had. The marks come back with the queue on the next launch.
 - **ReplayGain.** A marked track isn't a shuffle pick: [Auto](#replaygain) plays it at its album gain, also with shuffle on.
+
+## Find in Queue
+
+Find in Queue finds a track in the queue without scrolling through it, as Winamp's Jump to File did. With the whole library in the queue and shuffle on, it plays the track you find and shuffle carries on; global search would replace the queue instead.
+
+- **Opening.** Press Ctrl+J, J while the queue has the focus, or choose **Edit › Find in Queue…**. It opens as global search's palette does, under the transport over a dimmed window, with its own title and placeholder.
+- **Finding.** Type part of a title, artist, album, album artist, tag or file name. The query works as in [global search](SEARCH.md#find-in-queue), filters and quoted phrases too. The results are the queue's rows in the queue's order, each with its place in the queue. A file in the queue twice is found in both of its rows. The playing track's row shows the play glyph over its cover, and a row marked to play next shows its place among the marked rows, as in the queue.
+- **Acting.** Enter, or a double-click, plays the row and closes the palette. The queue stays as it is, and so does shuffle: with shuffle on, the track counts as played for shuffle's round, which goes on after it, and Previous goes back to the track that played before. With shuffle off, the queue goes on from the track's row. Ctrl+Enter marks the row to [play next](#play-next), or unmarks it, and leaves the palette open for more. Alt+Enter selects the row in the queue, scrolls to it, gives the queue the keyboard and closes the palette; from there, every queue action works on that row. Esc closes the palette. Until you act, the queue's selection and scroll position stay as they were.
+- **A queue that changes.** If the queue changes while the palette is open, such as when files are added from another program, the results follow their rows: a row that moved keeps its result, at its new place, and a removed row leaves the results. The query is then searched again for the queue as it is. A key pressed while a search runs acts on its results once they arrive, as in global search.
 
 ## ReplayGain
 

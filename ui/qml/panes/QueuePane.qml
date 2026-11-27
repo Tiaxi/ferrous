@@ -891,9 +891,11 @@ Rectangle {
                 // The row being dragged, which Escape stops.
                 property var draggingRow: null
 
-                // Q marks rows to play next, before a shortcut stored for it.
+                // Q marks rows to play next, and J opens Find in Queue,
+                // before a shortcut stored for either.
                 Keys.onShortcutOverride: function(event) {
                     event.accepted = root.controller.isPlayNextKey(event)
+                        || root.controller.isFindInQueueKey(event)
                 }
                 Keys.onPressed: function(event) {
                     if (event.key === Qt.Key_Escape && playlistView.draggingRow) {

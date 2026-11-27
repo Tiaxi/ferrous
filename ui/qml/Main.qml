@@ -152,6 +152,7 @@ ApplicationWindow {
         tagEditorApi: root.tagEditorApi
         openTagEditorDialog: function() { tagEditorDialog.open() }
         playAt: function(index) { playbackController.playAt(index) }
+        openFindInQueue: function() { findInQueueAction.trigger() }
     }
 
     Controllers.PlaybackController {
@@ -470,6 +471,12 @@ ApplicationWindow {
         function setShowReplayGainInStatusBar(value) { showReplayGainInStatusBar = value }
         function playAt(index) {}
         function selectQueueIndex(index) { selectedQueueIndex = index }
+        // Find in Queue: the results model tests set, and the queries.
+        property var queueSearchModel: null
+        property bool queueSearchBusy: false
+        property var queueSearchQueries: []
+        function setQueueSearchQuery(query) { queueSearchQueries = queueSearchQueries.concat([query]) }
+        function jumpToQueueRow(index) { queueCommands = queueCommands.concat(["jump to " + index]) }
         // The queue edits asked for, for tests.
         property var queueCommands: []
         function removeAt(index) { queueCommands = queueCommands.concat(["remove " + index]) }
@@ -727,7 +734,12 @@ ApplicationWindow {
     // Selects the queue's row of `path` and brings it into view, with the
     // keyboard on the queue.
     function showQueuePath(path) {
-        const index = root.uiBridge.queueIndexOfPath ? root.uiBridge.queueIndexOfPath(path) : -1
+        return root.showQueueRow(root.uiBridge.queueIndexOfPath ? root.uiBridge.queueIndexOfPath(path) : -1)
+    }
+
+    // Selects queue row `index` and brings it into view, with the keyboard
+    // on the queue.
+    function showQueueRow(index) {
         if (index < 0) {
             return false
         }
@@ -948,6 +960,19 @@ ApplicationWindow {
         standardKey: StandardKey.Find
         enabled: !root.viewerOpen
         onTriggered: globalSearchController.openDialog()
+    }
+    // Opens Find in Queue, which finds tracks in the queue alone and plays
+    // them without replacing it. Ctrl+J, as Winamp's Jump to File was J.
+    Components.ShortcutAction {
+        id: findInQueueAction
+        objectName: "findInQueueAction"
+        shortcutId: "find_in_queue"
+        overrides: root.keyboardShortcutOverrides
+        text: I18n.i18nc("@action:inmenu", "Find in &Queue…")
+        icon.name: "go-jump"
+        defaultKeyBindings: ["Ctrl+J"]
+        enabled: uiBridge.queueLength > 0 && !root.viewerOpen
+        onTriggered: queueSearchDialog.openPalette()
     }
     // The one menu item that clears the queue; Undo brings it back.
     Components.ShortcutAction {
@@ -1389,7 +1414,8 @@ ApplicationWindow {
             name: "edit",
             title: I18n.i18nc("@title:group keyboard shortcuts of the Edit menu", "Edit"),
             actions: [
-                undoQueueChangeAction, redoQueueChangeAction, globalSearchAction, clearQueueAction,
+                undoQueueChangeAction, redoQueueChangeAction, globalSearchAction, findInQueueAction,
+                clearQueueAction,
                 clearPlayNextAction, moveTrackUpAction, moveTrackDownAction, selectPreviousTrackAction, selectNextTrackAction
             ]
         },
@@ -1476,6 +1502,7 @@ ApplicationWindow {
             Components.AppMenuItem { action: redoQueueChangeAction }
             MenuSeparator {}
             Components.AppMenuItem { action: globalSearchAction }
+            Components.AppMenuItem { action: findInQueueAction }
             MenuSeparator {}
             Components.AppMenuItem { action: clearQueueAction }
             Components.AppMenuItem { action: clearPlayNextAction }
@@ -1631,6 +1658,22 @@ ApplicationWindow {
         uiPalette: root.uiPalette
         windowRoot: root
         anchorItem: transportBar
+        snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
+        snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity
+    }
+
+    Dialogs.QueueSearchDialog {
+        id: queueSearchDialog
+        uiBridge: root.uiBridge
+        uiPalette: root.uiPalette
+        windowRoot: root
+        anchorItem: transportBar
+        showQueueRow: root.showQueueRow
+        focusQueue: function() {
+            if (queueController.view) {
+                queueController.view.forceActiveFocus(Qt.OtherFocusReason)
+            }
+        }
         snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
         snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity
     }
