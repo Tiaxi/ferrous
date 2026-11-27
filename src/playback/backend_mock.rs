@@ -248,27 +248,13 @@ impl MockPlaybackRuntime {
             }
             PlaybackCommand::Next => self.advance_manually(true),
             PlaybackCommand::Previous => self.advance_manually(false),
-            PlaybackCommand::Play => {
-                self.snapshot.state = PlaybackState::Playing;
-                self.snapshot.current_queue_index = if self.snapshot.current.is_some() {
-                    self.queue.current_index()
-                } else {
-                    None
-                };
-            }
+            PlaybackCommand::Play => self.play(),
             PlaybackCommand::Pause => {
                 if self.snapshot.state == PlaybackState::Playing {
                     self.snapshot.state = PlaybackState::Paused;
                 }
             }
-            PlaybackCommand::Stop => {
-                let _ = self.queue.cancel_pending();
-                self.about_to_finish_fired = false;
-                self.reset_mute();
-                self.snapshot.state = PlaybackState::Stopped;
-                self.snapshot.position = Duration::ZERO;
-                self.snapshot.current_queue_index = None;
-            }
+            PlaybackCommand::Stop => self.stop(),
             PlaybackCommand::Seek(pos) => self.seek(pos),
             PlaybackCommand::Cue { position, expected } => self.cue(position, expected),
             PlaybackCommand::SetVolume(vol) => {
@@ -290,6 +276,22 @@ impl MockPlaybackRuntime {
             PlaybackCommand::SoloChannel(ch) => self.solo_channel(ch),
             PlaybackCommand::Poll => self.poll(),
         }
+    }
+    fn play(&mut self) {
+        self.snapshot.state = PlaybackState::Playing;
+        self.snapshot.current_queue_index = if self.snapshot.current.is_some() {
+            self.queue.current_index()
+        } else {
+            None
+        };
+    }
+    fn stop(&mut self) {
+        let _ = self.queue.cancel_pending();
+        self.about_to_finish_fired = false;
+        self.reset_mute();
+        self.snapshot.state = PlaybackState::Stopped;
+        self.snapshot.position = Duration::ZERO;
+        self.snapshot.current_queue_index = None;
     }
     fn seek(&mut self, pos: Duration) {
         self.snapshot.seek_serial += 1;
@@ -363,14 +365,14 @@ impl MockPlaybackRuntime {
             }
         });
         let Some(row) = open_row else {
-            let list = play_next::restored(&self.queue.play_next(), marks, paths.len());
+            let marked = play_next::restored(&self.queue.play_next(), marks, paths.len());
             let _ = self.queue.set_queue(paths);
             self.about_to_finish_fired = false;
             self.snapshot.state = PlaybackState::Stopped;
             if let Some(target) = self.queue.set_current(current) {
                 self.switch_manually(target.path, target.index);
             }
-            let _ = self.queue.set_play_next(list);
+            let _ = self.queue.set_play_next(marked);
             return;
         };
         let cancelled = self.queue.restore(paths, row, marks);
