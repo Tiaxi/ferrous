@@ -1304,7 +1304,6 @@ impl GstPlaybackRuntime {
         };
         self.refresh_play_next();
         self.continue_after_cancelled_advance(cancelled);
-        self.emit_snapshot();
     }
 
     /// See [`PlaybackCommand::RestoreQueue`].
@@ -2920,7 +2919,8 @@ impl GstPlaybackRuntime {
     }
 
     fn apply_command(&mut self, cmd: PlaybackCommand) {
-        if cmd.edits_queue() {
+        let edits_queue = cmd.edits_queue();
+        if edits_queue {
             self.snapshot.queue_commands += 1;
         }
         if matches!(
@@ -2987,6 +2987,12 @@ impl GstPlaybackRuntime {
                 self.emit_snapshot();
             }
             PlaybackCommand::Poll => self.poll(),
+        }
+        // The bridge takes the marks only from a snapshot that counts every
+        // edit it sent, so each edit sends one, also those that change
+        // nothing else the snapshot reports, such as an append.
+        if edits_queue {
+            self.emit_snapshot();
         }
     }
 
@@ -8173,6 +8179,26 @@ mod engine_tests {
         });
         assert_eq!(engine.snapshot.current_queue_index, None);
         assert_eq!(engine.snapshot.current.as_deref(), Some(a.as_path()));
+        // Every edit is answered with a snapshot that counts it, also one
+        // that changes nothing else it reports, so the bridge can take the
+        // marks of a snapshot from after its edits.
+        while engine.events.try_recv().is_ok() {}
+        engine.send(PlaybackCommand::AddToQueue(vec![
+            fixtures.wav("d.wav", 1_000)
+        ]));
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let event = engine
+                .events
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("the append was not answered");
+            if let PlaybackEvent::Snapshot(snapshot) = &event {
+                if snapshot.queue_commands == 4 {
+                    break;
+                }
+            }
+            engine.record(event);
+        }
         let changes = engine.changes.len();
         engine.send(PlaybackCommand::Play);
         engine.wait_for_playing(0, millis(4_000));

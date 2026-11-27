@@ -599,6 +599,19 @@ void AccessibilityTest::checkLibraryAndQueueRowsHaveAccessibleNames(MainWindowFi
                  QStringLiteral("1., Role Title, Role Artist, Role Album, 2:00, plays next, number 1"));
     QVERIFY(place->isVisible());
     QCOMPARE(place->property("text").toString(), QStringLiteral("1"));
+    // The playing row, marked to play again, shows its place after its
+    // state glyph.
+    bridge->setProperty("playingQueueIndex", 0);
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    auto *glyph = queueRows[0]->findChild<QQuickItem *>(QStringLiteral("queueRowState"));
+    QVERIFY(glyph != nullptr);
+    QTRY_VERIFY(glyph->isVisible());
+    QVERIFY(place->isVisible());
+    QVERIFY(place->x() >= glyph->x() + glyph->width());
+    QVERIFY(place->x() + place->width() <= place->parentItem()->width());
+    QVERIFY(accessibleText(queueRows[0], QAccessible::Name).endsWith(QStringLiteral("playing, plays next, number 1")));
+    bridge->setProperty("playingQueueIndex", -1);
+    bridge->setProperty("playbackState", QStringLiteral("Stopped"));
     model.setPlayNext({});
     QTRY_COMPARE(accessibleText(queueRows[0], QAccessible::Name),
                  QStringLiteral("1., Role Title, Role Artist, Role Album, 2:00"));

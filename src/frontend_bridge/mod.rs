@@ -2338,6 +2338,7 @@ impl BridgeLoopRuntime {
         event_tx: &Sender<BridgeEvent>,
     ) -> SnapshotUrgency {
         let volume = self.state.settings.volume;
+        self.state.engine_queue_commands_sent = self.playback.queue_commands_sent();
         let urgency = process_playback_event(
             event,
             &self.analysis,
@@ -5897,6 +5898,25 @@ mod tests {
             ["TogglePlayNext([3])", "SetPlayNext([])"]
         );
         assert_eq!(runtime.state.queue_undo.state().offer_id, offer);
+
+        // A stale report that wakes the bridge on its own is refused too.
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::Remove(0)),
+            &event_tx,
+        );
+        assert_eq!(marks_shown(&runtime), [2]);
+        let stale = marks_reported(&[0, 1], runtime.playback.queue_commands_sent() - 1);
+        runtime.handle_wake(BridgeLoopWake::Playback(stale), &event_tx);
+        assert_eq!(marks_shown(&runtime), [2]);
+        // The engine's report once it applied them shows at once, though
+        // its marks are those of the stale one.
+        let current = marks_reported(&[0, 1], runtime.playback.queue_commands_sent());
+        engine_events.send(current).unwrap();
+        assert_eq!(
+            runtime.pump_bridge_events(&event_tx),
+            SnapshotUrgency::Immediate
+        );
+        assert_eq!(marks_shown(&runtime), [0, 1]);
     }
 
     #[test]

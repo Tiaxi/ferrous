@@ -1107,10 +1107,16 @@ Rectangle {
                         height: playlistRow.height
 
                         Kirigami.Icon {
+                            id: rowStateGlyph
                             objectName: "queueRowState"
                             readonly property string glyph: playlistRow.stateGlyph
                             visible: glyph.length > 0
-                            anchors.centerIn: parent
+                            // At the column's start when the row's place
+                            // to play next shows beside it.
+                            x: playlistRow.playNextPlace > 0
+                                ? root.uiPalette.scaledSize(2)
+                                : Math.round((parent.width - width) / 2)
+                            anchors.verticalCenter: parent.verticalCenter
                             // The error mark at the status bar's size, the
                             // transport's marks smaller, and the stop
                             // square smaller again, so that its solid ink
@@ -1137,14 +1143,15 @@ Rectangle {
                         }
 
                         // The row's place among the rows marked to play
-                        // next, in the accent read as text, where the row
-                        // has no state glyph: the playing row, marked to
-                        // play again, keeps its glyph.
+                        // next, in the accent read as text: in the column,
+                        // or after the state glyph of a row that has one,
+                        // such as the playing row marked to play again.
                         Text {
                             objectName: "queueRowPlayNext"
-                            visible: playlistRow.playNextPlace > 0 && playlistRow.stateGlyph.length === 0
-                                && playlistRow.amberLeft <= 0
-                            anchors.fill: parent
+                            visible: playlistRow.playNextPlace > 0 && playlistRow.amberLeft <= 0
+                            x: rowStateGlyph.visible ? rowStateGlyph.x + rowStateGlyph.width : 0
+                            width: parent.width - x
+                            height: parent.height
                             horizontalAlignment: Text.AlignHCenter
                             verticalAlignment: Text.AlignVCenter
                             textFormat: Text.PlainText
@@ -1423,7 +1430,10 @@ Rectangle {
                     Components.KeyHintMenuItem {
                         objectName: "queuePlayNextItem"
                         // Unmarks when every row it acts on is marked.
+                        // Again as the marks change while the menu is open,
+                        // such as when a marked row starts.
                         readonly property bool unmarks: playlistContextMenu.opened
+                            && root.uiBridge.playNextCount > 0
                             && root.controller.allPlayNextOf(playlistContextMenu.rowIndex)
                         text: unmarks
                             ? I18n.i18nc("@action:inmenu", "Don’t Play Next")

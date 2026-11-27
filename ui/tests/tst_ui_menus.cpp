@@ -1903,6 +1903,12 @@ void UiMenusTest::queueMenuMarksItsRowsToPlayNextOrUnmarksThem() {
     menu = openOn(0);
     QVERIFY(menu != nullptr);
     QCOMPARE(playNextText(menu), QStringLiteral("Don’t Play Next"));
+    // The marks change while the menu is open, as when a marked row starts.
+    bridge->setProperty("playNextPlaces", QVariantMap{{QStringLiteral("1"), 1}});
+    QTRY_COMPARE(playNextText(menu), QStringLiteral("Play Next"));
+    bridge->setProperty("playNextPlaces",
+                        QVariantMap{{QStringLiteral("1"), 1}, {QStringLiteral("0"), 2}});
+    QTRY_COMPARE(playNextText(menu), QStringLiteral("Don’t Play Next"));
     QVERIFY(trigger(menu));
 
     // The row outside the selection, which is not marked.

@@ -125,8 +125,9 @@ private:
     void countPaths(const QVector<QueueRowData> &rows, qsizetype from, qsizetype count, int step);
     void countPath(const QString &path, int step);
     // Carry the marks to where `map` puts each row, which is -1 for a row
-    // removed.
-    void remapPlayNext(const std::function<int(int)> &map);
+    // removed. Returns the rows, where they are now, whose places changed
+    // as the places closed up over a row removed.
+    QVector<int> remapPlayNext(const std::function<int(int)> &map);
 
     QVector<QueueRowData> m_rows;
     // How many rows hold each path; a path appears once per row.

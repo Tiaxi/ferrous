@@ -4351,10 +4351,23 @@ void BridgeClientTest::playNextMarksNumberTheRowsOfTheirRevision() {
         QCOMPARE(signal[2].value<QList<int>>(), QList<int>{QueueRowsModel::PlayNextRole});
     }
 
+    // Removing the row marked first moves the others up a place, before
+    // the marks for the rows it leaves come: their rows are told.
+    snapshot.playNext = playNextOf(6, {3, 1});
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(playNextPlaces(client), (QVector<int>{0, 2, 0, 1, 0}));
+    dataChanged.clear();
+    snapshot = queueDeltaSnapshot(6, 7, 4, {queueOp(BinaryBridgeCodec::QueueOpRemove, 3, 1)});
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(playNextPlaces(client), (QVector<int>{0, 1, 0, 0}));
+    QCOMPARE(dataChanged.count(), 1);
+    QCOMPARE(dataChanged[0][0].toModelIndex().row(), 1);
+
     // Marks for rows the client does not have show none.
+    snapshot = BinaryBridgeCodec::DecodedSnapshot{};
     snapshot.playNext = playNextOf(9, {2});
     QVERIFY(client.processBinarySnapshot(snapshot));
-    QCOMPARE(playNextPlaces(client), (QVector<int>{0, 0, 0, 0, 0}));
+    QCOMPARE(playNextPlaces(client), (QVector<int>{0, 0, 0, 0}));
     QCOMPARE(client.playNextCount(), 0);
 
     // Q names the rows at the revision shown, in the queue's order; Clear
@@ -4363,8 +4376,8 @@ void BridgeClientTest::playNextMarksNumberTheRowsOfTheirRevision() {
     QVERIFY(sent.isEmpty());
     client.togglePlayNext({3, 1, 1, 99});
     QCOMPARE(sent.size(), 1);
-    QCOMPARE(sent[0], BinaryBridgeCodec::encodeCommandTogglePlayNext(6, {1, 3}));
-    snapshot.playNext = playNextOf(6, {1});
+    QCOMPARE(sent[0], BinaryBridgeCodec::encodeCommandTogglePlayNext(7, {1, 3}));
+    snapshot.playNext = playNextOf(7, {1});
     QVERIFY(client.processBinarySnapshot(snapshot));
     client.clearPlayNext();
     QCOMPARE(sent.size(), 2);

@@ -190,23 +190,26 @@ int QueueRowsModel::playNextCount() const {
     return static_cast<int>(m_playNextPlaces.size());
 }
 
-void QueueRowsModel::remapPlayNext(const std::function<int(int)> &map) {
+QVector<int> QueueRowsModel::remapPlayNext(const std::function<int(int)> &map) {
+    QVector<int> renumbered;
     if (m_playNextPlaces.isEmpty()) {
-        return;
+        return renumbered;
     }
     // The places close up over the rows removed.
-    QVector<int> rows;
-    rows.reserve(m_playNextPlaces.size());
-    for (int row : playNextRows()) {
-        const int moved = map(row);
-        if (moved >= 0) {
-            rows.push_back(moved);
+    const QVector<int> before = playNextRows();
+    m_playNextPlaces.clear();
+    for (int place = 0; place < before.size(); ++place) {
+        const int moved = map(before[place]);
+        if (moved < 0) {
+            continue;
+        }
+        const int now = static_cast<int>(m_playNextPlaces.size()) + 1;
+        m_playNextPlaces.insert(moved, now);
+        if (now != place + 1) {
+            renumbered.push_back(moved);
         }
     }
-    m_playNextPlaces.clear();
-    for (int row : rows) {
-        m_playNextPlaces.insert(row, static_cast<int>(m_playNextPlaces.size()) + 1);
-    }
+    return renumbered;
 }
 
 void QueueRowsModel::setRowReleaser(RowReleaser releaser) {
@@ -307,10 +310,16 @@ bool QueueRowsModel::removeRowsAt(int start, int count) {
     } else {
         m_rows.remove(start, count);
     }
-    remapPlayNext([start, count](int row) {
+    const QVector<int> renumbered = remapPlayNext([start, count](int row) {
         return row < start ? row : (row < start + count ? -1 : row - count);
     });
     endRemoveRows();
+    // Rows marked after a removed marked row move up a place; their rows
+    // did not change, so tell them.
+    for (int row : renumbered) {
+        const QModelIndex at = index(row, 0);
+        emit dataChanged(at, at, {PlayNextRole});
+    }
     release(std::move(removed));
     return true;
 }
