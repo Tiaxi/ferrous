@@ -81,14 +81,18 @@ impl Cursor {
         }
     }
 
-    /// Carry the jumps to marked rows to where `map` puts their rows,
-    /// leaving out those it drops a row of.
+    /// Carry the jumps to marked rows to where `map` puts their rows. A
+    /// jump `map` drops a row of ends the history: Previous reaches the
+    /// jumps before it only through it.
     fn remap_jumps(&mut self, map: impl Fn(usize) -> Option<usize>) {
-        self.jumps = self
-            .jumps
-            .iter()
-            .filter_map(|(from, to)| Some((map(*from)?, map(*to)?)))
-            .collect();
+        let mut kept = Vec::with_capacity(self.jumps.len());
+        for (from, to) in &self.jumps {
+            match (map(*from), map(*to)) {
+                (Some(from), Some(to)) => kept.push((from, to)),
+                _ => kept.clear(),
+            }
+        }
+        self.jumps = kept;
     }
 
     /// Restart navigation after the queue order changed. The jumps to
@@ -583,6 +587,8 @@ impl GaplessQueue {
         marks: &PlayNextRestore,
     ) -> Option<CancelledAdvance> {
         let list = play_next::restored(&self.cursor.play_next, marks, queue.len());
+        // Rows put back keep the rows around them, and the jumps between.
+        let stayed = play_next::reinserted_rows(marks, queue.len());
         self.queue = queue;
         self.cursor.index = current;
         self.cursor.play_next = list.into();
@@ -608,7 +614,10 @@ impl GaplessQueue {
         }
         let len = self.queue.len();
         self.for_each_cursor(|cursor| {
-            cursor.jumps.clear();
+            match &stayed {
+                Some(stayed) => cursor.remap_jumps(|row| stayed.get(row).copied()),
+                None => cursor.jumps.clear(),
+            }
             cursor.reset_navigation(len);
         });
         self.revalidate_pending()
@@ -2053,6 +2062,37 @@ mod tests {
         assert_eq!(
             queue.previous_manual().map(|previous| previous.index),
             Some(2)
+        );
+
+        // An undone removal puts the rows back around the jump.
+        let (mut queue, paths) = queue_of(4);
+        queue.toggle_play_next(&[2]);
+        assert_eq!(queue.next_manual().map(|next| next.index), Some(2));
+        queue.remove_many(&[1, 3]);
+        let undo = PlayNextRestore::Reinserted {
+            rows: vec![1, 3],
+            before: Vec::new(),
+        };
+        assert_eq!(queue.restore(paths, 2, &undo), None);
+        assert_eq!(
+            queue.previous_manual().map(|previous| previous.index),
+            Some(0)
+        );
+
+        // A, then marked D, then marked B, then C and D in order: removing
+        // B ends the history, so Previous from D goes to C, not to A.
+        let (mut queue, _) = queue_of(4);
+        queue.toggle_play_next(&[3]);
+        assert_eq!(queue.next_manual().map(|next| next.index), Some(3));
+        queue.toggle_play_next(&[1]);
+        assert_eq!(queue.next_manual().map(|next| next.index), Some(1));
+        assert_eq!(queue.next_manual().map(|next| next.index), Some(2));
+        assert_eq!(queue.next_manual().map(|next| next.index), Some(3));
+        queue.remove_many(&[1]);
+        assert_eq!(queue.current_index(), Some(2));
+        assert_eq!(
+            queue.previous_manual().map(|previous| previous.index),
+            Some(1)
         );
     }
 

@@ -84,6 +84,22 @@ pub(crate) fn after_reorder(list: &[usize], positions: &[usize]) -> Vec<usize> {
         .collect()
 }
 
+/// For each row of the queue before rows were put back, its row in the
+/// restored queue of `len` rows, which is that queue without `put_back`.
+fn stayed_rows(put_back: &HashSet<usize>, len: usize) -> Vec<usize> {
+    (0..len).filter(|row| !put_back.contains(row)).collect()
+}
+
+/// Where each row of the queue a restore replaces is in the restored queue
+/// of `len` rows, when the restore puts rows back into it.
+pub(crate) fn reinserted_rows(restore: &PlayNextRestore, len: usize) -> Option<Vec<usize>> {
+    let PlayNextRestore::Reinserted { rows, .. } = restore else {
+        return None;
+    };
+    let put_back: HashSet<usize> = rows.iter().copied().filter(|row| *row < len).collect();
+    Some(stayed_rows(&put_back, len))
+}
+
 /// The list of a restored queue of `len` rows, given `list`, the list of
 /// the queue it replaces, and what to bring back.
 pub(crate) fn restored(list: &[usize], restore: &PlayNextRestore, len: usize) -> Vec<usize> {
@@ -92,9 +108,7 @@ pub(crate) fn restored(list: &[usize], restore: &PlayNextRestore, len: usize) ->
         PlayNextRestore::Rows(rows) => sanitized(rows.iter().copied(), len),
         PlayNextRestore::Reinserted { rows, before } => {
             let put_back: HashSet<usize> = rows.iter().copied().filter(|row| *row < len).collect();
-            // The rows that stayed, in order: the queue now is the restored
-            // one without the rows put back.
-            let stayed: Vec<usize> = (0..len).filter(|row| !put_back.contains(row)).collect();
+            let stayed = stayed_rows(&put_back, len);
             let marked: Vec<usize> = list
                 .iter()
                 .filter_map(|row| stayed.get(*row).copied())
