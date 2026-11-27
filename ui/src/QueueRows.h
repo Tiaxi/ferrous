@@ -128,6 +128,9 @@ private:
     // removed. Returns the rows, where they are now, whose places changed
     // as the places closed up over a row removed.
     QVector<int> remapPlayNext(const std::function<int(int)> &map);
+    // Tell `rows` that their PlayNextRole changed, one signal for each run
+    // of rows in a row.
+    void notifyPlayNext(QVector<int> rows);
 
     QVector<QueueRowData> m_rows;
     // How many rows hold each path; a path appears once per row.

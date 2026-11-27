@@ -4363,9 +4363,26 @@ void BridgeClientTest::playNextMarksNumberTheRowsOfTheirRevision() {
     QCOMPARE(dataChanged.count(), 1);
     QCOMPARE(dataChanged[0][0].toModelIndex().row(), 1);
 
+    // Every row marked, and the first one removed: one signal for the run
+    // of rows renumbered.
+    snapshot = BinaryBridgeCodec::DecodedSnapshot{};
+    snapshot.playNext = playNextOf(7, {0, 1, 2, 3});
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(playNextPlaces(client), (QVector<int>{1, 2, 3, 4}));
+    dataChanged.clear();
+    snapshot = queueDeltaSnapshot(7, 8, 3, {queueOp(BinaryBridgeCodec::QueueOpRemove, 0, 1)});
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(playNextPlaces(client), (QVector<int>{1, 2, 3}));
+    QCOMPARE(dataChanged.count(), 1);
+    QCOMPARE(dataChanged[0][0].toModelIndex().row(), 0);
+    QCOMPARE(dataChanged[0][1].toModelIndex().row(), 2);
+    snapshot = queueDeltaSnapshot(8, 9, 4,
+        {queueOp(BinaryBridgeCodec::QueueOpInsert, 3, 0, {queueTrack(QStringLiteral("/music/back.flac"))})});
+    QVERIFY(client.processBinarySnapshot(snapshot));
+
     // Marks for rows the client does not have show none.
     snapshot = BinaryBridgeCodec::DecodedSnapshot{};
-    snapshot.playNext = playNextOf(9, {2});
+    snapshot.playNext = playNextOf(99, {2});
     QVERIFY(client.processBinarySnapshot(snapshot));
     QCOMPARE(playNextPlaces(client), (QVector<int>{0, 0, 0, 0}));
     QCOMPARE(client.playNextCount(), 0);
@@ -4376,8 +4393,8 @@ void BridgeClientTest::playNextMarksNumberTheRowsOfTheirRevision() {
     QVERIFY(sent.isEmpty());
     client.togglePlayNext({3, 1, 1, 99});
     QCOMPARE(sent.size(), 1);
-    QCOMPARE(sent[0], BinaryBridgeCodec::encodeCommandTogglePlayNext(7, {1, 3}));
-    snapshot.playNext = playNextOf(7, {1});
+    QCOMPARE(sent[0], BinaryBridgeCodec::encodeCommandTogglePlayNext(9, {1, 3}));
+    snapshot.playNext = playNextOf(9, {1});
     QVERIFY(client.processBinarySnapshot(snapshot));
     client.clearPlayNext();
     QCOMPARE(sent.size(), 2);

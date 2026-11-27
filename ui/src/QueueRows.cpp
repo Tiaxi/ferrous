@@ -165,12 +165,20 @@ void QueueRowsModel::setPlayNext(const QVector<int> &rows) {
             changed.push_back(it.key());
         }
     }
-    std::sort(changed.begin(), changed.end());
-    for (int row : changed) {
-        if (row < m_rows.size()) {
-            const QModelIndex at = index(row, 0);
-            emit dataChanged(at, at, {PlayNextRole});
+    notifyPlayNext(std::move(changed));
+}
+
+void QueueRowsModel::notifyPlayNext(QVector<int> rows) {
+    std::sort(rows.begin(), rows.end());
+    for (qsizetype first = 0; first < rows.size();) {
+        qsizetype last = first;
+        while (last + 1 < rows.size() && rows[last + 1] == rows[last] + 1) {
+            ++last;
         }
+        if (rows[last] < m_rows.size()) {
+            emit dataChanged(index(rows[first], 0), index(rows[last], 0), {PlayNextRole});
+        }
+        first = last + 1;
     }
 }
 
@@ -316,10 +324,7 @@ bool QueueRowsModel::removeRowsAt(int start, int count) {
     endRemoveRows();
     // Rows marked after a removed marked row move up a place; their rows
     // did not change, so tell them.
-    for (int row : renumbered) {
-        const QModelIndex at = index(row, 0);
-        emit dataChanged(at, at, {PlayNextRole});
-    }
+    notifyPlayNext(renumbered);
     release(std::move(removed));
     return true;
 }
