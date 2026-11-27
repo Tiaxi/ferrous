@@ -24,7 +24,6 @@ QueueSearchResultsModel::QueueSearchResultsModel(QueueRowsModel *queue, QObject 
             &QueueSearchResultsModel::queueDataChanged);
     // A whole new queue: the rows found were of the old one.
     connect(m_queue, &QAbstractItemModel::modelReset, this, &QueueSearchResultsModel::clear);
-    connect(m_queue, &QAbstractItemModel::layoutChanged, this, &QueueSearchResultsModel::clear);
 }
 
 int QueueSearchResultsModel::rowCount(const QModelIndex &parent) const {
@@ -184,33 +183,34 @@ void QueueSearchResultsModel::queueRowsMoved(const QModelIndex &parent, int star
         const int rest = queueRow > end ? queueRow - count : queueRow;
         return rest >= to ? rest + count : rest;
     };
+    // The results of the moved rows are a run of results, which moves as
+    // one, as the rows did: the other results keep their order.
+    const auto first = std::lower_bound(m_rows.cbegin(), m_rows.cend(), start);
+    const auto last = std::upper_bound(first, m_rows.cend(), end);
+    const int runStart = static_cast<int>(first - m_rows.cbegin());
+    const int runCount = static_cast<int>(last - first);
     QVector<int> rows = m_rows;
     for (int &queueRow : rows) {
         queueRow = moved(queueRow);
     }
-    if (std::is_sorted(rows.cbegin(), rows.cend())) {
+    // Where the run goes among the other results, counted without it.
+    int runTo = 0;
+    for (int i = 0; i < rows.size(); ++i) {
+        if ((i < runStart || i >= runStart + runCount) && rows.at(i) < to) {
+            ++runTo;
+        }
+    }
+    if (runCount == 0 || runTo == runStart) {
         m_rows = std::move(rows);
         notifyQueueRows(0);
         return;
     }
-    // The results keep the queue's order, which the move changed.
-    emit layoutAboutToBeChanged();
-    const QModelIndexList before = persistentIndexList();
-    QVector<int> queueRowsBefore;
-    queueRowsBefore.reserve(before.size());
-    for (const QModelIndex &index : before) {
-        queueRowsBefore.push_back(rows.value(index.row(), -1));
-    }
+    // As a model move, so that views and the selection follow each result.
+    beginMoveRows(QModelIndex(), runStart, runStart + runCount - 1, QModelIndex(),
+                  runTo > runStart ? runTo + runCount : runTo);
     std::sort(rows.begin(), rows.end());
     m_rows = std::move(rows);
-    QModelIndexList after;
-    after.reserve(before.size());
-    for (int queueRow : std::as_const(queueRowsBefore)) {
-        const int now = indexOfQueueRow(queueRow);
-        after.push_back(now >= 0 ? index(now, 0) : QModelIndex());
-    }
-    changePersistentIndexList(before, after);
-    emit layoutChanged();
+    endMoveRows();
     notifyQueueRows(0);
 }
 

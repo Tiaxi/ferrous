@@ -329,16 +329,25 @@ Dialog {
             if (root.selectedIndex > last) {
                 root.selectedIndex -= last - first + 1
             } else if (root.selectedIndex >= first) {
+                // The menu of the result removed acts on no other row.
+                resultMenu.dismiss()
                 root.selectedIndex = Math.min(first, root.resultsModel.rowCount() - 1)
             }
         }
-        function onLayoutAboutToBeChanged() {
-            root.keptQueueRow = root.selectedQueueRow()
-        }
-        function onLayoutChanged() {
+        // A run of results moved with their rows: the selection stays on
+        // its result.
+        function onRowsMoved(parent, start, end, destination, row) {
             root.rowsRevision += 1
-            root.selectedIndex = root.keptQueueRow >= 0 ? root.resultsModel.indexOfQueueRow(root.keptQueueRow) : -1
-            root.keptQueueRow = -1
+            const index = root.selectedIndex
+            if (index < 0) return
+            const count = end - start + 1
+            const to = row > start ? row - count : row
+            if (index >= start && index <= end) {
+                root.selectedIndex = to + (index - start)
+            } else {
+                const rest = index > end ? index - count : index
+                root.selectedIndex = rest >= to ? rest + count : rest
+            }
         }
         function onDataChanged() {
             root.rowsRevision += 1

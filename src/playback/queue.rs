@@ -2098,7 +2098,6 @@ mod tests {
             played.push(committed_index(&mut queue).expect("a shuffle pick"));
         }
         played.sort_unstable();
-        played.dedup();
         assert_eq!(played, vec![0, 1, 2, 3, 4, 5]);
 
         // Previous goes back from the jump to the track that was current.

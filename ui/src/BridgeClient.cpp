@@ -3333,6 +3333,9 @@ void BridgeClient::setQueueSearchQuery(const QString &query) {
     }
     m_queueSearchQuery = nextQuery;
     m_queueSearchRefreshTimer.stop();
+    // Results on their way are of the query before: none is taken until
+    // this one is sent and answered.
+    m_queueSearchSeq += 1;
     if (nextQuery.isEmpty()) {
         m_queueSearchDebounceTimer.stop();
         m_queueSearchModel.clear();
@@ -6364,6 +6367,12 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             requestQueueResync();
         }
         if (m_queueRevision != previousRevision) {
+            // A whole queue is new rows, also where they show as before:
+            // the results named the rows it replaced.
+            if (queue.kind == BinaryBridgeCodec::QueueFull && m_queueSearchModel.count() > 0) {
+                m_queueSearchModel.clear();
+                setQueueSearchBusy(!m_queueSearchQuery.isEmpty());
+            }
             refreshQueueSearch();
         }
         if (m_queueLength != previousLength || queue.kind == BinaryBridgeCodec::QueueFull

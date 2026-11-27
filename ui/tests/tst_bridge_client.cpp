@@ -4378,18 +4378,25 @@ void BridgeClientTest::queueSearchTakesOnlyResultsOfItsQueryForTheRowsShown() {
         for (int i = 0; i < model->rowCount(); ++i) out.push_back(model->queueRowAt(i));
         return out;
     };
+    // The seq of query command `command`, which is `query` with it.
+    const auto seqOf = [](const QByteArray &command, const QString &query) {
+        const quint32 seq = qFromLittleEndian<quint32>(command.constData() + 6);
+        return command == BinaryBridgeCodec::encodeCommandQueueSearch(seq, query) ? seq : 0u;
+    };
+    const QString tune = QStringLiteral("some tune");
 
     client.setQueueSearchQuery(QStringLiteral("  some   tune "));
     QVERIFY(client.queueSearchBusy());
     QVERIFY(sent.isEmpty());
     QTRY_COMPARE(sent.size(), 1);
-    QCOMPARE(sent[0], BinaryBridgeCodec::encodeCommandQueueSearch(1, QStringLiteral("some tune")));
+    const quint32 first = seqOf(sent[0], tune);
+    QVERIFY(first > 0);
     // Another query's results, and results for other rows, are not taken.
-    client.processBinarySnapshot(results(0, 4, {1}));
-    client.processBinarySnapshot(results(1, 3, {1}));
+    client.processBinarySnapshot(results(first - 1, 4, {1}));
+    client.processBinarySnapshot(results(first, 3, {1}));
     QCOMPARE(model->rowCount(), 0);
     QVERIFY(client.queueSearchBusy());
-    client.processBinarySnapshot(results(1, 4, {1, 3}));
+    client.processBinarySnapshot(results(first, 4, {1, 3}));
     QCOMPARE(rows(), (QVector<int>{1, 3}));
     QVERIFY(!client.queueSearchBusy());
 
@@ -4400,33 +4407,63 @@ void BridgeClientTest::queueSearchTakesOnlyResultsOfItsQueryForTheRowsShown() {
     QCOMPARE(rows(), (QVector<int>{2, 4}));
     QVERIFY(!client.queueSearchBusy());
     QTRY_COMPARE(sent.size(), 2);
-    QCOMPARE(sent[1], BinaryBridgeCodec::encodeCommandQueueSearch(2, QStringLiteral("some tune")));
-    client.processBinarySnapshot(results(1, 5, {0}));
+    const quint32 again = seqOf(sent[1], tune);
+    QVERIFY(again > first);
+    client.processBinarySnapshot(results(first, 5, {0}));
     QCOMPARE(rows(), (QVector<int>{2, 4}));
-    client.processBinarySnapshot(results(2, 5, {0, 2, 4}));
+    client.processBinarySnapshot(results(again, 5, {0, 2, 4}));
     QCOMPARE(rows(), (QVector<int>{0, 2, 4}));
 
-    client.jumpToQueueRow(model->queueRowAt(1));
-    QCOMPARE(sent.last(), BinaryBridgeCodec::encodeCommandQueueRow(BinaryBridgeCodec::CmdJumpTo, 5, 2));
+    // A new query: the reply to the one before, which comes while the new
+    // one waits for its pause, is not taken for it.
+    client.setQueueSearchQuery(QStringLiteral("other"));
+    QVERIFY(client.queueSearchBusy());
+    client.processBinarySnapshot(results(again, 5, {4}));
+    QCOMPARE(rows(), (QVector<int>{0, 2, 4}));
+    QVERIFY(client.queueSearchBusy());
+    QTRY_COMPARE(sent.size(), 3);
+    const quint32 other = seqOf(sent[2], QStringLiteral("other"));
+    QVERIFY(other > again);
+    client.processBinarySnapshot(results(other, 5, {2}));
+    QCOMPARE(rows(), (QVector<int>{2}));
+    QVERIFY(!client.queueSearchBusy());
 
-    // A whole new queue leaves no results, and they are on their way.
-    QVERIFY(client.processBinarySnapshot(fullQueueSnapshot(6, numberedPaths(2))));
+    client.jumpToQueueRow(model->queueRowAt(0));
+    QCOMPARE(sent.size(), 4);
+    QCOMPARE(sent[3], BinaryBridgeCodec::encodeCommandQueueRow(BinaryBridgeCodec::CmdJumpTo, 5, 2));
+
+    // A whole queue, also of rows that show as before, is new rows: the
+    // results named the rows it replaced, and new ones are on their way.
+    BinaryBridgeCodec::DecodedSnapshot same = fullQueueSnapshot(6, {});
+    auto *queueModel = qobject_cast<QueueRowsModel *>(client.queueRows());
+    for (int row = 0; row < queueModel->rowCount(); ++row) {
+        const QueueRowData *data = queueModel->rowAt(row);
+        same.queue.tracks.push_back(queueTrack(data->path, data->title));
+    }
+    same.queue.len = queueModel->rowCount();
+    QVERIFY(client.processBinarySnapshot(same));
     QCOMPARE(model->rowCount(), 0);
     QVERIFY(client.queueSearchBusy());
-    QTRY_COMPARE(sent.size(), 4);
-    QCOMPARE(sent[3], BinaryBridgeCodec::encodeCommandQueueSearch(3, QStringLiteral("some tune")));
+    QTRY_COMPARE(sent.size(), 5);
+    const quint32 replaced = seqOf(sent[4], QStringLiteral("other"));
+    QVERIFY(replaced > other);
+    client.processBinarySnapshot(results(replaced, 6, {1}));
+    QCOMPARE(rows(), (QVector<int>{1}));
 
     // Cleared, at once: results on their way are dropped, and the queue's
     // changes start no searches.
     client.setQueueSearchQuery(QString());
     QVERIFY(!client.queueSearchBusy());
-    QCOMPARE(sent.size(), 5);
-    QCOMPARE(sent[4], BinaryBridgeCodec::encodeCommandQueueSearch(4, QString()));
-    client.processBinarySnapshot(results(3, 6, {0}));
     QCOMPARE(model->rowCount(), 0);
-    QVERIFY(client.processBinarySnapshot(queueDeltaSnapshot(6, 7, 1, {queueOp(BinaryBridgeCodec::QueueOpRemove, 0, 1)})));
+    QCOMPARE(sent.size(), 6);
+    QVERIFY(seqOf(sent[5], QString()) > replaced);
+    client.processBinarySnapshot(results(replaced, 6, {0}));
+    QCOMPARE(model->rowCount(), 0);
+    QVERIFY(client.processBinarySnapshot(queueDeltaSnapshot(6, 7, queueModel->rowCount() - 1,
+                                                             {queueOp(BinaryBridgeCodec::QueueOpRemove, 0, 1)})));
+    QCOMPARE(client.m_queueRevision, quint64(7));
     QTest::qWait(50);
-    QCOMPARE(sent.size(), 5);
+    QCOMPARE(sent.size(), 6);
 }
 
 // The rows show their places among the rows marked to play next, for the

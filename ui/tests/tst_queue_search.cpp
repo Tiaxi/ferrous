@@ -243,6 +243,7 @@ private slots:
     void altEnterShowsTheRowInTheQueue();
     void keysPressedDuringASearchActOnItsResults();
     void thePlayingRowIsMarkedNotOtherRowsOfItsFile();
+    void theSelectionStaysOnItsRowThroughTheQueuesEdits();
 };
 
 void QueueSearchTest::initTestCase() {
@@ -288,14 +289,18 @@ void QueueSearchTest::resultsFollowTheirRowsThroughTheQueuesEdits() {
     QCOMPARE(changed.count(), 1);
 
     // Delta moves to the top, before Beta: the results follow the queue.
-    QSignalSpy layout(&results, &QAbstractItemModel::layoutChanged);
+    QSignalSpy moves(&results, &QAbstractItemModel::rowsMoved);
     QVERIFY(queue.moveRow(4, 0));
-    QCOMPARE(layout.count(), 1);
+    QCOMPARE(moves.count(), 1);
+    // Delta's result, the second, goes before the first.
+    QCOMPARE(moves[0][1].toInt(), 1);
+    QCOMPARE(moves[0][2].toInt(), 1);
+    QCOMPARE(moves[0][4].toInt(), 0);
     QCOMPARE(queueRowsOf(results), (QVector<int>{0, 3}));
     QCOMPARE(titlesOf(results), (QStringList{QStringLiteral("Delta"), QStringLiteral("Beta")}));
     // A move that keeps their order changes only their places.
     QVERIFY(queue.moveRows(1, 2, 4));
-    QCOMPARE(layout.count(), 1);
+    QCOMPARE(moves.count(), 1);
     QCOMPARE(titlesOf(results), (QStringList{QStringLiteral("Delta"), QStringLiteral("Beta")}));
     QCOMPARE(queueRowsOf(results), (QVector<int>{0, 1}));
 
@@ -531,6 +536,43 @@ void QueueSearchTest::thePlayingRowIsMarkedNotOtherRowsOfItsFile() {
     // Stopped, no row is now.
     harness.bridge->setProperty("playbackState", QStringLiteral("Stopped"));
     QTRY_VERIFY(!nowIn(1));
+}
+
+// Two results of one file swap places: the selection stays on its row,
+// and a menu open on a result whose row goes is closed, so it acts on no
+// other row.
+void QueueSearchTest::theSelectionStaysOnItsRowThroughTheQueuesEdits() {
+    Harness harness;
+    QString error;
+    QVERIFY2(harness.load(&error), qPrintable(error));
+    auto rows = queueOf({QStringLiteral("Alpha"), QStringLiteral("Beta"), QStringLiteral("Gamma")});
+    rows.insert(2, rows[1]);
+    harness.queue.setRows(rows);
+    QVERIFY(harness.open());
+    harness.search(QStringLiteral("beta"), {1, 2});
+    QTRY_COMPARE(harness.rows().size(), 2);
+    QTest::keyClick(harness.window, Qt::Key_Down);
+    QCOMPARE(harness.selected(), 1);
+    // The selected row 2 moves up above row 1.
+    QVERIFY(harness.queue.moveRow(2, 1));
+    QCOMPARE(harness.selected(), 0);
+    QCOMPARE(harness.results.queueRowAt(0), 1);
+    QTest::keyClick(harness.window, Qt::Key_Return, Qt::ControlModifier);
+    QCOMPARE(harness.takeCommands(), QStringLiteral("play next 1"));
+    // A move that keeps the results' order keeps the selection.
+    QVERIFY(harness.queue.moveRow(3, 0));
+    QCOMPARE(harness.selected(), 0);
+    QCOMPARE(harness.results.queueRowAt(0), 2);
+
+    QObject *menu = harness.dialog->findChild<QObject *>(QStringLiteral("queueSearchResultMenu"));
+    QVERIFY(menu != nullptr);
+    QTest::keyClick(harness.window, Qt::Key_Menu);
+    QTRY_VERIFY(menu->property("visible").toBool());
+    QVERIFY(harness.queue.removeRowsAt(2, 1));
+    QTRY_VERIFY(!menu->property("visible").toBool());
+    QCOMPARE(harness.results.rowCount(), 1);
+    QCOMPARE(harness.selected(), 0);
+    QVERIFY(harness.takeCommands().isEmpty());
 }
 
 int main(int argc, char **argv) {
