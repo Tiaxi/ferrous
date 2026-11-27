@@ -292,6 +292,7 @@ jobs:
             kf6-qqc2-desktop-style \
             kf6-kdeclarative \
             breeze-icon-theme \
+            google-noto-sans-vf-fonts \
             gettext \
             glibc-langpack-en \
             util-linux-core \

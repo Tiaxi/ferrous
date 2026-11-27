@@ -14,6 +14,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QFont>
+#include <QFontInfo>
 #include <QFontMetricsF>
 #include <QImage>
 #include <QJSValue>
@@ -1473,6 +1474,13 @@ void UiMainWindowTest::chromeKeepsItsHeightsAtTheDefaultAndALargeFont() {
         QVERIFY(breezeDark->isSet());
     }
     const ScopedApplicationFont font(pointSize);
+    // The heights are Noto Sans's, Plasma's font, whichever font the
+    // system would choose.
+    QFont noto = QGuiApplication::font();
+    noto.setFamilies({QStringLiteral("Noto Sans")});
+    QGuiApplication::setFont(noto);
+    QVERIFY2(QFontInfo(noto).family() == QStringLiteral("Noto Sans"),
+             "Noto Sans is missing: install google-noto-sans-vf-fonts (docs/INSTALL.md)");
     MainWindowFixture fixture(sized(windowWidth, windowHeight));
     QQuickWindow *window = fixture.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
