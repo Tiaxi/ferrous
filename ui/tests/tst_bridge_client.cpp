@@ -4447,23 +4447,34 @@ void BridgeClientTest::queueSearchTakesOnlyResultsOfItsQueryForTheRowsShown() {
     QTRY_COMPARE(sent.size(), 5);
     const quint32 replaced = seqOf(sent[4], QStringLiteral("other"));
     QVERIFY(replaced > other);
-    client.processBinarySnapshot(results(replaced, 6, {1}));
+    // Also after a search that found nothing: it is searched again, not
+    // one that found nothing for the new rows.
+    client.processBinarySnapshot(results(replaced, 6, {}));
+    QVERIFY(!client.queueSearchBusy());
+    same.queue.revision = 7;
+    QVERIFY(client.processBinarySnapshot(same));
+    QVERIFY(client.queueSearchBusy());
+    QTRY_COMPARE(sent.size(), 6);
+    const quint32 refound = seqOf(sent[5], QStringLiteral("other"));
+    QVERIFY(refound > replaced);
+    client.processBinarySnapshot(results(refound, 7, {1}));
     QCOMPARE(rows(), (QVector<int>{1}));
+    QVERIFY(!client.queueSearchBusy());
 
     // Cleared, at once: results on their way are dropped, and the queue's
     // changes start no searches.
     client.setQueueSearchQuery(QString());
     QVERIFY(!client.queueSearchBusy());
     QCOMPARE(model->rowCount(), 0);
-    QCOMPARE(sent.size(), 6);
-    QVERIFY(seqOf(sent[5], QString()) > replaced);
-    client.processBinarySnapshot(results(replaced, 6, {0}));
+    QCOMPARE(sent.size(), 7);
+    QVERIFY(seqOf(sent[6], QString()) > refound);
+    client.processBinarySnapshot(results(refound, 7, {0}));
     QCOMPARE(model->rowCount(), 0);
-    QVERIFY(client.processBinarySnapshot(queueDeltaSnapshot(6, 7, queueModel->rowCount() - 1,
+    QVERIFY(client.processBinarySnapshot(queueDeltaSnapshot(7, 8, queueModel->rowCount() - 1,
                                                              {queueOp(BinaryBridgeCodec::QueueOpRemove, 0, 1)})));
-    QCOMPARE(client.m_queueRevision, quint64(7));
+    QCOMPARE(client.m_queueRevision, quint64(8));
     QTest::qWait(50);
-    QCOMPARE(sent.size(), 6);
+    QCOMPARE(sent.size(), 7);
 }
 
 // The rows show their places among the rows marked to play next, for the

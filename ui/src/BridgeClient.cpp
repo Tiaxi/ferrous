@@ -6369,7 +6369,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         if (m_queueRevision != previousRevision) {
             // A whole queue is new rows, also where they show as before:
             // the results named the rows it replaced.
-            if (queue.kind == BinaryBridgeCodec::QueueFull && m_queueSearchModel.count() > 0) {
+            if (queue.kind == BinaryBridgeCodec::QueueFull) {
                 m_queueSearchModel.clear();
                 setQueueSearchBusy(!m_queueSearchQuery.isEmpty());
             }
