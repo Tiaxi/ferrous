@@ -295,10 +295,12 @@ void KeyboardShortcutsSmokeTest::keptKeysAndTypedKeysAreTold() {
     QCOMPARE(role("Menu"), QStringLiteral("contextMenu"));
     QCOMPARE(role("Shift+F10"), QStringLiteral("contextMenu"));
     QCOMPARE(role("Ctrl+M"), QStringLiteral("menuBar"));
+    // Q alone marks the queue's selection to play next.
+    QCOMPARE(role("Q"), QStringLiteral("playNext"));
     // With modifiers, the window leaves them to the shortcuts.
     for (const char *key : {"Ctrl+Shift+Return", "Alt+Return", "Meta+Enter", "Shift+Delete", "Ctrl+Tab",
                             "Shift+Esc", "Shift+Left", "Ctrl+Up", "Alt+Home", "Ctrl+Shift+M", "F10", "M", "Space",
-                            "Ctrl+Alt+,"}) {
+                            "Ctrl+Alt+,", "Ctrl+Q", "Shift+Q", "Alt+Q"}) {
         QVERIFY2(role(key).isEmpty(), key);
     }
     QVERIFY(role("Ctrl+K, Delete").isEmpty());
@@ -577,7 +579,8 @@ void KeyboardShortcutsSmokeTest::keysTheWindowKeepsAreRefused() {
                              Kept{Qt::Key_Return, Qt::NoModifier, "default button"},
                              Kept{Qt::Key_Return, Qt::ControlModifier, "adds the selection to the queue"},
                              Kept{Qt::Key_Enter, Qt::ControlModifier | Qt::KeypadModifier,
-                                  "adds the selection to the queue"}}) {
+                                  "adds the selection to the queue"},
+                             Kept{Qt::Key_Q, Qt::NoModifier, "marks the selected tracks in the queue to play next"}}) {
         QVERIFY(fixture.capture("keyboardShortcutsShortcutEditor", kept.key, kept.modifiers));
         QVERIFY2(refusal->isVisible(), kept.says);
         QVERIFY2(refusal->property("text").toString().contains(QString::fromLatin1(kept.says)),
@@ -1059,7 +1062,7 @@ void KeyboardShortcutsSmokeTest::namesAndKeysAreQuotedAsInTheOtherDialogs() {
     QCOMPARE(fixture.item("keyboardShortcutsEditorTitle")->property("text").toString(),
              QStringLiteral("Shortcuts for “Play/Pause”"));
     // One key of each role that is kept, and the album art viewer's.
-    for (const char *key : {"Return", "Ctrl+Return", "Del", "Tab", "Esc", "Home", "Shift+F10", "Ctrl+M", "I"}) {
+    for (const char *key : {"Return", "Ctrl+Return", "Del", "Tab", "Esc", "Home", "Shift+F10", "Ctrl+M", "Q", "I"}) {
         QVariant refusal;
         QVERIFY(QMetaObject::invokeMethod(fixture.dialog, "refusalFor", Q_RETURN_ARG(QVariant, refusal),
                                           Q_ARG(QVariant, QVariant::fromValue(fixture.action("playPauseAction"))),

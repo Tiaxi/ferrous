@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import QtQuick 2.15
+import "../logic/KeyUtils.js" as KeyUtils
 import "../logic/ListRows.js" as ListRows
 
 QtObject {
@@ -478,6 +479,39 @@ QtObject {
         return [index]
     }
 
+    // Mark the rows the menu of row `index` acts on to play next, or unmark
+    // them when every one is marked.
+    function togglePlayNextOf(index) {
+        if (index < 0 || index >= root.uiBridge.queueLength) {
+            return
+        }
+        root.uiBridge.togglePlayNext(root.rowsFor(index))
+    }
+
+    // Whether every row the menu of row `index` acts on is marked to play
+    // next, so that its item unmarks them.
+    function allPlayNextOf(index) {
+        return index >= 0 && root.uiBridge.allPlayNext(root.rowsFor(index))
+    }
+
+    // Q alone, the queue's key for Play Next, as Enter plays and Delete
+    // removes. Shortcuts the user gave it elsewhere wait while the queue
+    // has the focus.
+    function isPlayNextKey(event) {
+        return event.key === Qt.Key_Q && KeyUtils.isUnmodified(event)
+    }
+
+    // Mark the selected rows to play next, or, with none selected, the
+    // ringed row; or unmark them when every one is marked.
+    function togglePlayNextOfSelection() {
+        const rows = root.selectedIndices.length > 0
+            ? root.selectedIndices.slice()
+            : (root.currentRowIndex >= 0 ? [root.currentRowIndex] : [])
+        if (rows.length > 0) {
+            root.uiBridge.togglePlayNext(rows)
+        }
+    }
+
     function moveRowsOf(index, delta) {
         if (index < 0 || index >= root.uiBridge.queueLength || delta === 0) {
             return
@@ -611,6 +645,12 @@ QtObject {
 
         if (ctrl && !shift && event.key === Qt.Key_A) {
             root.selectAllItems()
+            event.accepted = true
+            return
+        }
+
+        if (root.isPlayNextKey(event)) {
+            root.togglePlayNextOfSelection()
             event.accepted = true
             return
         }

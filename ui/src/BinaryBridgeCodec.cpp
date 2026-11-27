@@ -816,6 +816,31 @@ bool decodeLastFmSection(const QByteArray &payload, DecodedLastFm *out) {
     return true;
 }
 
+bool decodePlayNextSection(const QByteArray &payload, DecodedPlayNext *out) {
+    if (!out) {
+        return false;
+    }
+    Reader reader(payload);
+    quint32 count = 0;
+    if (!reader.readU64(&out->revision) || !reader.readU32(&count)
+        || count > static_cast<quint32>(payload.size() / 4)) {
+        return false;
+    }
+    out->rows.reserve(static_cast<qsizetype>(count));
+    for (quint32 i = 0; i < count; ++i) {
+        quint32 row = 0;
+        if (!reader.readU32(&row) || row > static_cast<quint32>(std::numeric_limits<int>::max())) {
+            return false;
+        }
+        out->rows.push_back(static_cast<int>(row));
+    }
+    if (!reader.atEnd()) {
+        return false;
+    }
+    out->present = true;
+    return true;
+}
+
 bool decodeQueueUndoSection(const QByteArray &payload, DecodedQueueUndo *out) {
     if (!out) {
         return false;
@@ -1116,6 +1141,18 @@ QByteArray encodeCommandRemoveMany(quint64 revision, const QList<quint32> &indic
     return finalizeCommand(CmdRemoveMany, payload);
 }
 
+QByteArray encodeCommandTogglePlayNext(quint64 revision, const QList<quint32> &rows) {
+    if (rows.size() > static_cast<qsizetype>((kMaxCommandPayloadBytes - 12) / 4)) {
+        return {};
+    }
+    QByteArray payload;
+    payload.reserve(12 + 4 * rows.size());
+    appendLe<quint64>(payload, revision);
+    appendLe<quint32>(payload, static_cast<quint32>(rows.size()));
+    for (quint32 row : rows) appendLe<quint32>(payload, row);
+    return finalizeCommand(CmdTogglePlayNext, payload);
+}
+
 QByteArray encodeCommandMoveQueueRows(
     quint64 revision, QueueRowsMove how, quint32 before, const QList<quint32> &rows) {
     if (rows.size() > static_cast<qsizetype>((kMaxCommandPayloadBytes - 17) / 4)) {
@@ -1255,6 +1292,9 @@ bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QStrin
             break;
         case SectionQueueUndo:
             ok = decodeQueueUndoSection(sectionPayload, &out->queueUndo);
+            break;
+        case SectionPlayNext:
+            ok = decodePlayNextSection(sectionPayload, &out->playNext);
             break;
         case SectionError: {
             Reader sectionReader(sectionPayload);

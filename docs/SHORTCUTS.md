@@ -4,7 +4,7 @@
 
 These work in the main window and in the fullscreen viewers. Text fields, such as global search, keep the keys they use for typing and selecting text.
 
-To change a shortcut, open **Settings › Configure Keyboard Shortcuts…** (Ctrl+Alt+,). Select an action, choose **Custom**, and press the keys for its shortcut or its alternate; **Default** gives it back its defaults, and **Defaults** does so for every action. A key another action has moves to the new one once you agree. Keys the lists, text fields and dialogs use themselves, such as Enter, Ctrl+Enter, Delete, Tab, Escape and the arrow keys alone, cannot be shortcuts. The changes take effect with OK or Apply, in the main window and in the viewers. The tables below list the default shortcuts; those of Open, Quit, Undo, Redo, Find and Configure Ferrous follow Plasma's standard keys.
+To change a shortcut, open **Settings › Configure Keyboard Shortcuts…** (Ctrl+Alt+,). Select an action, choose **Custom**, and press the keys for its shortcut or its alternate; **Default** gives it back its defaults, and **Defaults** does so for every action. A key another action has moves to the new one once you agree. Keys the lists, text fields and dialogs use themselves, such as Enter, Ctrl+Enter, Delete, Q, Tab, Escape and the arrow keys alone, cannot be shortcuts. The changes take effect with OK or Apply, in the main window and in the viewers. The tables below list the default shortcuts; those of Open, Quit, Undo, Redo, Find and Configure Ferrous follow Plasma's standard keys.
 
 | Action | Keys |
 | --- | --- |
@@ -35,7 +35,7 @@ These work in the main window only:
 | Configure Ferrous | Ctrl+Shift+, (Plasma's standard key) |
 | Configure Keyboard Shortcuts | Ctrl+Alt+, |
 
-Alt and an underlined letter open a menu, such as Alt+P for **Playback**. The menus show each item's shortcut; the queue's and the library's context menus also show the keys that do the same in the list, such as Enter and Delete. [Global search](SEARCH.md) has keys of its own.
+Alt and an underlined letter open a menu, such as Alt+P for **Playback**. The menus show each item's shortcut; the queue's and the library's context menus also show the keys that do the same in the list, such as Enter, Q and Delete. [Global search](SEARCH.md) has keys of its own.
 
 ## Library and queue
 
@@ -46,12 +46,13 @@ Alt and an underlined letter open a menu, such as Alt+P for **Playback**. The me
 | Expand or collapse a library row | Right, Left |
 | Play the selection | Enter |
 | Add the selection to the queue (library) | Ctrl+Enter |
+| Mark the selected tracks to play next, or unmark them (queue only) | Q |
 | Remove the selected tracks (queue only) | Delete |
 | Open the context menu | Menu, Shift+F10 |
 
 In the library, typing the start of an artist's name selects that artist. While the library has focus, the letters you type go to it, so F there selects rather than follows the playhead.
 
-Delete acts only while the queue has focus. Playing from the library or global search replaces the queue. After **Edit › Clear Queue**, Delete, or a replacement, Undo in the **Edit** menu (Ctrl+Z) stays available until the queue changes again. Undo brings back the tracks and their selection. It does not start playback: a track that plays on is left playing, otherwise the track that was current comes back stopped at its start. After an undo, Redo in the **Edit** menu (Ctrl+Shift+Z) makes the change again, until the queue changes some other way, and the change can then be undone again. Redo does not start playback either: redoing a replacement brings the new queue back as Undo brings back the old one.
+Delete and Q act only while the queue has focus. Q marks the selected tracks to [play next](FEATURES.md#play-next), and unmarks them when they are all marked; **Edit › Clear Play Next** unmarks every track. Marking is not undone with Undo, but undoing a removal or a replacement brings back the marks the tracks had. Playing from the library or global search replaces the queue. After **Edit › Clear Queue**, Delete, or a replacement, Undo in the **Edit** menu (Ctrl+Z) stays available until the queue changes again. Undo brings back the tracks and their selection. It does not start playback: a track that plays on is left playing, otherwise the track that was current comes back stopped at its start. After an undo, Redo in the **Edit** menu (Ctrl+Shift+Z) makes the change again, until the queue changes some other way, and the change can then be undone again. Redo does not start playback either: redoing a replacement brings the new queue back as Undo brings back the old one.
 
 The handles between the queue's column headings resize the Artist, Album and Length columns; the title takes the rest. Tab reaches them: Left widens the column after the handle, Right narrows it, and Home, or a double-click, restores its default width. Ferrous keeps the widths you set.
 

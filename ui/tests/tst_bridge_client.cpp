@@ -286,6 +286,9 @@ private slots:
     void redoSendsTheOfferedRedoAndFollowsItsKind();
     void aClearedQueueComesBackAndGoesAgainThroughTheBackend();
     void removedAndReplacedRowsComeBackThroughTheBackend();
+    void playNextSectionIsDecoded();
+    void playNextMarksNumberTheRowsOfTheirRevision();
+    void marksComeBackWithAnUndoneRemovalThroughTheBackend();
     void tagEditorPreviewsRenamesWithoutRenaming();
     void aRenamePreviewOfRowsLoadedAgainIsOutOfDate();
     void anUndoOfAClearWhileStoppedKeepsTheStoppedRowOfARepeatedTrack();
@@ -4231,6 +4234,193 @@ void BridgeClientTest::removedAndReplacedRowsComeBackThroughTheBackend() {
         QCOMPARE(bridge.queuePathAt(i), queued[i]);
     }
     QTRY_COMPARE(bridge.queueUndoId(), 0.0);
+    // Leave no queue of removed fixtures to the tests after this one.
+    bridge.clearQueue();
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 0, 10000);
+}
+
+namespace {
+
+// The places the client's queue model gives its rows among the rows
+// marked to play next, 0 for a row not marked.
+QVector<int> playNextPlaces(BridgeClient &client) {
+    auto *model = qobject_cast<QAbstractItemModel *>(client.queueRows());
+    QVector<int> places;
+    for (int row = 0; row < model->rowCount(); ++row) {
+        places.push_back(model->index(row, 0).data(QueueRowsModel::PlayNextRole).toInt());
+    }
+    return places;
+}
+
+BinaryBridgeCodec::DecodedPlayNext playNextOf(quint64 revision, QVector<int> rows) {
+    BinaryBridgeCodec::DecodedPlayNext playNext;
+    playNext.present = true;
+    playNext.revision = revision;
+    playNext.rows = std::move(rows);
+    return playNext;
+}
+
+} // namespace
+
+void BridgeClientTest::playNextSectionIsDecoded() {
+    // Mirrored by encode_play_next_section in src/frontend_bridge/ffi.rs.
+    QByteArray section;
+    putLe<quint64>(section, 9);
+    putLe<quint32>(section, 3);
+    for (quint32 row : {4u, 0u, 2u}) {
+        putLe<quint32>(section, row);
+    }
+    const auto packet = [](const QByteArray &payload) {
+        QByteArray out;
+        putLe<quint32>(out, BinaryBridgeCodec::kSnapshotMagic);
+        putLe<quint32>(out, static_cast<quint32>(12 + 4 + payload.size()));
+        putLe<quint16>(out, BinaryBridgeCodec::SectionPlayNext);
+        putLe<quint16>(out, 0);
+        putLe<quint32>(out, static_cast<quint32>(payload.size()));
+        out.append(payload);
+        return out;
+    };
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QString error;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet(section), &decoded, &error),
+             qPrintable(error));
+    QVERIFY(decoded.playNext.present);
+    QCOMPARE(decoded.playNext.revision, quint64(9));
+    QCOMPARE(decoded.playNext.rows, (QVector<int>{4, 0, 2}));
+    QByteArray truncated = section;
+    truncated.chop(1);
+    BinaryBridgeCodec::DecodedSnapshot refused;
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packet(truncated), &refused, &error));
+    QCOMPARE(qFromLittleEndian<quint16>(
+                 BinaryBridgeCodec::encodeCommandTogglePlayNext(3, {1, 4}).constData()),
+             quint16(83));
+    QCOMPARE(int(BinaryBridgeCodec::CmdClearPlayNext), 84);
+}
+
+// The rows show their places among the rows marked to play next, for the
+// rows of the revision the marks come with; the marks follow their rows
+// through row edits, and the commands name the rows the user sees.
+void BridgeClientTest::playNextMarksNumberTheRowsOfTheirRevision() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.push_back(payload);
+        return true;
+    };
+    QSignalSpy changed(&client, &BridgeClient::playNextChanged);
+    auto *model = qobject_cast<QAbstractItemModel *>(client.queueRows());
+    QSignalSpy dataChanged(model, &QAbstractItemModel::dataChanged);
+
+    auto snapshot = fullQueueSnapshot(4, numberedPaths(5));
+    snapshot.playNext = playNextOf(4, {3, 1});
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(playNextPlaces(client), (QVector<int>{0, 2, 0, 1, 0}));
+    QCOMPARE(client.playNextCount(), 2);
+    QCOMPARE(changed.count(), 1);
+    QVERIFY(client.allPlayNext({1, 3}));
+    QVERIFY(!client.allPlayNext({1, 2}));
+    QVERIFY(!client.allPlayNext({}));
+    QCOMPARE(client.playNextPlace(3), 1);
+
+    // A removal and the marks it leaves, in one snapshot: each row whose
+    // place changed, and only those, is told.
+    dataChanged.clear();
+    snapshot = queueDeltaSnapshot(4, 5, 4, {queueOp(BinaryBridgeCodec::QueueOpRemove, 0, 1)});
+    snapshot.playNext = playNextOf(5, {2, 0});
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(playNextPlaces(client), (QVector<int>{2, 0, 1, 0}));
+    QCOMPARE(changed.count(), 2);
+    QCOMPARE(dataChanged.count(), 0);
+
+    // Rows inserted without new marks: the marks move with their rows.
+    snapshot = queueDeltaSnapshot(5, 6, 5,
+        {queueOp(BinaryBridgeCodec::QueueOpInsert, 0, 0, {queueTrack(QStringLiteral("/music/new.flac"))})});
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(playNextPlaces(client), (QVector<int>{0, 2, 0, 1, 0}));
+
+    // Unmarking one row renumbers the other.
+    dataChanged.clear();
+    snapshot = BinaryBridgeCodec::DecodedSnapshot{};
+    snapshot.playNext = playNextOf(6, {1});
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(playNextPlaces(client), (QVector<int>{0, 1, 0, 0, 0}));
+    QCOMPARE(changed.count(), 4);
+    QCOMPARE(dataChanged.count(), 2);
+    for (const auto &signal : dataChanged) {
+        QCOMPARE(signal[2].value<QList<int>>(), QList<int>{QueueRowsModel::PlayNextRole});
+    }
+
+    // Marks for rows the client does not have show none.
+    snapshot.playNext = playNextOf(9, {2});
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(playNextPlaces(client), (QVector<int>{0, 0, 0, 0, 0}));
+    QCOMPARE(client.playNextCount(), 0);
+
+    // Q names the rows at the revision shown, in the queue's order; Clear
+    // Play Next is sent only while a row is marked.
+    client.clearPlayNext();
+    QVERIFY(sent.isEmpty());
+    client.togglePlayNext({3, 1, 1, 99});
+    QCOMPARE(sent.size(), 1);
+    QCOMPARE(sent[0], BinaryBridgeCodec::encodeCommandTogglePlayNext(6, {1, 3}));
+    snapshot.playNext = playNextOf(6, {1});
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    client.clearPlayNext();
+    QCOMPARE(sent.size(), 2);
+    QCOMPARE(sent[1],
+             BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdClearPlayNext));
+    client.togglePlayNext({});
+    QCOMPARE(sent.size(), 2);
+}
+
+// Marks go through the backend, which owns them, and come back with the
+// rows an undone removal brings back, in their places.
+void BridgeClientTest::marksComeBackWithAnUndoneRemovalThroughTheBackend() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString base = QFileInfo(dir.path()).canonicalFilePath();
+    QStringList paths;
+    for (const char *name : {"a.flac", "b.flac", "c.flac", "d.flac"}) {
+        const QString path = base + QLatin1Char('/') + QLatin1String(name);
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write("stub"), qint64(4));
+        paths.push_back(path);
+    }
+    BridgeClient bridge;
+    QVERIFY(bridge.m_ffiBridge != nullptr);
+    QSignalSpy errors(&bridge, &BridgeClient::bridgeError);
+    // A queue an earlier test left behind is cleared first.
+    bridge.clearQueue();
+    bridge.appendPaths(paths);
+    QTRY_VERIFY_WITH_TIMEOUT(bridge.queueLength() == 4 && bridge.queuePathAt(0) == paths[0]
+                                 && bridge.queuePathAt(3) == paths[3],
+                             10000);
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueUndoId(), 0.0, 10000);
+
+    // Rows 3 and 1, which join in the queue's order, then row 2.
+    bridge.togglePlayNext({3, 1});
+    QTRY_COMPARE_WITH_TIMEOUT(playNextPlaces(bridge), (QVector<int>{0, 1, 0, 2}), 10000);
+    bridge.togglePlayNext({2});
+    QTRY_COMPARE_WITH_TIMEOUT(playNextPlaces(bridge), (QVector<int>{0, 1, 3, 2}), 10000);
+
+    bridge.removeAt(1);
+    QTRY_VERIFY_WITH_TIMEOUT(bridge.queueLength() == 3
+                                 && bridge.queueUndoKind() == BinaryBridgeCodec::QueueUndoRemoved,
+                             10000);
+    QTRY_COMPARE_WITH_TIMEOUT(playNextPlaces(bridge), (QVector<int>{0, 2, 1}), 10000);
+    // Marking is no change to undo: the removal stays offered.
+    bridge.togglePlayNext({0});
+    QTRY_COMPARE_WITH_TIMEOUT(playNextPlaces(bridge), (QVector<int>{3, 2, 1}), 10000);
+    QCOMPARE(bridge.queueUndoKind(), int(BinaryBridgeCodec::QueueUndoRemoved));
+    bridge.undoQueueChange();
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 4, 10000);
+    QTRY_COMPARE_WITH_TIMEOUT(playNextPlaces(bridge), (QVector<int>{4, 1, 3, 2}), 10000);
+
+    bridge.clearPlayNext();
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.playNextCount(), 0, 10000);
+    QVERIFY2(errors.isEmpty(), qPrintable(errors.isEmpty() ? QString() : errors.first().first().toString()));
     // Leave no queue of removed fixtures to the tests after this one.
     bridge.clearQueue();
     QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 0, 10000);

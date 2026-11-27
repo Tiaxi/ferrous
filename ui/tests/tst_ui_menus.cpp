@@ -606,6 +606,7 @@ private slots:
     void markedGlyphsKeepTwoColumns();
     void mirroredMenusReadFromTheRight();
     void queueMenuNamesHowManyRowsItRemoves();
+    void queueMenuMarksItsRowsToPlayNextOrUnmarksThem();
     void showInLibraryShowsTheLibraryTree();
     void clearQueueShowsALineGlyph();
     void menusReadInKdesWordsAndOrder();
@@ -1839,6 +1840,83 @@ void UiMenusTest::queueMenuNamesHowManyRowsItRemoves() {
     QTRY_VERIFY(!menu->property("visible").toBool());
 }
 
+// Play Next marks the rows the menu acts on, as Remove names them: the
+// selection on one of several selected rows, else its own row. It says
+// Don't Play Next when every one is marked, and the Edit menu's Clear Play
+// Next unmarks them all, while any is marked.
+void UiMenusTest::queueMenuMarksItsRowsToPlayNextOrUnmarksThem() {
+    MainWindowFixture main(wideWindow());
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    bridge->setProperty("queueRows", sampleQueueRows(3));
+    bridge->setProperty("queueLength", 3);
+    QTRY_VERIFY(viewRow(window, "playlistView", 2) != nullptr);
+    const auto openOn = [&](int index) -> QObject * {
+        rightClick(window, viewRow(window, "playlistView", index));
+        QObject *menu = nullptr;
+        if (!QTest::qWaitFor([&]() {
+                menu = visibleMenu(window, QStringLiteral("playlistContextMenu"));
+                return menu != nullptr && menu->property("opened").toBool();
+            })) {
+            return nullptr;
+        }
+        return menu;
+    };
+    const auto playNextText = [](QObject *menu) {
+        QObject *item = menu->findChild<QObject *>(QStringLiteral("queuePlayNextItem"));
+        return item != nullptr ? item->property("text").toString() : QString();
+    };
+    const auto trigger = [](QObject *menu) {
+        QMetaObject::invokeMethod(menu->findChild<QObject *>(QStringLiteral("queuePlayNextItem")), "triggered");
+        return QTest::qWaitFor([&]() { return !menu->property("visible").toBool(); });
+    };
+    QObject *clear = window->findChild<QObject *>(QStringLiteral("clearPlayNextAction"));
+    QVERIFY(clear != nullptr);
+    QVERIFY(!clear->property("enabled").toBool());
+
+    // A row alone.
+    bridge->setProperty("queueCommands", QStringList());
+    QObject *menu = openOn(1);
+    QVERIFY(menu != nullptr);
+    QCOMPARE(playNextText(menu), QStringLiteral("Play Next"));
+    QVERIFY(trigger(menu));
+    QCOMPARE(bridge->property("queueCommands").toStringList(), QStringList{QStringLiteral("play next 1")});
+
+    // Two of three selected, one of them marked: it marks them.
+    bridge->setProperty("playNextPlaces", QVariantMap{{QStringLiteral("1"), 1}});
+    QTRY_VERIFY(clear->property("enabled").toBool());
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                      sceneRect(viewRow(window, "playlistView", 0)).center().toPoint());
+    QTest::mouseClick(window, Qt::LeftButton, Qt::ControlModifier,
+                      sceneRect(viewRow(window, "playlistView", 1)).center().toPoint());
+    bridge->setProperty("queueCommands", QStringList());
+    menu = openOn(1);
+    QVERIFY(menu != nullptr);
+    QCOMPARE(playNextText(menu), QStringLiteral("Play Next"));
+    QVERIFY(trigger(menu));
+    QCOMPARE(bridge->property("queueCommands").toStringList(), QStringList{QStringLiteral("play next 0,1")});
+
+    // Both marked: it unmarks them.
+    bridge->setProperty("playNextPlaces",
+                        QVariantMap{{QStringLiteral("1"), 1}, {QStringLiteral("0"), 2}});
+    menu = openOn(0);
+    QVERIFY(menu != nullptr);
+    QCOMPARE(playNextText(menu), QStringLiteral("Don’t Play Next"));
+    QVERIFY(trigger(menu));
+
+    // The row outside the selection, which is not marked.
+    menu = openOn(2);
+    QVERIFY(menu != nullptr);
+    QCOMPARE(playNextText(menu), QStringLiteral("Play Next"));
+    QMetaObject::invokeMethod(menu, "close");
+    QTRY_VERIFY(!menu->property("visible").toBool());
+
+    bridge->setProperty("queueCommands", QStringList());
+    QMetaObject::invokeMethod(clear, "trigger");
+    QCOMPARE(bridge->property("queueCommands").toStringList(), QStringList{QStringLiteral("clear play next")});
+}
+
 // Show in Library shows the library's tree, not a jump arrow, in the
 // queue's menu and the search result's (tst_search_palette), from Breeze
 // and Breeze Dark alike.
@@ -1913,6 +1991,7 @@ void UiMenusTest::checkMenusListTheirItemsInOrder(QQuickWindow *window) {
                  // A line glyph, as the others' (edit-clear-list's is a
                  // filled badge); Breeze and Breeze Dark both have it.
                  QStringLiteral("item|Clear Queue||edit-clear-all"),
+                 QStringLiteral("item|Clear Play Next||edit-clear"),
              }));
     QCOMPARE(rowsOf(menuNamed(window, "viewMenu")),
              (QStringList{
@@ -2603,6 +2682,7 @@ void UiMenusTest::checkQueueContextMenuShowsKeysItDoesNotTake(QQuickWindow *wind
     QCOMPARE(rowsOf(menu),
              (QStringList{
                  QStringLiteral("hint|Play|Enter|media-playback-start"),
+                 QStringLiteral("hint|Play Next|Q|go-next"),
                  QStringLiteral("sep"),
                  QStringLiteral("item|Show in Library||view-list-tree"),
                  QStringLiteral("item|Open Containing Folder||folder-open"),

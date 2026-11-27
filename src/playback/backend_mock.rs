@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use super::channel_mix::ChannelMix;
+use super::play_next::{self, PlayNextRestore};
 use super::queue::{same_audio_extension, CancelledAdvance, GaplessQueue, Handoff};
 use super::{
     EngineExit, FileStamp, PlaybackCommand, PlaybackError, PlaybackErrorOutcome, PlaybackEvent,
@@ -118,6 +119,7 @@ fn spawn_with_clock(
             }
             last_tick = tick;
             runtime.handle_command(cmd);
+            runtime.snapshot.play_next = runtime.queue.play_next();
             // The simulated position is where playback is now, and
             // advances while it plays.
             runtime.snapshot.position_sampled_at = super::monotonic_now();
@@ -176,6 +178,9 @@ impl MockPlaybackRuntime {
         self.snapshot.soloed_channels_mask = self.channel_mix.soloed_in(0);
     }
     fn handle_command(&mut self, cmd: PlaybackCommand) {
+        if cmd.edits_queue() {
+            self.snapshot.queue_commands += 1;
+        }
         match cmd {
             PlaybackCommand::LoadQueue(paths) => self.load_queue(paths),
             PlaybackCommand::PlayQueue(paths) => {
@@ -196,7 +201,11 @@ impl MockPlaybackRuntime {
                 // The loop sends the remapped snapshot after this.
                 let _ = self.event_tx.send(PlaybackEvent::PathsRemapped);
             }
-            PlaybackCommand::RestoreQueue { paths, current } => self.restore_queue(paths, current),
+            PlaybackCommand::RestoreQueue {
+                paths,
+                current,
+                play_next,
+            } => self.restore_queue(paths, current, &play_next),
             PlaybackCommand::RemoveMany(indices) => self.remove_many(&indices),
             PlaybackCommand::RemoveAt(idx) => self.remove_many(&[idx]),
             PlaybackCommand::MoveQueue { from, to } => {
@@ -217,6 +226,14 @@ impl MockPlaybackRuntime {
             PlaybackCommand::ClearQueue => {
                 let _ = self.queue.clear();
                 self.stop_with_empty_queue();
+            }
+            PlaybackCommand::TogglePlayNext(rows) => {
+                let cancelled = self.queue.toggle_play_next(&rows);
+                self.continue_after_cancelled_advance(cancelled);
+            }
+            PlaybackCommand::SetPlayNext(rows) => {
+                let cancelled = self.queue.set_play_next(rows);
+                self.continue_after_cancelled_advance(cancelled);
             }
             PlaybackCommand::PlayAt(idx) => {
                 if let Some(target) = self.queue.set_current(idx) {
@@ -333,7 +350,7 @@ impl MockPlaybackRuntime {
         }
     }
     /// Like the `GStreamer` backend; see [`PlaybackCommand::RestoreQueue`].
-    fn restore_queue(&mut self, paths: Vec<PathBuf>, current: usize) {
+    fn restore_queue(&mut self, paths: Vec<PathBuf>, current: usize, marks: &PlayNextRestore) {
         let Some(last) = paths.len().checked_sub(1) else {
             return;
         };
@@ -346,15 +363,17 @@ impl MockPlaybackRuntime {
             }
         });
         let Some(row) = open_row else {
+            let list = play_next::restored(&self.queue.play_next(), marks, paths.len());
             let _ = self.queue.set_queue(paths);
             self.about_to_finish_fired = false;
             self.snapshot.state = PlaybackState::Stopped;
             if let Some(target) = self.queue.set_current(current) {
                 self.switch_manually(target.path, target.index);
             }
+            let _ = self.queue.set_play_next(list);
             return;
         };
-        let cancelled = self.queue.restore(paths, row);
+        let cancelled = self.queue.restore(paths, row, marks);
         self.continue_after_cancelled_advance(cancelled);
         if self.snapshot.state != PlaybackState::Stopped {
             self.snapshot.current_queue_index = Some(row);

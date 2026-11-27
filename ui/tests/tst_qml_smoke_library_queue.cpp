@@ -61,6 +61,7 @@ private slots:
     void queueRemovalSendsOneBatch();
     void queueEditsKeepSelectionAndViewport();
     void queueRemovalsKeepActionsOnHighlightedRows();
+    void qMarksTheQueueSelectionToPlayNext();
     void queueContainIndexSkipsScrollWhenVisible();
     void queueContainIndexScrollsUpWhenAboveViewport();
     void queueContainIndexClampsAtListEnd();
@@ -1269,6 +1270,100 @@ void LibraryQueueSmokeTest::queueEditsKeepSelectionAndViewport() {
     rows.setRows(initial);
     QCOMPARE(resets.count(), 1);
     QCOMPARE(selection(), (QList<int>{50}));
+}
+
+// Q alone, the queue's list key for Play Next, marks the highlighted rows
+// to play next, or, with none highlighted, the ringed row; with a
+// modifier it is no key of the queue's, so the window's shortcuts keep it.
+void LibraryQueueSmokeTest::qMarksTheQueueSelectionToPlayNext() {
+    QQmlApplicationEngine engine;
+    QString errorText;
+    QScopedPointer<QObject> root(createHarness(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+Item {
+    id: harness
+    property var commands: []
+    property alias controller: controller
+    property bool lastAccepted: false
+    QtObject {
+        id: bridge
+        property int queueLength: 5
+        property int selectedQueueIndex: -1
+        property int playingQueueIndex: -1
+        property string playbackState: "Stopped"
+        property string currentTrackPath: ""
+        function selectQueueIndex(index) { selectedQueueIndex = index }
+        function playAt(index) {}
+        function togglePlayNext(rows) {
+            harness.commands = harness.commands.concat(["play next " + rows.join(",")])
+        }
+        function allPlayNext(rows) { return false }
+    }
+    Controllers.QueueController {
+        id: controller
+        uiBridge: bridge
+        tagEditorApi: null
+        openTagEditorDialog: function() {}
+        autoCenterSelection: false
+    }
+    function press(key, modifiers) {
+        const event = { key: key, modifiers: modifiers, accepted: false }
+        controller.handlePlaylistKeyPress(event)
+        lastAccepted = event.accepted
+        return controller.isPlayNextKey({ key: key, modifiers: modifiers })
+    }
+    function takeCommands() {
+        const taken = harness.commands.join("; ")
+        harness.commands = []
+        return taken
+    }
+}
+)QML"), &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    QObject *controller = root->property("controller").value<QObject *>();
+    QVERIFY(controller != nullptr);
+    const auto press = [&root](Qt::Key key, Qt::KeyboardModifiers modifiers) {
+        QVariant claimed;
+        QVERIFY(QMetaObject::invokeMethod(root.data(), "press", Q_RETURN_ARG(QVariant, claimed),
+                                          Q_ARG(QVariant, int(key)), Q_ARG(QVariant, modifiers.toInt())));
+        // The shortcut override claims the key exactly when the key acts.
+        QCOMPARE(claimed.toBool(), root->property("lastAccepted").toBool());
+    };
+    const auto takeCommands = [&root]() {
+        QVariant taken;
+        QMetaObject::invokeMethod(root.data(), "takeCommands", Q_RETURN_ARG(QVariant, taken));
+        return taken.toString();
+    };
+
+    // The highlighted rows, as the user highlighted them; the bridge sends
+    // them in the queue's order.
+    QVERIFY(QMetaObject::invokeMethod(controller, "setSelectedIndices",
+                                      Q_ARG(QVariant, QVariant(QVariantList{3, 1}))));
+    press(Qt::Key_Q, Qt::NoModifier);
+    QVERIFY(root->property("lastAccepted").toBool());
+    QCOMPARE(takeCommands(), QStringLiteral("play next 3,1"));
+
+    // With a modifier, the key is not the queue's.
+    for (const Qt::KeyboardModifiers modifiers :
+         {Qt::KeyboardModifiers(Qt::ShiftModifier), Qt::KeyboardModifiers(Qt::ControlModifier),
+          Qt::KeyboardModifiers(Qt::AltModifier), Qt::KeyboardModifiers(Qt::MetaModifier)}) {
+        press(Qt::Key_Q, modifiers);
+        QVERIFY(!root->property("lastAccepted").toBool());
+    }
+    QCOMPARE(takeCommands(), QString());
+
+    // Nothing highlighted: the ringed row.
+    QVERIFY(QMetaObject::invokeMethod(controller, "setSelectedIndices",
+                                      Q_ARG(QVariant, QVariant(QVariantList{}))));
+    controller->setProperty("focusRowIndex", 2);
+    press(Qt::Key_Q, Qt::NoModifier);
+    QCOMPARE(takeCommands(), QStringLiteral("play next 2"));
+    // And no row at all: the key does nothing, but is still the queue's.
+    controller->setProperty("focusRowIndex", -1);
+    press(Qt::Key_Q, Qt::NoModifier);
+    QVERIFY(root->property("lastAccepted").toBool());
+    QCOMPARE(takeCommands(), QString());
 }
 
 void LibraryQueueSmokeTest::queueRemovalsKeepActionsOnHighlightedRows() {

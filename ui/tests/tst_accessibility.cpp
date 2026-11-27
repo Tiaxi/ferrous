@@ -589,6 +589,20 @@ void AccessibilityTest::checkLibraryAndQueueRowsHaveAccessibleNames(MainWindowFi
     QTRY_COMPARE((queueRows = visibleRows(queue, QStringLiteral("queueRow"))).size(), 1);
     QCOMPARE(accessibleText(queueRows[0], QAccessible::Name),
              QStringLiteral("1., Role Title, Role Artist, Role Album, 2:00"));
+    // A row marked to play next tells its place among the marked rows, and
+    // shows it where the row has no state glyph.
+    auto *place = queueRows[0]->findChild<QQuickItem *>(QStringLiteral("queueRowPlayNext"));
+    QVERIFY(place != nullptr);
+    QVERIFY(!place->isVisible());
+    model.setPlayNext({0});
+    QTRY_COMPARE(accessibleText(queueRows[0], QAccessible::Name),
+                 QStringLiteral("1., Role Title, Role Artist, Role Album, 2:00, plays next, number 1"));
+    QVERIFY(place->isVisible());
+    QCOMPARE(place->property("text").toString(), QStringLiteral("1"));
+    model.setPlayNext({});
+    QTRY_COMPARE(accessibleText(queueRows[0], QAccessible::Name),
+                 QStringLiteral("1., Role Title, Role Artist, Role Album, 2:00"));
+    QVERIFY(!place->isVisible());
 
     libraryModel.setExpandedKeys(
         QStringList{QStringLiteral("artist|Artist A"), QStringLiteral("album|Artist A|Album A")});

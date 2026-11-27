@@ -184,6 +184,8 @@ pub(super) fn playback_snapshot_urgency(
         // The status bar shows the gain, also while paused, when nothing
         // else changes.
         || previous.replay_gain != next.replay_gain
+        // The queue numbers the rows marked to play next.
+        || previous.play_next != next.play_next
     {
         return SnapshotUrgency::Immediate;
     }
@@ -416,12 +418,25 @@ fn count_play_of_stopped_track(previous: PlaybackState, state: &mut BridgeState)
     }
 }
 
+/// Take the rows marked to play next that `snapshot` reports. A snapshot
+/// made before the engine applied every edit sent to it has marks for rows
+/// that may have moved since; the bridge's own carry them along until the
+/// engine reports them again.
+fn take_engine_marks(snapshot: &PlaybackSnapshot, state: &mut BridgeState) {
+    if snapshot.queue_commands >= state.engine_queue_commands_sent {
+        state
+            .queue_sync
+            .set_play_next(Arc::clone(&snapshot.play_next));
+    }
+}
+
 fn process_playback_snapshot_event(
     snapshot: PlaybackSnapshot,
     analysis: &AnalysisEngine,
     state: &mut BridgeState,
 ) -> SnapshotUrgency {
     let next_state = snapshot.state;
+    take_engine_marks(&snapshot, state);
     let previous_playback = state.playback.clone();
     let mut urgency = SnapshotUrgency::None;
     if state.playback != snapshot {

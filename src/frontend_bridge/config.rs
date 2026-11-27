@@ -31,6 +31,9 @@ pub(super) struct SessionSnapshot {
     pub(super) library_view_anchor_offset: f32,
     pub(super) repeat_mode: RepeatMode,
     pub(super) shuffle_enabled: bool,
+    /// The rows of `queue` marked to play next, in the order they play.
+    /// They name rows, not paths, since the queue can hold a file twice.
+    pub(super) play_next: Vec<usize>,
     /// Where the current track was paused or playing.
     pub(super) position: Option<SavedPosition>,
     /// Keys this build does not know, saved as they were.
@@ -65,6 +68,7 @@ const SESSION_KEYS: &[&str] = &[
     "library_view_anchor_offset",
     "repeat_mode",
     "shuffle",
+    "play_next",
     "playback_position",
 ];
 
@@ -103,6 +107,7 @@ pub(super) fn session_snapshot_for_state(state: &BridgeState) -> SessionSnapshot
         library_view_anchor_offset: state.library_view_anchor_offset,
         repeat_mode: state.playback.repeat_mode,
         shuffle_enabled: state.playback.shuffle_enabled,
+        play_next: state.queue_sync.play_next().to_vec(),
         position: current_path.as_ref().and_then(|_| saved_position(state)),
         unknown_keys: state.session_unknown_keys.clone(),
         current_path,
@@ -157,6 +162,7 @@ pub(super) fn session_save_due(
         library_view_anchor_offset,
         repeat_mode,
         shuffle_enabled,
+        play_next,
         position: _,
         unknown_keys,
     } = next;
@@ -170,6 +176,7 @@ pub(super) fn session_save_due(
         || saved.library_view_anchor_offset.to_bits() != library_view_anchor_offset.to_bits()
         || saved.repeat_mode != *repeat_mode
         || saved.shuffle_enabled != *shuffle_enabled
+        || saved.play_next != *play_next
         || saved.unknown_keys != *unknown_keys
 }
 
@@ -242,6 +249,14 @@ pub(super) fn apply_session_restore(
         }
     } else {
         state.playback.current_queue_index = None;
+    }
+    // After the current row, which the engine would unmark as it goes to
+    // it: a marked current row plays again next.
+    let play_next =
+        crate::playback::play_next::sanitized(session.play_next.iter().copied(), state.queue.len());
+    if !play_next.is_empty() {
+        state.queue_sync.set_play_next(play_next.clone().into());
+        playback.command(PlaybackCommand::SetPlayNext(play_next));
     }
 }
 
@@ -336,6 +351,16 @@ pub(super) fn parse_session_text(text: &str) -> Option<SessionSnapshot> {
             .get("shuffle")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or_default(),
+        play_next: value
+            .get("play_next")
+            .and_then(serde_json::Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(serde_json::Value::as_u64)
+                    .filter_map(|row| usize::try_from(row).ok())
+                    .collect()
+            })
+            .unwrap_or_default(),
         position: value
             .get("playback_position")
             .and_then(parse_saved_position),
@@ -418,6 +443,9 @@ pub(super) fn format_session_text(session: &SessionSnapshot) -> String {
         "repeat_mode": repeat_mode_value(session.repeat_mode),
         "shuffle": session.shuffle_enabled,
     });
+    if !session.play_next.is_empty() {
+        payload["play_next"] = json!(&session.play_next);
+    }
     if let Some(saved) = session.position {
         payload["playback_position"] = json!({
             "ms": u64::try_from(saved.position.as_millis()).unwrap_or(u64::MAX),
@@ -1419,6 +1447,7 @@ mod tests {
             library_view_anchor_offset: 7.5,
             repeat_mode: RepeatMode::One,
             shuffle_enabled: true,
+            play_next: vec![1, 0],
             position: Some(SavedPosition {
                 position: Duration::from_millis(83_250),
                 duration: Some(Duration::from_millis(241_000)),
@@ -1780,6 +1809,69 @@ mod tests {
                 PlaybackCommand::SetShuffle(false)
             ]
         ));
+    }
+
+    #[test]
+    fn the_rows_marked_to_play_next_are_saved_and_marked_again_after_the_current_row() {
+        // The queue holds a file twice; the marks name rows, so only the
+        // row that was marked comes back marked.
+        let queue = vec![p("/a.flac"), p("/b.flac"), p("/a.flac")];
+        let mut state = BridgeState::default();
+        state.queue.clone_from(&queue);
+        state.queue_sync.set_play_next(vec![2, 1].into());
+        let saved = session_snapshot_for_state(&state);
+        assert_eq!(saved.play_next, vec![2, 1]);
+        let text = format_session_text(&saved);
+        assert!(text.contains("\"play_next\""), "{text}");
+        let parsed = parse_session_text(&text).expect("parse session text");
+        assert_eq!(parsed.play_next, vec![2, 1]);
+        // A change of the marks alone is saved.
+        let unmarked = SessionSnapshot {
+            play_next: Vec::new(),
+            ..saved.clone()
+        };
+        assert!(session_save_due(
+            Some(&unmarked),
+            &saved,
+            false,
+            Duration::ZERO
+        ));
+        // Without marks, the session has no such key, and reads as none.
+        assert!(!format_session_text(&unmarked).contains("play_next"));
+
+        // The current row is set before the marks, which may include it, and
+        // rows past the queue are left out.
+        let session = SessionSnapshot {
+            queue,
+            current_queue_index: Some(1),
+            current_path: Some(p("/b.flac")),
+            play_next: vec![1, 7, 2, 1],
+            ..SessionSnapshot::default()
+        };
+        let (state, commands) = restore_commands(&session);
+        let summary: Vec<String> = commands.iter().map(|c| format!("{c:?}")).collect();
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [
+                    PlaybackCommand::SetRepeatMode(_),
+                    PlaybackCommand::SetShuffle(_),
+                    PlaybackCommand::LoadQueue(_),
+                    PlaybackCommand::PlayAt(1),
+                    PlaybackCommand::SetPlayNext(rows),
+                ] if *rows == vec![1, 2]
+            ),
+            "{summary:?}"
+        );
+        assert_eq!(*state.queue_sync.play_next(), [1, 2]);
+        // None saved: no command.
+        let (_, commands) = restore_commands(&SessionSnapshot {
+            play_next: vec![9],
+            ..session
+        });
+        assert!(!commands
+            .iter()
+            .any(|command| matches!(command, PlaybackCommand::SetPlayNext(_))));
     }
 
     #[test]

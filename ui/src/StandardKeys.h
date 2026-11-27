@@ -52,8 +52,9 @@ public:
     // Backspace; "focus" for Tab and Shift+Tab; "cancel" for Escape;
     // "navigate" for the arrow, Page, Home and End keys alone;
     // "contextMenu" for Menu and Shift+F10; "menuBar" for Ctrl+M, which
-    // shows KDE's menu bar. Empty for a key an action may take, and for a
-    // sequence of more than one key.
+    // shows KDE's menu bar; "playNext" for Q alone, which marks the
+    // queue's selection to play next. Empty for a key an action may take,
+    // and for a sequence of more than one key.
     Q_INVOKABLE static QString keptKeyRole(const QVariant &sequence);
 
     // Whether `sequence` is one key that types a character, with Shift or

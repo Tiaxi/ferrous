@@ -54,6 +54,10 @@ enum SnapshotSection : quint16 {
     // out as CmdSetWindowLayout's payload, then the queue's column widths
     // as CmdSetQueueColumnWidths lays them out.
     SectionWindowLayout = 1u << 11,
+    // The queue rows marked to play next: the u64 queue revision the rows
+    // belong to, then a u32 count of u32 rows, in the order they play. It
+    // comes when the marks change, and with every queue section.
+    SectionPlayNext = 1u << 12,
 };
 
 // What part of Ferrous an error concerns. Mirrors ErrorCategory in
@@ -209,6 +213,12 @@ enum CommandId : quint16 {
     // Whether the status bar shows the gain ReplayGain applies (u8), rather
     // than only the tooltip of the track's format.
     CmdSetShowReplayGainInStatusBar = 82,
+    // Mark queue rows to play next, or unmark them when every one is
+    // marked: the u64 queue revision and a u32 count of u32 rows; see
+    // encodeCommandTogglePlayNext.
+    CmdTogglePlayNext = 83,
+    // Unmark every queue row marked to play next. No payload.
+    CmdClearPlayNext = 84,
 };
 
 // How ReplayGain levels playback. Mirrors ReplayGainMode in
@@ -669,6 +679,14 @@ struct WindowLayout {
     bool followCurrentTrack{true};
 };
 
+struct DecodedPlayNext {
+    bool present{false};
+    // The queue revision the rows belong to.
+    quint64 revision{0};
+    // The rows marked to play next, in the order they play.
+    QVector<int> rows;
+};
+
 struct DecodedSnapshot {
     quint16 sectionMask{0};
     bool hasStopped{false};
@@ -701,6 +719,7 @@ struct DecodedSnapshot {
     DecodedSettings settings;
     DecodedLastFm lastfm;
     DecodedQueueUndo queueUndo;
+    DecodedPlayNext playNext;
 };
 
 enum SearchRowType : quint8 {
@@ -786,6 +805,7 @@ QByteArray encodeCommandQueueRow(quint16 cmdId, quint64 revision, quint32 index)
 QByteArray encodeCommandSelectQueue(quint64 revision, quint64 serial, qint32 index);
 QByteArray encodeCommandMoveQueue(quint64 revision, quint32 from, quint32 to);
 QByteArray encodeCommandRemoveMany(quint64 revision, const QList<quint32> &indices);
+QByteArray encodeCommandTogglePlayNext(quint64 revision, const QList<quint32> &rows);
 // CmdMoveQueueRows: the u64 revision, a u8 QueueRowsMove, the u32 row a
 // move before goes before, and a u32 count of u32 rows.
 QByteArray encodeCommandMoveQueueRows(

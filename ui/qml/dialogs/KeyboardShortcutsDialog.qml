@@ -163,6 +163,9 @@ Components.DialogWindow {
         case "queue":
             return I18n.i18nc("@info %1 is a key",
                 "“%1” can’t be a shortcut: it adds the selection to the queue in the library and in search.", name)
+        case "playNext":
+            return I18n.i18nc("@info %1 is a key",
+                "“%1” can’t be a shortcut: it marks the selected tracks in the queue to play next.", name)
         case "delete":
             return I18n.i18nc("@info %1 is a key",
                 "“%1” can’t be a shortcut: it removes the selected tracks from the queue, and deletes text in text fields.", name)
