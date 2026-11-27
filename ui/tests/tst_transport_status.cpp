@@ -641,6 +641,8 @@ private slots:
     void statusItemsShareOneToolTipLineAndTheScanIsOneUnit();
     void statusBarHasNoDividers();
     void transportAndStatusBarGrowWithALargeFont();
+    void statusBarPaddingGrowsWithTheFont_data();
+    void statusBarPaddingGrowsWithTheFont();
 };
 
 void TransportStatusTest::initTestCase() {
@@ -6071,7 +6073,8 @@ void TransportStatusTest::statusBarHasNoDividers() {
 }
 // At 24 pt, nothing in the transport or the status bar clips or overlaps:
 // the glyphs and buttons grow with the font, the band with them, and the
-// status bar is as tall as its text and 4 px above and below it.
+// status bar is as tall as its text and the room above and below it, which
+// grows with the font too (statusBarPaddingGrowsWithTheFont).
 void TransportStatusTest::transportAndStatusBarGrowWithALargeFont() {
     const ScopedApplicationFont font(24);
     Harness harness;
@@ -6185,6 +6188,46 @@ void TransportStatusTest::transportAndStatusBarGrowWithALargeFont() {
 }
 
 
+
+void TransportStatusTest::statusBarPaddingGrowsWithTheFont_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("breeze dark, 10 pt") << true << 10.0;
+    QTest::newRow("breeze light, 10 pt") << false << 10.0;
+    QTest::newRow("breeze dark, 24 pt") << true << 24.0;
+    QTest::newRow("breeze light, 24 pt") << false << 24.0;
+}
+
+// The status bar's room above and below its line of text grows with the
+// font, as its glyphs do: 4 px each at 10 pt, where the bar stays 24 px,
+// and 2.4 times that at 24 pt. A fixed 8 px left the descenders of a 24 pt
+// line 2 or 3 px from the window's bottom edge.
+void TransportStatusTest::statusBarPaddingGrowsWithTheFont() {
+    QFETCH(bool, dark);
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    Harness harness;
+    QVERIFY2(harness.load(breeze(dark)), qPrintable(harness.error));
+    QTRY_COMPARE(harness.tokens->property("basePointSize").toReal(), pointSize);
+    QQuickItem *status = harness.item(QStringLiteral("statusBar"));
+    QQuickItem *label = harness.item(QStringLiteral("statusBarPlaybackStateLabel"));
+    QVERIFY(status && label);
+    QTRY_VERIFY(label->isVisible());
+    // Under its 1 px seam.
+    const QRectF bar = sceneRect(status).adjusted(0, 1, 0, 0);
+    const QRectF line = sceneRect(label);
+    const qreal padding = std::max(4.0, std::round(4.0 * pointSize / 10.0));
+    const QString where = describeRect(line) + QStringLiteral(" in ") + describeRect(bar);
+    if (pointSize == 10.0) {
+        QCOMPARE(bar.height(), 24.0);
+    } else {
+        // The small text's line, as its font's metrics give it.
+        const qreal lineHeight = std::round(QFontMetricsF(label->property("font").value<QFont>()).height());
+        QCOMPARE(bar.height(), lineHeight + std::round(8.0 * pointSize / 10.0));
+    }
+    QVERIFY2(line.top() - bar.top() >= padding - 1.0, qPrintable(where));
+    QVERIFY2(bar.bottom() - line.bottom() >= padding - 1.0, qPrintable(where));
+}
 
 void TransportStatusTest::statusItemsShareOneToolTipLineAndTheScanIsOneUnit_data() {
     QTest::addColumn<qreal>("pointSize");

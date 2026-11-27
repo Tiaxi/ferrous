@@ -28,6 +28,9 @@ BuildRequires:  kf6-kirigami-devel
 # style, with icons recoloured as Breeze's are.
 BuildRequires:  kf6-qqc2-desktop-style
 BuildRequires:  breeze-icon-theme
+# Noto Sans, Plasma's font: the UI tests that pin the main window's heights
+# at 10 and 24 pt measure its lines.
+BuildRequires:  google-noto-sans-vf-fonts
 # KDE's key capture control for Configure Keyboard Shortcuts, which the UI
 # tests load with the main window.
 BuildRequires:  kf6-kdeclarative
