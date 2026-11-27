@@ -1220,6 +1220,8 @@ private slots:
     void transportRowSitsBalancedInItsBand_data();
     void transportRowSitsBalancedInItsBand();
     void contentIsOneSheetWithFourSeams();
+    void chromeKeepsItsHeightsAtTheDefaultAndALargeFont_data();
+    void chromeKeepsItsHeightsAtTheDefaultAndALargeFont();
     void sidebarWidthFollowsTheWindowAndTheFont_data();
     void sidebarWidthFollowsTheWindowAndTheFont();
     void nothingPlayingIsACompactRow_data();
@@ -1417,6 +1419,127 @@ void UiMainWindowTest::contentIsOneSheetWithFourSeams() {
     const QRectF columnRect = sceneRect(columnSeam);
     QVERIFY(columnSeam->contains(columnSeam->mapFromScene(QPointF(columnRect.left() - 2, 300))));
     QVERIFY(columnSeam->contains(columnSeam->mapFromScene(QPointF(columnRect.left() + 3, 300))));
+}
+
+void UiMainWindowTest::chromeKeepsItsHeightsAtTheDefaultAndALargeFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("windowWidth");
+    QTest::addColumn<int>("windowHeight");
+    QTest::addColumn<bool>("dark");
+    QTest::addColumn<qreal>("menuHeight");
+    QTest::addColumn<qreal>("bandHeight");
+    QTest::addColumn<qreal>("statusHeight");
+    QTest::addColumn<qreal>("headerHeight");
+    QTest::addColumn<bool>("artistShown");
+    QTest::addColumn<bool>("albumShown");
+    // The default window and the narrow one at 10 pt, as they have been,
+    // and at 24 pt, where 1000 by 720 is the least window. The status bar
+    // is its 1 px seam and the bar under it: 24 px at 10 pt, and at 24 pt
+    // the small text's line and the room around it grown with the font,
+    // 58 px (with a fixed 8 px it was 47 px).
+    QTest::newRow("10 pt, 1600 by 1000, dark") << 10.0 << 1600 << 1000 << true << 26.0 << 48.0 << 25.0 << 26.0
+                                               << true << true;
+    QTest::newRow("10 pt, 1000 by 720, light") << 10.0 << 1000 << 720 << false << 26.0 << 48.0 << 25.0 << 26.0
+                                               << true << false;
+    QTest::newRow("24 pt, 1600 by 1000, light") << 24.0 << 1600 << 1000 << false << 52.0 << 76.0 << 59.0 << 52.0
+                                                << true << true;
+    QTest::newRow("24 pt, 1000 by 720, dark") << 24.0 << 1000 << 720 << true << 52.0 << 76.0 << 59.0 << 52.0
+                                              << false << false;
+}
+
+// The main window's chrome, top to bottom: the menu bar, the transport's
+// band, its seam, the panes (the library's and the queue's headers in
+// them) and the status bar, which ends at the window's bottom edge. At
+// 10 pt each keeps the height it had; at 24 pt each grows with the font,
+// and the status bar's line of text keeps room under its descenders as it
+// does at 10 pt (a fixed 8 px around the line left 5 px under "Playing"
+// at 24 pt, as at 10 pt's 4 px). The narrow queue keeps one line per row
+// and, at 24 pt, drops Artist with Album.
+void UiMainWindowTest::chromeKeepsItsHeightsAtTheDefaultAndALargeFont() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, windowWidth);
+    QFETCH(int, windowHeight);
+    QFETCH(bool, dark);
+    QFETCH(qreal, menuHeight);
+    QFETCH(qreal, bandHeight);
+    QFETCH(qreal, statusHeight);
+    QFETCH(qreal, headerHeight);
+    QFETCH(bool, artistShown);
+    QFETCH(bool, albumShown);
+    const auto restorePalette = useDarkPalette(dark);
+    std::optional<BreezeDarkScheme> breezeDark;
+    if (dark) {
+        breezeDark.emplace();
+        QVERIFY(breezeDark->isSet());
+    }
+    const ScopedApplicationFont font(pointSize);
+    MainWindowFixture fixture(sized(windowWidth, windowHeight));
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QTRY_COMPARE(paletteOf(window)->property("basePointSize").toReal(), pointSize);
+    QCOMPARE(window->size(), QSize(windowWidth, windowHeight));
+    QObject *bridge = bridgeOf(window);
+    QVERIFY(bridge != nullptr);
+    // Connected and playing, so the status bar shows the state's words.
+    bridge->setProperty("connected", true);
+    playTrack(bridge);
+    QQuickItem *menuBar = named(window, "mainMenuBar");
+    QQuickItem *transport = named(window, "transportBar");
+    QQuickItem *seam = named(window, "transportSeam");
+    QQuickItem *mainSplit = named(window, "mainSplit");
+    QQuickItem *status = named(window, "statusBar");
+    QQuickItem *label = named(window, "statusBarPlaybackStateLabel");
+    QQuickItem *queueHeader = named(window, "queueHeader");
+    QQuickItem *libraryHeader = named(window, "libraryHeader");
+    QQuickItem *artist = named(window, "queueHeader_artist");
+    QQuickItem *album = named(window, "queueHeader_album");
+    QVERIFY(menuBar && transport && seam && mainSplit && status && label && queueHeader && libraryHeader && artist
+            && album);
+    QTRY_VERIFY(label->isVisible());
+    QCOMPARE(label->property("text").toString(), QStringLiteral("Playing"));
+
+    // Top to bottom, with nothing between them.
+    const QRectF menu = sceneRect(menuBar);
+    const QRectF band = sceneRect(transport);
+    const QRectF statusRect = sceneRect(status);
+    QCOMPARE(menu.top(), 0.0);
+    QCOMPARE(menu.height(), menuHeight);
+    QCOMPARE(band.top(), menu.bottom());
+    QCOMPARE(band.height(), bandHeight);
+    QCOMPARE(sceneRect(seam).top(), band.bottom());
+    QCOMPARE(sceneRect(mainSplit).top(), sceneRect(seam).bottom());
+    QCOMPARE(statusRect.height(), statusHeight);
+    QCOMPARE(statusRect.bottom(), qreal(windowHeight));
+    QCOMPARE(sceneRect(mainSplit).bottom(), statusRect.top());
+    QCOMPARE(sceneRect(libraryHeader).height(), headerHeight);
+    QCOMPARE(sceneRect(queueHeader).height(), headerHeight);
+    // The queue's rows, one line each, and the columns its header shows.
+    QCOMPARE(paletteOf(window)->property("rowHeight").toReal(), headerHeight);
+    QCOMPARE(artist->isVisible(), artistShown);
+    QCOMPARE(album->isVisible(), albumShown);
+
+    // As drawn: the lowest ink of "Playing", its descenders, read against
+    // the bar's chrome left of it, and the room under it to the window's
+    // bottom edge, 4 px at 10 pt and grown with the font.
+    const Drawn drawn(window);
+    const QColor chrome = drawn.at(statusRect.left() + 2, statusRect.bottom() - 1);
+    const QRectF line = sceneRect(label);
+    std::optional<qreal> inkBottom;
+    for (qreal y = std::floor(statusRect.top()) + 1; y < statusRect.bottom(); ++y) {
+        for (qreal x = std::floor(line.left()); x < line.right(); ++x) {
+            if (channelDistance(drawn.at(x + 0.5, y + 0.5), chrome) > 60) {
+                inkBottom = y + 1;
+                break;
+            }
+        }
+    }
+    QVERIFY(inkBottom);
+    const qreal room = windowHeight - *inkBottom;
+    const qreal wanted = std::max(4.0, std::round(4.0 * pointSize / 10.0)) - 1.0;
+    QVERIFY2(room >= wanted, qPrintable(QStringLiteral("%1 px under the descenders, %2 wanted; the line %3 in %4")
+                                            .arg(room)
+                                            .arg(wanted)
+                                            .arg(describeRect(line), describeRect(statusRect))));
 }
 
 void UiMainWindowTest::seekTimeStaysOverItsLine_data() {
