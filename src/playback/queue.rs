@@ -81,9 +81,21 @@ impl Cursor {
         }
     }
 
-    /// Restart navigation after the queue order changed.
+    /// Carry the jumps to marked rows to where `map` puts their rows,
+    /// leaving out those it drops a row of.
+    fn remap_jumps(&mut self, map: impl Fn(usize) -> Option<usize>) {
+        self.jumps = self
+            .jumps
+            .iter()
+            .filter_map(|(from, to)| Some((map(*from)?, map(*to)?)))
+            .collect();
+    }
+
+    /// Restart navigation after the queue order changed. The jumps to
+    /// marked rows stay, for the caller to carry with their rows.
     fn reset_navigation(&mut self, len: usize) {
-        self.clear_shuffle_navigation();
+        self.shuffle_history.clear();
+        self.shuffle_forward.clear();
         self.rebuild_shuffle_pool(len);
     }
 
@@ -555,6 +567,7 @@ impl GaplessQueue {
         self.cursor.index = 0;
         self.cursor.pick = TrackPick::Other;
         self.cursor.play_next = Arc::default();
+        self.cursor.jumps.clear();
         self.cursor.reset_navigation(self.queue.len());
         cancelled
     }
@@ -594,7 +607,10 @@ impl GaplessQueue {
             pending.cursor.index = row;
         }
         let len = self.queue.len();
-        self.for_each_cursor(|cursor| cursor.reset_navigation(len));
+        self.for_each_cursor(|cursor| {
+            cursor.jumps.clear();
+            cursor.reset_navigation(len);
+        });
         self.revalidate_pending()
     }
 
@@ -633,6 +649,7 @@ impl GaplessQueue {
         // The user's pick, also with shuffle on.
         self.cursor.pick = TrackPick::Other;
         self.cursor.unmark_current();
+        self.cursor.jumps.clear();
         self.cursor.reset_navigation(self.queue.len());
         Some(ManualMove {
             path,
@@ -663,6 +680,12 @@ impl GaplessQueue {
         }
         self.for_each_cursor(|cursor| {
             cursor.remap_play_next(|list| play_next::after_removal(list, &removed));
+            cursor.remap_jumps(|row| {
+                removed
+                    .binary_search(&row)
+                    .is_err()
+                    .then(|| row - removed.partition_point(|removed| *removed < row))
+            });
         });
         self.cursor.index =
             super::remove_queue_indices(&mut self.queue, Some(self.cursor.index), &removed)
@@ -702,6 +725,7 @@ impl GaplessQueue {
         self.for_each_cursor(|cursor| {
             cursor.index = remap(cursor.index);
             cursor.remap_play_next(|list| list.iter().map(|row| remap(*row)).collect());
+            cursor.remap_jumps(|row| Some(remap(row)));
             cursor.reset_navigation(len);
         });
         self.revalidate_pending()
@@ -724,6 +748,7 @@ impl GaplessQueue {
                 cursor.index = *position;
             }
             cursor.remap_play_next(|list| play_next::after_reorder(list, &positions));
+            cursor.remap_jumps(|row| positions.get(row).copied());
             cursor.reset_navigation(len);
         });
         self.revalidate_pending()
@@ -745,6 +770,7 @@ impl GaplessQueue {
                 cursor.index += count;
             }
             cursor.remap_play_next(|list| play_next::after_insert(list, at, count));
+            cursor.remap_jumps(|row| Some(if row >= at { row + count } else { row }));
             cursor.reset_navigation(len);
         });
         self.revalidate_pending()
@@ -1989,6 +2015,44 @@ mod tests {
         assert_eq!(
             queue.previous_manual().map(|previous| previous.index),
             Some(0)
+        );
+    }
+
+    #[test]
+    fn previous_goes_back_from_a_marked_row_across_edits_that_keep_both_rows() {
+        // Row 0 plays, then marked row 2; removing row 3 keeps both.
+        let (mut queue, _) = queue_of(4);
+        queue.toggle_play_next(&[2]);
+        assert_eq!(queue.next_manual().map(|next| next.index), Some(2));
+        queue.remove_many(&[3]);
+        assert_eq!(
+            queue.previous_manual().map(|previous| previous.index),
+            Some(0)
+        );
+
+        // Moves and insertions carry the rows along.
+        let (mut queue, paths) = queue_of(6);
+        queue.set_current(1);
+        queue.toggle_play_next(&[4]);
+        assert_eq!(queue.next_manual().map(|next| next.index), Some(4));
+        queue.insert(0, vec![paths[5].clone()]);
+        queue.move_item(6, 0);
+        // Rows 1 and 4 are rows 3 and 6 now.
+        assert_eq!(queue.current_index(), Some(6));
+        assert_eq!(
+            queue.previous_manual().map(|previous| previous.index),
+            Some(3)
+        );
+
+        // With the row it went from gone, Previous goes back in order.
+        let (mut queue, _) = queue_of(6);
+        queue.set_current(1);
+        queue.toggle_play_next(&[4]);
+        assert_eq!(queue.next_manual().map(|next| next.index), Some(4));
+        queue.remove_many(&[1]);
+        assert_eq!(
+            queue.previous_manual().map(|previous| previous.index),
+            Some(2)
         );
     }
 
