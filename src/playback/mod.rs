@@ -219,6 +219,11 @@ pub enum PlaybackCommand {
     /// Play row `idx` from its start, whatever the playback state was: one
     /// track change, whose snapshot already plays.
     StartAt(usize),
+    /// Play row `idx` from its start, as [`Self::StartAt`] does, as a jump
+    /// to a track found in the queue: with shuffle on, the row counts as
+    /// played for the shuffle's round, which goes on, and Previous goes
+    /// back to the track that was current.
+    JumpTo(usize),
     /// Move to the next track. A burst of Next and Previous presses moves
     /// once per press and starts only the track it ends on.
     Next,

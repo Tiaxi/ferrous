@@ -150,6 +150,9 @@ public:
     // `text` cut where the query's matches start and end: a list of
     // {text, match} maps, in order, that join to `text`.
     Q_INVOKABLE QVariantList highlightSegments(const QString &text, const QString &query) const;
+    // As highlightSegments, for other lists that show what a query of the
+    // same syntax matched, such as Find in Queue's.
+    static QVariantList segmentsOf(const QString &text, const QString &query);
     void replaceRows(QVector<SearchDisplayRow> rows);
     void replaceRowsBatched(QVector<SearchDisplayRow> rows, int batchSize = 10);
     void cancelBatchedInsertion();
@@ -168,7 +171,7 @@ signals:
 private:
     void rebuildSearchRows();
     // Which characters of `text` the query matches.
-    QVector<bool> matchedCharacters(const QString &text, const QString &query) const;
+    static QVector<bool> matchedCharacters(const QString &text, const QString &query);
     QVector<SearchDisplayRow> m_sourceSearchRows;
     QVector<int> m_sourceTotals;
     bool m_canShowMore{false};

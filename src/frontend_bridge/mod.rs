@@ -45,6 +45,7 @@ mod persist;
 mod queue;
 mod queue_columns;
 mod queue_relay;
+mod queue_search;
 mod queue_sync;
 mod queue_undo;
 mod queue_validation;
@@ -83,6 +84,8 @@ pub(crate) use search::is_main_album_disc_section;
 use search::{drain_search_results, process_search_results, SearchWorkerQuery};
 pub use window_layout::{WindowGeometry, WindowLayout};
 use workers::{spawn_apply_album_art_worker, spawn_lastfm_service, spawn_search_worker};
+
+pub use queue_search::QueueSearchFrame;
 
 #[cfg(feature = "profiling-logs")]
 macro_rules! profile_eprintln {
@@ -149,6 +152,13 @@ pub enum BridgeCommand {
     /// they are on disk, or tell the user they are not. The answer carries
     /// this request ID, so the UI can tell which of its attempts it settles.
     SaveState(u32),
+    /// Find in Queue: search the queue's rows for `query`, in the query
+    /// numbered `seq`, and answer with [`BridgeEvent::QueueSearchResults`].
+    /// An empty query finds nothing.
+    QueueSearch {
+        seq: u32,
+        query: String,
+    },
     Shutdown,
 }
 
@@ -175,6 +185,9 @@ pub enum BridgeQueueCommand {
     },
     Append(Vec<PathBuf>),
     PlayAt(usize),
+    /// Play the row as a jump to a track found in the queue, within the
+    /// shuffle's round; see [`PlaybackCommand::JumpTo`].
+    JumpTo(usize),
     Remove(usize),
     RemoveMany(Vec<usize>),
     Move {
@@ -494,6 +507,8 @@ impl ViewerFullscreenMode {
 pub enum BridgeEvent {
     Snapshot(Box<BridgeSnapshot>),
     SearchResults(Box<BridgeSearchResultsFrame>),
+    /// The rows a [`BridgeCommand::QueueSearch`] found.
+    QueueSearchResults(QueueSearchFrame),
     PrecomputedSpectrogramChunk(crate::analysis::PrecomputedSpectrogramChunk),
     Error(BridgeError),
     Stopped,
@@ -1385,6 +1400,9 @@ struct BridgeLoopRuntime {
     library_rx: Receiver<LibraryEvent>,
     search_query_tx: Sender<SearchWorkerQuery>,
     search_results_rx: Receiver<BridgeSearchResultsFrame>,
+    queue_search_tx: Sender<queue_search::QueueSearchJob>,
+    queue_search_results_rx: Receiver<QueueSearchFrame>,
+    queue_search: queue_search::QueueSearchRequests,
     apply_album_art_tx: Sender<ApplyAlbumArtRequest>,
     apply_album_art_rx: Receiver<ApplyAlbumArtEvent>,
     lastfm: LastFmHandle,
@@ -1491,6 +1509,7 @@ enum BridgeLoopWake {
     Metadata(MetadataEvent),
     Library(LibraryEvent),
     SearchResults(BridgeSearchResultsFrame),
+    QueueSearchResults(QueueSearchFrame),
     ApplyAlbumArt(ApplyAlbumArtEvent),
     LastFm(LastFmEvent),
     Persisted(persist::PersistOutcome),
@@ -1610,7 +1629,7 @@ impl BridgeLoopRuntime {
         };
         #[cfg(not(test))]
         let (library, library_rx) = LibraryService::new();
-        let (search_query_tx, search_results_rx) = spawn_search_worker();
+        let search = spawn_search_worker();
         let (apply_album_art_tx, apply_album_art_event_rx) = spawn_apply_album_art_worker();
 
         let (state, lastfm, lastfm_rx) =
@@ -1643,8 +1662,11 @@ impl BridgeLoopRuntime {
             metadata_rx,
             library,
             library_rx,
-            search_query_tx,
-            search_results_rx,
+            search_query_tx: search.query_tx,
+            search_results_rx: search.results_rx,
+            queue_search_tx: search.queue_tx,
+            queue_search_results_rx: search.queue_results_rx,
+            queue_search: queue_search::QueueSearchRequests::default(),
             apply_album_art_tx,
             apply_album_art_rx: apply_album_art_event_rx,
             lastfm,
@@ -1749,6 +1771,7 @@ impl BridgeLoopRuntime {
             recv(&self.metadata_rx) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::Metadata), BridgeLoopWake::Metadata),
             recv(&self.library_rx) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::Library), BridgeLoopWake::Library),
             recv(&self.search_results_rx) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::Search), BridgeLoopWake::SearchResults),
+            recv(&self.queue_search_results_rx) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::Search), BridgeLoopWake::QueueSearchResults),
             recv(&self.apply_album_art_rx) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::ApplyAlbumArt), BridgeLoopWake::ApplyAlbumArt),
             recv(&self.lastfm_rx) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::LastFm), BridgeLoopWake::LastFm),
             recv(&self.persist.results) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::Persist), BridgeLoopWake::Persisted),
@@ -1875,6 +1898,12 @@ impl BridgeLoopRuntime {
             BridgeLoopWake::Metadata(event) => self.handle_metadata_event(event),
             BridgeLoopWake::Library(event) => self.handle_library_events(Some(event)),
             BridgeLoopWake::SearchResults(frame) => self.handle_search_results(frame),
+            BridgeLoopWake::QueueSearchResults(frame) => {
+                // The rows name the revision they were found in; the UI
+                // takes them only for that revision.
+                let _ = try_send_event(event_tx, BridgeEvent::QueueSearchResults(frame));
+                SnapshotUrgency::None
+            }
             BridgeLoopWake::ApplyAlbumArt(event) => {
                 self.handle_apply_album_art_event(&event, event_tx)
             }
@@ -2091,10 +2120,19 @@ impl BridgeLoopRuntime {
                 self.edit_refreshes.restart();
             }
             Worker::EditRefresh => self.edit_refreshes.results = never(),
+            // A query of either search that was running is lost; the UI
+            // asks again when it types or the queue changes.
             Worker::Search if restart => {
-                (self.search_query_tx, self.search_results_rx) = spawn_search_worker();
+                let search = spawn_search_worker();
+                self.search_query_tx = search.query_tx;
+                self.search_results_rx = search.results_rx;
+                self.queue_search_tx = search.queue_tx;
+                self.queue_search_results_rx = search.queue_results_rx;
             }
-            Worker::Search => self.search_results_rx = never(),
+            Worker::Search => {
+                self.search_results_rx = never();
+                self.queue_search_results_rx = never();
+            }
             Worker::ApplyAlbumArt if restart => {
                 (self.apply_album_art_tx, self.apply_album_art_rx) = spawn_apply_album_art_worker();
             }
@@ -2142,6 +2180,27 @@ impl BridgeLoopRuntime {
             )
         };
         send_error(event_tx, BridgeError::error(worker.category(), message));
+    }
+
+    /// Search the queue for `query`; see [`BridgeCommand::QueueSearch`].
+    /// An empty query, which the palette sends as it closes, finds nothing
+    /// and lets the copy of the queue go.
+    fn search_queue(&mut self, seq: u32, query: &str, event_tx: &Sender<BridgeEvent>) {
+        let job = self.queue_search.job(&self.state, seq, query);
+        if job.query.is_empty() {
+            self.queue_search.release();
+            let _ = try_send_event(
+                event_tx,
+                BridgeEvent::QueueSearchResults(QueueSearchFrame {
+                    seq,
+                    revision: job.revision,
+                    rows: Vec::new(),
+                }),
+            );
+            return;
+        }
+        // A worker that stopped has said so, as for global search.
+        let _ = self.queue_search_tx.send(job);
     }
 
     fn request_tree(&mut self) {
@@ -2282,6 +2341,10 @@ impl BridgeLoopRuntime {
         }
         if let BridgeCommand::SaveState(request_id) = &cmd {
             self.save_state_for_quit(*request_id, event_tx);
+            return SnapshotUrgency::None;
+        }
+        if let BridgeCommand::QueueSearch { seq, query } = &cmd {
+            self.search_queue(*seq, query, event_tx);
             return SnapshotUrgency::None;
         }
 
@@ -3585,6 +3648,77 @@ mod tests {
         assert_eq!(reports, 1, "{errors:?}");
     }
 
+    /// The answer to a Find in Queue query, from the search worker, with
+    /// the loop's other workers cut off.
+    fn queue_search_answer(
+        runtime: &mut BridgeLoopRuntime,
+        event_tx: &Sender<BridgeEvent>,
+        event_rx: &Receiver<BridgeEvent>,
+        seq: u32,
+        query: &str,
+    ) -> QueueSearchFrame {
+        runtime.handle_wake(
+            BridgeLoopWake::Command(BridgeCommand::QueueSearch {
+                seq,
+                query: query.to_string(),
+            }),
+            event_tx,
+        );
+        let (_cmd_tx, cmd_rx) = unbounded();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(frame) = event_rx.try_iter().find_map(|event| match event {
+                BridgeEvent::QueueSearchResults(frame) if frame.seq == seq => Some(frame),
+                _ => None,
+            }) {
+                return frame;
+            }
+            assert!(Instant::now() < deadline, "the queue search was answered");
+            let wake = runtime.wait_for_wake(&cmd_rx);
+            runtime.handle_wake(wake, event_tx);
+        }
+    }
+
+    #[test]
+    fn find_in_queue_answers_with_the_rows_it_found_and_their_revision() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        cut_off_workers(&mut runtime, &[Worker::Search]);
+        let (event_tx, event_rx) = unbounded();
+        runtime.state.queue = [
+            "/fixture/a/Song.flac",
+            "/fixture/b/Other.flac",
+            "/fixture/a/Song.flac",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        runtime.state.queue_sync.reset();
+        let revision = runtime.state.queue_sync.revision();
+
+        // A file queued twice is found in both of its rows.
+        let frame = queue_search_answer(&mut runtime, &event_tx, &event_rx, 3, "song");
+        assert_eq!(
+            frame,
+            QueueSearchFrame {
+                seq: 3,
+                revision,
+                rows: vec![0, 2],
+            }
+        );
+        // After an edit, the rows are those of the queue then.
+        runtime.state.queue.remove(0);
+        runtime
+            .state
+            .queue_sync
+            .record(QueueEdit::Remove(vec![0]), 2);
+        let frame = queue_search_answer(&mut runtime, &event_tx, &event_rx, 4, "song");
+        assert_eq!((frame.revision, frame.rows), (revision + 1, vec![1]));
+        // An empty query finds nothing, and is answered at once.
+        let frame = queue_search_answer(&mut runtime, &event_tx, &event_rx, 5, " ");
+        assert!(frame.rows.is_empty());
+    }
+
     /// Runs the loop's wakes until the library worker's channel closes,
     /// with the other engines cut off.
     fn run_until_the_library_worker_stops(
@@ -3762,6 +3896,7 @@ mod tests {
         }
         if cut(Worker::Search) {
             runtime.search_results_rx = never();
+            runtime.queue_search_results_rx = never();
         }
         if cut(Worker::ApplyAlbumArt) {
             runtime.apply_album_art_rx = never();
@@ -5438,6 +5573,7 @@ mod tests {
                 PlaybackCommand::AddToQueue(tracks) => format!("add {tracks:?}"),
                 PlaybackCommand::PlayAt(index) => format!("play at {index}"),
                 PlaybackCommand::StartAt(index) => format!("start at {index}"),
+                PlaybackCommand::JumpTo(index) => format!("jump to {index}"),
                 PlaybackCommand::Play => "play".to_string(),
                 other => format!("{other:?}"),
             })

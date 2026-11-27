@@ -62,6 +62,7 @@ private slots:
     void queueEditsKeepSelectionAndViewport();
     void queueRemovalsKeepActionsOnHighlightedRows();
     void qMarksTheQueueSelectionToPlayNext();
+    void jOpensFindInQueueFromTheQueue();
     void queueContainIndexSkipsScrollWhenVisible();
     void queueContainIndexScrollsUpWhenAboveViewport();
     void queueContainIndexClampsAtListEnd();
@@ -1364,6 +1365,65 @@ Item {
     press(Qt::Key_Q, Qt::NoModifier);
     QVERIFY(root->property("lastAccepted").toBool());
     QCOMPARE(takeCommands(), QString());
+}
+
+// J alone, the queue's key for Find in Queue, as Winamp's Jump to File;
+// with a modifier the window's shortcuts keep it, Ctrl+J among them.
+void LibraryQueueSmokeTest::jOpensFindInQueueFromTheQueue() {
+    QQmlApplicationEngine engine;
+    QString errorText;
+    QScopedPointer<QObject> root(createHarness(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+Item {
+    id: harness
+    property int opened: 0
+    property bool lastAccepted: false
+    QtObject {
+        id: bridge
+        property int queueLength: 5
+        property int selectedQueueIndex: -1
+        property int playingQueueIndex: -1
+        property string playbackState: "Stopped"
+        property string currentTrackPath: ""
+        function selectQueueIndex(index) { selectedQueueIndex = index }
+        function playAt(index) {}
+        function togglePlayNext(rows) {}
+    }
+    Controllers.QueueController {
+        id: controller
+        uiBridge: bridge
+        tagEditorApi: null
+        openTagEditorDialog: function() {}
+        openFindInQueue: function() { harness.opened += 1 }
+        autoCenterSelection: false
+    }
+    function press(key, modifiers) {
+        const event = { key: key, modifiers: modifiers, accepted: false }
+        controller.handlePlaylistKeyPress(event)
+        lastAccepted = event.accepted
+        return controller.isFindInQueueKey({ key: key, modifiers: modifiers })
+    }
+}
+)QML"), &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    const auto press = [&root](Qt::Key key, Qt::KeyboardModifiers modifiers) {
+        QVariant claimed;
+        QVERIFY(QMetaObject::invokeMethod(root.data(), "press", Q_RETURN_ARG(QVariant, claimed),
+                                          Q_ARG(QVariant, int(key)), Q_ARG(QVariant, modifiers.toInt())));
+        // The shortcut override claims the key exactly when the key acts.
+        QCOMPARE(claimed.toBool(), root->property("lastAccepted").toBool());
+    };
+    press(Qt::Key_J, Qt::NoModifier);
+    QVERIFY(root->property("lastAccepted").toBool());
+    QCOMPARE(root->property("opened").toInt(), 1);
+    for (const Qt::KeyboardModifiers modifiers :
+         {Qt::KeyboardModifiers(Qt::ShiftModifier), Qt::KeyboardModifiers(Qt::ControlModifier),
+          Qt::KeyboardModifiers(Qt::AltModifier), Qt::KeyboardModifiers(Qt::MetaModifier)}) {
+        press(Qt::Key_J, modifiers);
+        QVERIFY(!root->property("lastAccepted").toBool());
+    }
+    QCOMPARE(root->property("opened").toInt(), 1);
 }
 
 void LibraryQueueSmokeTest::queueRemovalsKeepActionsOnHighlightedRows() {

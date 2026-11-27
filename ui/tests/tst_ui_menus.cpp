@@ -1993,6 +1993,8 @@ void UiMenusTest::checkMenusListTheirItemsInOrder(QQuickWindow *window) {
                  QStringLiteral("item|Redo|%1|edit-redo").arg(standardKey(QKeySequence::Redo)),
                  QStringLiteral("sep"),
                  QStringLiteral("item|Find…|%1|edit-find").arg(standardKey(QKeySequence::Find)),
+                 // Winamp's Jump to File was J.
+                 QStringLiteral("item|Find in Queue…|Ctrl+J|go-jump"),
                  QStringLiteral("sep"),
                  // A line glyph, as the others' (edit-clear-list's is a
                  // filled badge); Breeze and Breeze Dark both have it.

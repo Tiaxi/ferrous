@@ -21,8 +21,8 @@ use super::{
     log_undelivered, BridgeAnalysisCommand, BridgeCommand, BridgeError, BridgeEvent,
     BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand, BridgeSearchResultRowType,
     BridgeSearchResultsFrame, BridgeSettingsCommand, BridgeSnapshot, BridgeThread, ErrorCategory,
-    FrontendBridgeHandle, LibraryQueueItem, LibrarySortMode, QueuePlacement, QueueUndoState,
-    QuitSaveFailure, RowsMove, ViewerFullscreenMode, BRIDGE_SHUTDOWN_TIMEOUT,
+    FrontendBridgeHandle, LibraryQueueItem, LibrarySortMode, QueuePlacement, QueueSearchFrame,
+    QueueUndoState, QuitSaveFailure, RowsMove, ViewerFullscreenMode, BRIDGE_SHUTDOWN_TIMEOUT,
 };
 use crate::analysis::{
     AnalysisEvent, ColumnPlacement, PrecomputedSpectrogramChunk, SpectrogramDisplayMode,
@@ -98,6 +98,10 @@ const SECTION_WINDOW_LAYOUT: u16 = 1 << 11;
 /// sent when the marks change, and with every queue section, so the UI
 /// numbers the rows the queue section leaves.
 const SECTION_PLAY_NEXT: u16 = 1 << 12;
+/// The rows of the queue a Find in Queue query found, in a packet of its
+/// own: the u32 seq of the query, the u64 queue revision the rows belong
+/// to, then a u32 count of u32 rows, ascending.
+const SECTION_QUEUE_SEARCH: u16 = 1 << 13;
 
 #[cfg(unix)]
 fn create_nonblocking_pipe() -> Option<(RawFd, RawFd)> {
@@ -695,6 +699,9 @@ impl FfiEncoder {
                         frame.seq,
                         encode_search_results_frame(&frame),
                     ));
+                }
+                BridgeEvent::QueueSearchResults(frame) => {
+                    prepared.push(PreparedEvent::Binary(encode_queue_search_event(&frame)));
                 }
                 BridgeEvent::Stopped => {
                     self.stopped = true;
@@ -2339,7 +2346,14 @@ fn parse_queue_command(
             BridgeQueueCommand::ClearPlayNext,
         )));
     }
-    if !matches!(cmd_id, 8 | 9 | 10 | 11 | 63 | 70 | 83) {
+    if cmd_id == 86 {
+        // The u32 seq the results echo, then the query.
+        let seq = reader.read_u32()?;
+        let query = reader.read_string()?;
+        reader.expect_done()?;
+        return Ok(Some(BridgeCommand::QueueSearch { seq, query }));
+    }
+    if !matches!(cmd_id, 8 | 9 | 10 | 11 | 63 | 70 | 83 | 85) {
         return Ok(None);
     }
     let revision = reader.read_u64()?;
@@ -2359,6 +2373,7 @@ fn parse_queue_command(
     }
     let command = match cmd_id {
         8 => BridgeQueueCommand::PlayAt(usize_from_u32(reader.read_u32()?)),
+        85 => BridgeQueueCommand::JumpTo(usize_from_u32(reader.read_u32()?)),
         63 => {
             let count = reader.read_count(4)?;
             let mut indices = Vec::with_capacity(count);
@@ -2855,6 +2870,19 @@ fn snapshot_sections(
         sections.push((SECTION_PLAY_NEXT, section));
     }
     sections
+}
+
+/// The rows a Find in Queue query found; `decodeQueueSearchSection` in
+/// `ui/src/BinaryBridgeCodec.cpp` reads it.
+fn encode_queue_search_event(frame: &QueueSearchFrame) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(16 + 4 * frame.rows.len());
+    push_u32(&mut payload, frame.seq);
+    push_u64(&mut payload, frame.revision);
+    push_u32(&mut payload, clamp_u32(frame.rows.len()));
+    for row in &frame.rows {
+        push_u32(&mut payload, *row);
+    }
+    encode_packet(&[(SECTION_QUEUE_SEARCH, payload)])
 }
 
 /// The play-next section; `decodePlayNextSection` in
@@ -4342,6 +4370,57 @@ mod tests {
             Some(BridgeCommand::Queue(BridgeQueueCommand::ClearPlayNext))
         ));
         assert!(parse_binary_command(&encode_command(84, &[0])).is_err());
+    }
+
+    #[test]
+    fn find_in_queue_commands_decode_and_reject_truncation() {
+        // Mirrored by BinaryBridgeCodec::encodeCommandQueueSearch.
+        let mut payload = Vec::new();
+        push_u32(&mut payload, 9);
+        push_string(&mut payload, "artist:\"night café\"");
+        assert!(matches!(
+            parse_binary_command(&encode_command(86, &payload)).expect("search"),
+            Some(BridgeCommand::QueueSearch { seq: 9, query })
+                if query == "artist:\"night café\""
+        ));
+        payload.pop();
+        assert!(parse_binary_command(&encode_command(86, &payload)).is_err());
+
+        // The row to jump to, with the revision its rows showed.
+        let mut payload = Vec::new();
+        push_u64(&mut payload, 17);
+        push_u32(&mut payload, 4);
+        assert!(matches!(
+            parse_binary_command(&encode_command(85, &payload)).expect("jump"),
+            Some(BridgeCommand::QueueAt {
+                revision: 17,
+                command: BridgeQueueCommand::JumpTo(4),
+            })
+        ));
+        payload.pop();
+        assert!(parse_binary_command(&encode_command(85, &payload)).is_err());
+    }
+
+    #[test]
+    fn find_in_queue_results_travel_in_a_packet_of_their_own() {
+        let (command_tx, _command_rx) = crossbeam_channel::unbounded();
+        let mut runtime = FfiRuntime::new(command_tx, -1, -1);
+        runtime.process_bridge_events([BridgeEvent::QueueSearchResults(QueueSearchFrame {
+            seq: 5,
+            revision: 12,
+            rows: vec![0, 7, 7_000],
+        })]);
+        let packets = pending_packets(&mut runtime);
+        assert_eq!(packets.len(), 1);
+        let payload = section(&packets[0], SECTION_QUEUE_SEARCH).expect("the section");
+        let mut expected = Vec::new();
+        push_u32(&mut expected, 5);
+        push_u64(&mut expected, 12);
+        push_u32(&mut expected, 3);
+        for row in [0, 7, 7_000] {
+            push_u32(&mut expected, row);
+        }
+        assert_eq!(payload, expected);
     }
 
     #[test]

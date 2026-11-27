@@ -63,6 +63,7 @@ pub(super) fn handle_queue_command(
         cmd,
         BridgeQueueCommand::Select(_)
             | BridgeQueueCommand::PlayAt(_)
+            | BridgeQueueCommand::JumpTo(_)
             | BridgeQueueCommand::Move { .. }
     );
     // Clearing an empty queue leaves the queue an earlier change left, so
@@ -117,6 +118,7 @@ pub(super) fn handle_queue_command(
             }
             QueuePlaybackOp::ClearQueue => playback.command(PlaybackCommand::ClearQueue),
             QueuePlaybackOp::PlayAt(idx) => playback.command(PlaybackCommand::StartAt(*idx)),
+            QueuePlaybackOp::JumpTo(idx) => playback.command(PlaybackCommand::JumpTo(*idx)),
         }
     }
     if let Some(error) = outcome.error {
@@ -584,6 +586,9 @@ pub(super) enum QueuePlaybackOp {
     ClearQueue,
     /// Play the row from its start, in one step of the engine.
     PlayAt(usize),
+    /// Play the row from its start as a jump within the shuffle's round;
+    /// see [`PlaybackCommand::JumpTo`].
+    JumpTo(usize),
 }
 
 /// How a command changed the queue's rows, for the UI.
@@ -687,6 +692,7 @@ fn insert_queue_command_outcome(
 }
 
 fn play_at_queue_command_outcome(
+    op: fn(usize) -> QueuePlaybackOp,
     idx: usize,
     queue_len: usize,
     selected_queue_index: &mut Option<usize>,
@@ -703,7 +709,7 @@ fn play_at_queue_command_outcome(
         changed: true,
         // One command, so the engine reports the row playing, not first
         // stopped or paused there.
-        playback_ops: vec![QueuePlaybackOp::PlayAt(idx)],
+        playback_ops: vec![op(idx)],
         ..QueueCommandOutcome::default()
     }
 }
@@ -781,9 +787,18 @@ pub(super) fn apply_queue_command_state(
         BridgeQueueCommand::InsertAt { at, tracks, .. } => {
             insert_queue_command_outcome(queue, selected_queue_index, at, tracks)
         }
-        BridgeQueueCommand::PlayAt(idx) => {
-            play_at_queue_command_outcome(idx, queue.len(), selected_queue_index)
-        }
+        BridgeQueueCommand::PlayAt(idx) => play_at_queue_command_outcome(
+            QueuePlaybackOp::PlayAt,
+            idx,
+            queue.len(),
+            selected_queue_index,
+        ),
+        BridgeQueueCommand::JumpTo(idx) => play_at_queue_command_outcome(
+            QueuePlaybackOp::JumpTo,
+            idx,
+            queue.len(),
+            selected_queue_index,
+        ),
         BridgeQueueCommand::RemoveMany(indices) => {
             let mut removed: Vec<usize> = indices
                 .iter()

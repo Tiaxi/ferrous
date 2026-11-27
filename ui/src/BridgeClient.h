@@ -33,6 +33,7 @@
 #include "GlobalSearchResultsModel.h"
 #include "PlaybackClock.h"
 #include "QueueRows.h"
+#include "QueueSearchResultsModel.h"
 
 struct FerrousFfiBridge;
 struct FerrousFfiRenameGate;
@@ -77,6 +78,14 @@ class BridgeClient : public QObject {
     // The playing row changes with the rows as well, such as when a track
     // is put before it: see queueChanged. trackIdentityChanged follows.
     Q_PROPERTY(int playingQueueIndex READ playingQueueIndex NOTIFY queueChanged)
+    // Find in Queue's results: the queue rows the query set with
+    // setQueueSearchQuery found, in queue order (QueueSearchResultsModel).
+    Q_PROPERTY(QObject* queueSearchModel READ queueSearchModel CONSTANT)
+    // Whether the results are not yet those of the query as typed: from a
+    // change of the query until its results arrive, and while a whole new
+    // queue is searched. A search the queue's edits start keeps the rows,
+    // which follow their rows meanwhile.
+    Q_PROPERTY(bool queueSearchBusy READ queueSearchBusy NOTIFY queueSearchChanged)
     // The length its queue row gives the current track, as the row shows
     // it, or empty without a row: for a track that is stopped, whose
     // length the engine may not have.
@@ -450,6 +459,8 @@ public:
     quint32 globalSearchSeq() const;
     bool globalSearchModelRetained() const;
     QObject *globalSearchModel() const;
+    QObject *queueSearchModel() const;
+    bool queueSearchBusy() const { return m_queueSearchBusy; }
     QVariantList itunesArtworkResults() const;
     bool itunesArtworkLoading() const;
     QString itunesArtworkStatusText() const;
@@ -562,6 +573,15 @@ public:
     Q_INVOKABLE void setReplayGainUntaggedDb(double db);
     Q_INVOKABLE void setShowReplayGainInStatusBar(bool value);
     Q_INVOKABLE void playAt(int index);
+    // Play row `index` as Find in Queue's Enter does: without replacing the
+    // queue, and with shuffle on, as a track of the shuffle's round, which
+    // goes on after it.
+    Q_INVOKABLE void jumpToQueueRow(int index);
+    // Search the queue for `query`, global search's syntax, after a pause
+    // for typing; an empty query clears the results at once. While the
+    // query is not empty, every change of the queue's rows searches it
+    // again.
+    Q_INVOKABLE void setQueueSearchQuery(const QString &query);
     Q_INVOKABLE void selectQueueIndex(int index);
     Q_INVOKABLE void removeAt(int index);
     Q_INVOKABLE void removeIndices(const QVariantList &indices);
@@ -717,6 +737,7 @@ signals:
     void libraryTreeFrameReceived(int version, const QByteArray &treeBytes);
     void libraryRevealRequested(const QStringList &expandKeys, const QString &selectionKey);
     void globalSearchResultsChanged();
+    void queueSearchChanged();
     void itunesArtworkChanged();
     void imageFileDetailsChanged(const QString &path);
     // The log changed as a whole, so diagnosticsText is to take again.
@@ -970,6 +991,14 @@ private:
         const PrecomputedDispatchStats &stats);
     bool processSearchResultsFrame(const BinaryBridgeCodec::DecodedSearchResults &frame);
     void flushGlobalSearchQuery();
+    // Send the queue search's query, for the queue as the client has it.
+    void flushQueueSearchQuery();
+    // Take the rows a queue search found, if they answer the query sent
+    // last and name the rows the client has.
+    void applyQueueSearchResults(const BinaryBridgeCodec::DecodedQueueSearch &results);
+    // Search the queue again for its query, after the rows changed.
+    void refreshQueueSearch();
+    void setQueueSearchBusy(bool busy);
     void logProfileDiagnostic(const QString &category, const QString &message) const;
     // Adds `lines`, taken from the queue in order, to Diagnostics.
     void addDiagnosticLines(const QStringList &lines);
@@ -1064,6 +1093,18 @@ private:
     int m_queueLength{0};
     QString m_queueDurationText{"0:00"};
     QueueRowsModel m_queueRowsModel;
+    // Find in Queue's results, a view of m_queueRowsModel's rows.
+    QueueSearchResultsModel m_queueSearchModel{&m_queueRowsModel};
+    // The query as typed, simplified; empty while the palette is closed.
+    QString m_queueSearchQuery;
+    // The seq of the queue search sent last, which its results echo.
+    quint32 m_queueSearchSeq{0};
+    bool m_queueSearchBusy{false};
+    // The pause for typing before a query is sent.
+    QTimer m_queueSearchDebounceTimer;
+    // Gathers the queue's changes of one turn of the event loop into one
+    // search.
+    QTimer m_queueSearchRefreshTimer;
     // Decodes large snapshots and frees dropped queue rows off the GUI
     // thread; stopped first when the client goes.
     std::unique_ptr<QueueSnapshotWorker> m_snapshotWorker;

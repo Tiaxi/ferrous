@@ -667,6 +667,35 @@ impl GaplessQueue {
         })
     }
 
+    /// Make `idx` current as a jump to a track found in the queue, as
+    /// [`Self::set_current`] does, but within the shuffle's round: with
+    /// shuffle on, the row counts as played for the round, the rows played
+    /// before stay out of it, and Previous goes back to the track that was
+    /// current. Without shuffle it is [`Self::set_current`]. Returns `None`
+    /// and keeps any staged successor when `idx` is out of range.
+    pub(crate) fn jump_to(&mut self, idx: usize) -> Option<ManualMove> {
+        if !self.shuffle_enabled {
+            return self.set_current(idx);
+        }
+        let path = self.queue.get(idx).cloned()?;
+        let cancelled = self.cancel_pending();
+        let cursor = &mut self.cursor;
+        if idx != cursor.index {
+            cursor.shuffle_forward.clear();
+            cursor.shuffle_history.push(cursor.index);
+        }
+        cursor.shuffle_pool.retain(|row| *row != idx);
+        cursor.index = idx;
+        // The user's pick, also with shuffle on.
+        cursor.pick = TrackPick::Other;
+        cursor.unmark_current();
+        Some(ManualMove {
+            path,
+            index: idx,
+            cancelled,
+        })
+    }
+
     pub(crate) fn remove_many(&mut self, indices: &[usize]) -> Removal {
         let len = self.queue.len();
         let mut removed: Vec<usize> = indices.iter().copied().filter(|i| *i < len).collect();
@@ -2041,6 +2070,62 @@ mod tests {
             queue.previous_manual().map(|previous| previous.index),
             Some(0)
         );
+    }
+
+    #[test]
+    fn a_jump_with_shuffle_on_counts_as_played_and_previous_goes_back() {
+        let (mut queue, paths) = queue_of(6);
+        queue.seed_shuffle(7);
+        queue.set_shuffle_enabled(true);
+        assert!(queue.next_manual().is_some());
+        let before = queue.current_index().expect("a row plays");
+        let target = (0..6)
+            .find(|row| *row != before && *row != 0)
+            .expect("a row");
+        // A staged pick is dropped.
+        assert!(queue.stage_natural(gapless).is_some());
+        let jump = queue.jump_to(target).expect("the row");
+        assert_eq!((jump.path, jump.index), (paths[target].clone(), target));
+        assert_eq!(jump.cancelled, HANDED);
+        assert_eq!(queue.current_pick(), TrackPick::Other, "the user's pick");
+        assert!(queue.shuffle_enabled());
+
+        // The round goes on without the rows that played, the jump's row
+        // among them, each row once.
+        let mut played = vec![0, before, target];
+        while let Some(next) = queue.stage_natural(gapless) {
+            assert_eq!(next.pick, TrackPick::Shuffle);
+            played.push(committed_index(&mut queue).expect("a shuffle pick"));
+        }
+        played.sort_unstable();
+        assert_eq!(played, vec![0, 1, 2, 3, 4, 5]);
+
+        // Previous goes back from the jump to the track that was current.
+        let (mut queue, _) = queue_of(6);
+        queue.seed_shuffle(7);
+        queue.set_shuffle_enabled(true);
+        queue.jump_to(4).expect("row 4");
+        assert_eq!(
+            queue.previous_manual().map(|previous| previous.index),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn a_jump_leaves_the_marks_and_without_shuffle_is_a_pick_of_the_row() {
+        let (mut queue, _) = queue_of(6);
+        queue.toggle_play_next(&[3, 5]);
+        assert_eq!(queue.jump_to(3).map(|jump| jump.index), Some(3));
+        assert_eq!(marks(&queue), vec![5], "the row leaves the marks");
+        // Without shuffle, the queue's order goes on after it, after the
+        // marked row.
+        assert_eq!(queue.next_manual().map(|next| next.index), Some(5));
+        assert_eq!(queue.jump_to(1).map(|jump| jump.index), Some(1));
+        assert_eq!(queue.next_manual().map(|next| next.index), Some(2));
+        // A row past the end keeps what is staged.
+        assert!(queue.stage_natural(gapless).is_some());
+        assert!(queue.jump_to(6).is_none());
+        assert_eq!(committed_index(&mut queue), Some(3));
     }
 
     #[test]

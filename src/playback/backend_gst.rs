@@ -1384,6 +1384,24 @@ impl GstPlaybackRuntime {
         self.switch_to_path(target.path, target.index, TrackChangeKind::Manual, play);
     }
 
+    /// Play row `idx` from its start as a jump within the shuffle's round;
+    /// see [`PlaybackCommand::JumpTo`].
+    fn jump_to(&mut self, idx: usize) {
+        let Ok(mut state) = self.queue_state.lock() else {
+            return;
+        };
+        let repeat_mode = state.repeat_mode();
+        let shuffle_enabled = state.shuffle_enabled();
+        let target = state.jump_to(idx);
+        drop(state);
+        self.set_queue_flags(repeat_mode, shuffle_enabled);
+        let Some(target) = target else {
+            return;
+        };
+        self.release_staged_spectrogram(target.cancelled, false);
+        self.switch_to_path(target.path, target.index, TrackChangeKind::Manual, true);
+    }
+
     /// Apply a burst of Next (`true`) and Previous presses: move once per
     /// press, and start only the track the moves end on.
     fn navigate(&mut self, moves: &[bool]) {
@@ -2930,6 +2948,7 @@ impl GstPlaybackRuntime {
                 | PlaybackCommand::ClearQueue
                 | PlaybackCommand::PlayAt(_)
                 | PlaybackCommand::StartAt(_)
+                | PlaybackCommand::JumpTo(_)
                 | PlaybackCommand::Next
                 | PlaybackCommand::Previous
                 | PlaybackCommand::Play
@@ -2961,6 +2980,7 @@ impl GstPlaybackRuntime {
             }
             PlaybackCommand::PlayAt(idx) => self.play_at(idx, false),
             PlaybackCommand::StartAt(idx) => self.play_at(idx, true),
+            PlaybackCommand::JumpTo(idx) => self.jump_to(idx),
             PlaybackCommand::Next => self.navigate(&[true]),
             PlaybackCommand::Previous => self.navigate(&[false]),
             PlaybackCommand::Play => self.play(),
@@ -8307,6 +8327,104 @@ mod engine_tests {
             }
             assert_eq!(engine.cancelled_staging, 0, "the handoff was cancelled");
         }
+    }
+
+    /// With shuffle on and repeat off, plays a queue of three tracks until
+    /// the shuffle has staged the first track's successor in the pipeline.
+    /// Returns the queue, the row playing and the row staged.
+    fn shuffled_queue_with_a_staged_pick(
+        engine: &mut Engine,
+        fixtures: &Fixtures,
+    ) -> (Vec<PathBuf>, usize, usize) {
+        let queue = vec![
+            fixtures.wav("a.wav", 4_000),
+            fixtures.wav("b.wav", 4_500),
+            fixtures.wav("c.wav", 5_000),
+        ];
+        engine.send(PlaybackCommand::SetShuffle(true));
+        engine.send(PlaybackCommand::LoadQueue(queue.clone()));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("no successor was staged", |engine| {
+            engine.snapshot.state == PlaybackState::Playing && !engine.prepared.is_empty()
+        });
+        let staged = queue
+            .iter()
+            .position(|path| *path == engine.prepared[0])
+            .expect("a queued track was staged");
+        engine.wait_for_settled_window(&queue[staged]);
+        let first = engine.snapshot.current_queue_index.expect("a row plays");
+        assert_ne!(first, staged);
+        (queue, first, staged)
+    }
+
+    /// The rest of a shuffled round of three tracks after `played`: the
+    /// track left plays gaplessly after the current one, then playback
+    /// stops, as the round with repeat off has no more tracks.
+    fn finish_round(engine: &mut Engine, queue: &[PathBuf], played: [usize; 2], changes: usize) {
+        let left = (0..queue.len())
+            .find(|row| !played.contains(row))
+            .expect("a row is left");
+        assert_change(
+            &engine.wait_for_changes(changes + 1),
+            &queue[left],
+            left,
+            Expect::Gapless,
+        );
+        engine.wait_until("playback did not stop after the round", |engine| {
+            engine.snapshot.state == PlaybackState::Stopped
+        });
+        assert_eq!(engine.changes.len(), changes + 1, "{:?}", engine.changes);
+    }
+
+    /// Find in Queue's Enter: a jump to a row, with shuffle on, while a
+    /// shuffle pick is staged, plays the row at once and drops the pick
+    /// staged for the track before. The round goes on: the next pick is
+    /// the row that has not played, and the round then ends.
+    #[test]
+    fn a_jump_to_a_row_with_shuffle_on_drops_the_staged_pick_and_keeps_the_round() {
+        let fixtures = Fixtures::new("jump-to-shuffled");
+        let mut engine = Engine::start();
+        let (queue, first, staged) = shuffled_queue_with_a_staged_pick(&mut engine, &fixtures);
+        let target = (0..queue.len())
+            .find(|row| *row != first && *row != staged)
+            .expect("a row that is neither");
+        let changes = engine.changes.len();
+        engine.send(PlaybackCommand::JumpTo(target));
+        assert_change(
+            &engine.wait_for_changes(changes + 1),
+            &queue[target],
+            target,
+            Expect::Manual,
+        );
+        assert!(engine.snapshot.shuffle_enabled);
+        finish_round(&mut engine, &queue, [first, target], changes + 1);
+    }
+
+    /// Find in Queue's Ctrl+Enter: marking a row to play next, with shuffle
+    /// on, while a shuffle pick is staged, drops the pick; the marked row
+    /// follows the current track gaplessly and counts as played for the
+    /// round.
+    #[test]
+    fn marking_a_row_with_shuffle_on_drops_the_staged_pick_and_keeps_the_round() {
+        let fixtures = Fixtures::new("mark-shuffled");
+        let mut engine = Engine::start();
+        let (queue, first, staged) = shuffled_queue_with_a_staged_pick(&mut engine, &fixtures);
+        let target = (0..queue.len())
+            .find(|row| *row != first && *row != staged)
+            .expect("a row that is neither");
+        let changes = engine.changes.len();
+        engine.send(PlaybackCommand::TogglePlayNext(vec![target]));
+        engine.wait_until("the staged pick was not cancelled", |engine| {
+            engine.cancelled_staging == 1 && *engine.snapshot.play_next == [target]
+        });
+        assert_eq!(engine.snapshot.current_queue_index, Some(first));
+        assert_change(
+            &engine.wait_for_changes(changes + 1),
+            &queue[target],
+            target,
+            Expect::Gapless,
+        );
+        finish_round(&mut engine, &queue, [first, target], changes + 1);
     }
 
     /// The engine's side of an undo and a redo of a replacement: two

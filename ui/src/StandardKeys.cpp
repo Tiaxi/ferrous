@@ -107,6 +107,9 @@ QString StandardKeys::keptKeyRole(const QVariant &sequence) {
     // The queue marks its selection to play next with it.
     case Qt::Key_Q:
         return alone ? QStringLiteral("playNext") : QString();
+    // The queue opens Find in Queue with it.
+    case Qt::Key_J:
+        return alone ? QStringLiteral("findInQueue") : QString();
     default:
         return {};
     }

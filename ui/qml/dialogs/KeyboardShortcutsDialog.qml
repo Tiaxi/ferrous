@@ -166,6 +166,9 @@ Components.DialogWindow {
         case "playNext":
             return I18n.i18nc("@info %1 is a key",
                 "“%1” can’t be a shortcut: it marks the selected tracks in the queue to play next.", name)
+        case "findInQueue":
+            return I18n.i18nc("@info %1 is a key",
+                "“%1” can’t be a shortcut: it opens Find in Queue from the queue.", name)
         case "delete":
             return I18n.i18nc("@info %1 is a key",
                 "“%1” can’t be a shortcut: it removes the selected tracks from the queue, and deletes text in text fields.", name)

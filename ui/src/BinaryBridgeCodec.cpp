@@ -841,6 +841,32 @@ bool decodePlayNextSection(const QByteArray &payload, DecodedPlayNext *out) {
     return true;
 }
 
+bool decodeQueueSearchSection(const QByteArray &payload, DecodedQueueSearch *out) {
+    if (!out) {
+        return false;
+    }
+    Reader reader(payload);
+    quint32 count = 0;
+    if (!reader.readU32(&out->seq) || !reader.readU64(&out->revision) || !reader.readU32(&count)
+        || count > static_cast<quint32>(payload.size() / 4)) {
+        return false;
+    }
+    out->rows.reserve(static_cast<qsizetype>(count));
+    for (quint32 i = 0; i < count; ++i) {
+        quint32 row = 0;
+        if (!reader.readU32(&row) || row > static_cast<quint32>(std::numeric_limits<int>::max())
+            || (!out->rows.isEmpty() && static_cast<int>(row) <= out->rows.last())) {
+            return false;
+        }
+        out->rows.push_back(static_cast<int>(row));
+    }
+    if (!reader.atEnd()) {
+        return false;
+    }
+    out->present = true;
+    return true;
+}
+
 bool decodeQueueUndoSection(const QByteArray &payload, DecodedQueueUndo *out) {
     if (!out) {
         return false;
@@ -1055,6 +1081,16 @@ QByteArray encodeCommandSearchQuery(quint16 cmdId, quint32 seq, const QString &q
     }
     appendLe<quint32>(payload, limit);
     return finalizeCommand(cmdId, payload);
+}
+
+QByteArray encodeCommandQueueSearch(quint32 seq, const QString &query) {
+    QByteArray payload;
+    payload.reserve(8 + query.size());
+    appendLe<quint32>(payload, seq);
+    if (!appendUtf8(payload, query)) {
+        return {};
+    }
+    return finalizeCommand(CmdSetQueueSearchQuery, payload);
 }
 
 bool isValidKeyboardShortcutId(const QString &id) {
@@ -1295,6 +1331,9 @@ bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QStrin
             break;
         case SectionPlayNext:
             ok = decodePlayNextSection(sectionPayload, &out->playNext);
+            break;
+        case SectionQueueSearch:
+            ok = decodeQueueSearchSection(sectionPayload, &out->queueSearch);
             break;
         case SectionError: {
             Reader sectionReader(sectionPayload);

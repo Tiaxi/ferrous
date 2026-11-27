@@ -58,6 +58,10 @@ enum SnapshotSection : quint16 {
     // belong to, then a u32 count of u32 rows, in the order they play. It
     // comes when the marks change, and with every queue section.
     SectionPlayNext = 1u << 12,
+    // The rows of the queue a Find in Queue query found, in a packet of its
+    // own: the u32 seq of the query, the u64 queue revision the rows belong
+    // to, then a u32 count of u32 rows, ascending.
+    SectionQueueSearch = 1u << 13,
 };
 
 // What part of Ferrous an error concerns. Mirrors ErrorCategory in
@@ -219,6 +223,12 @@ enum CommandId : quint16 {
     CmdTogglePlayNext = 83,
     // Unmark every queue row marked to play next. No payload.
     CmdClearPlayNext = 84,
+    // Play a row Find in Queue found, as a jump within the shuffle's round:
+    // the u64 queue revision and the u32 row, as CmdPlayAt.
+    CmdJumpTo = 85,
+    // Find in Queue's query: the u32 seq that SectionQueueSearch echoes,
+    // then the query; see encodeCommandQueueSearch.
+    CmdSetQueueSearchQuery = 86,
 };
 
 // How ReplayGain levels playback. Mirrors ReplayGainMode in
@@ -687,6 +697,16 @@ struct DecodedPlayNext {
     QVector<int> rows;
 };
 
+struct DecodedQueueSearch {
+    bool present{false};
+    // The seq of the query the rows answer.
+    quint32 seq{0};
+    // The queue revision the rows belong to.
+    quint64 revision{0};
+    // The rows found, ascending.
+    QVector<int> rows;
+};
+
 struct DecodedSnapshot {
     quint16 sectionMask{0};
     bool hasStopped{false};
@@ -720,6 +740,7 @@ struct DecodedSnapshot {
     DecodedLastFm lastfm;
     DecodedQueueUndo queueUndo;
     DecodedPlayNext playNext;
+    DecodedQueueSearch queueSearch;
 };
 
 enum SearchRowType : quint8 {
@@ -787,6 +808,8 @@ QByteArray encodeCommandLibraryViewState(
     const QString &anchorKey,
     float anchorOffset);
 QByteArray encodeCommandSearchQuery(quint16 cmdId, quint32 seq, const QString &query, quint32 limit = 0);
+// CmdSetQueueSearchQuery: the u32 seq, then the query.
+QByteArray encodeCommandQueueSearch(quint32 seq, const QString &query);
 
 // CmdSetWindowLayout: hasGeometry (u8), x, y (i32), width, height (u32),
 // maximized (u8), the sidebar and queue ratios (f32), visualizationMode (u8),

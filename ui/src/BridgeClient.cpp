@@ -739,6 +739,18 @@ BridgeClient::BridgeClient(std::shared_ptr<DiagnosticsLog::LineQueue> diagnostic
     }
     m_globalSearchDebounceTimer.setInterval(m_globalSearchDebounceMs);
     connect(&m_globalSearchDebounceTimer, &QTimer::timeout, this, &BridgeClient::flushGlobalSearchQuery);
+    m_queueSearchDebounceTimer.setSingleShot(true);
+    connect(&m_queueSearchDebounceTimer, &QTimer::timeout, this, &BridgeClient::flushQueueSearchQuery);
+    m_queueSearchRefreshTimer.setSingleShot(true);
+    m_queueSearchRefreshTimer.setInterval(0);
+    connect(&m_queueSearchRefreshTimer, &QTimer::timeout, this, &BridgeClient::flushQueueSearchQuery);
+    // A whole new queue leaves no results: until its own arrive, the search
+    // is in progress, not one that found nothing.
+    connect(&m_queueRowsModel, &QAbstractItemModel::modelReset, this, [this]() {
+        if (!m_queueSearchQuery.isEmpty()) {
+            setQueueSearchBusy(true);
+        }
+    });
 
     m_searchApplyDispatchMs = readEnvMillis("FERROUS_UI_SEARCH_APPLY_DISPATCH_MS", 12);
     m_searchApplyDispatchTimer.setSingleShot(true);
@@ -3302,6 +3314,81 @@ void BridgeClient::playAt(int index) {
         BinaryBridgeCodec::CmdPlayAt,
         m_queueRevision,
         static_cast<quint32>(index)));
+}
+
+void BridgeClient::jumpToQueueRow(int index) {
+    if (index < 0) {
+        return;
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandQueueRow(
+        BinaryBridgeCodec::CmdJumpTo,
+        m_queueRevision,
+        static_cast<quint32>(index)));
+}
+
+void BridgeClient::setQueueSearchQuery(const QString &query) {
+    const QString nextQuery = canonicalizeSearchQuery(query);
+    if (nextQuery == m_queueSearchQuery) {
+        return;
+    }
+    m_queueSearchQuery = nextQuery;
+    m_queueSearchRefreshTimer.stop();
+    // Results on their way are of the query before: none is taken until
+    // this one is sent and answered.
+    m_queueSearchSeq += 1;
+    if (nextQuery.isEmpty()) {
+        m_queueSearchDebounceTimer.stop();
+        m_queueSearchModel.clear();
+        setQueueSearchBusy(false);
+        // Results still on their way are of no query now, and the backend
+        // lets its copy of the queue go.
+        flushQueueSearchQuery();
+        return;
+    }
+    // As global search's pause: longer for a first character, which finds
+    // the most rows.
+    m_queueSearchDebounceTimer.setInterval(nextQuery.size() <= m_globalSearchShortDebounceChars
+                                               ? m_globalSearchShortDebounceMs
+                                               : m_globalSearchDebounceMs);
+    m_queueSearchDebounceTimer.start();
+    setQueueSearchBusy(true);
+}
+
+QObject *BridgeClient::queueSearchModel() const {
+    return const_cast<QueueSearchResultsModel *>(&m_queueSearchModel);
+}
+
+void BridgeClient::setQueueSearchBusy(bool busy) {
+    if (m_queueSearchBusy == busy) {
+        return;
+    }
+    m_queueSearchBusy = busy;
+    emit queueSearchChanged();
+}
+
+void BridgeClient::flushQueueSearchQuery() {
+    m_queueSearchDebounceTimer.stop();
+    m_queueSearchRefreshTimer.stop();
+    m_queueSearchSeq += 1;
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandQueueSearch(m_queueSearchSeq, m_queueSearchQuery));
+}
+
+void BridgeClient::refreshQueueSearch() {
+    // A query still waiting for its pause is sent for the new rows anyway.
+    if (!m_queueSearchQuery.isEmpty() && !m_queueSearchDebounceTimer.isActive()) {
+        m_queueSearchRefreshTimer.start();
+    }
+}
+
+void BridgeClient::applyQueueSearchResults(const BinaryBridgeCodec::DecodedQueueSearch &results) {
+    // Results of an older query, or of rows the client does not have: a
+    // newer search is sent, or is sent once the client's rows change.
+    if (results.seq != m_queueSearchSeq || m_queueSearchQuery.isEmpty()
+        || results.revision != m_queueRevision || m_queueRevision == 0) {
+        return;
+    }
+    m_queueSearchModel.setRows(results.rows);
+    setQueueSearchBusy(false);
 }
 
 void BridgeClient::selectQueueIndex(int index) {
@@ -5919,6 +6006,11 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         return false;
     }
 
+    if (snapshot.queueSearch.present) {
+        applyQueueSearchResults(snapshot.queueSearch);
+        return false;
+    }
+
     if (snapshot.hasStateSaved) {
         emit stateSaveFinished(snapshot.stateSaveRequestId, snapshot.stateSaved,
                                snapshot.stateSaved
@@ -6263,6 +6355,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         }
 
         const int previousLength = m_queueLength;
+        const quint64 previousRevision = m_queueRevision;
         if (applyQueueRows(queue, preparedRows)) {
             m_queueRevision = queue.revision;
             if (queue.kind == BinaryBridgeCodec::QueueFull) {
@@ -6272,6 +6365,15 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             // The rows match no revision now; the whole queue replaces them.
             m_queueRevision = 0;
             requestQueueResync();
+        }
+        if (m_queueRevision != previousRevision) {
+            // A whole queue is new rows, also where they show as before:
+            // the results named the rows it replaced.
+            if (queue.kind == BinaryBridgeCodec::QueueFull) {
+                m_queueSearchModel.clear();
+                setQueueSearchBusy(!m_queueSearchQuery.isEmpty());
+            }
+            refreshQueueSearch();
         }
         if (m_queueLength != previousLength || queue.kind == BinaryBridgeCodec::QueueFull
             || !queue.ops.isEmpty()) {

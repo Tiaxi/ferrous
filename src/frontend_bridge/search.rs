@@ -10,9 +10,14 @@ use std::time::Instant;
 use crossbeam_channel::{Receiver, Sender};
 use unicode_normalization::UnicodeNormalization;
 
-use crate::library::{KeyedText, LibraryRoot, LibrarySearchTrack, LibrarySnapshot, LibraryTrack};
+use crate::library::{
+    KeyedText, LibraryRoot, LibrarySearchTrack, LibrarySnapshot, LibraryTrack, SearchTags,
+};
 
 use super::library_tree::{album_row_key, artist_row_key, section_row_key, track_row_key};
+use super::queue_search::{
+    newer_job, search_queue, QueueSearchCache, QueueSearchFrame, QueueSearchJob,
+};
 use super::search_query::{SearchFields, SearchQuery};
 use super::search_suggest::{corrected_query, SearchVocabulary};
 
@@ -263,13 +268,31 @@ impl SearchRowAccumulator {
 }
 
 #[derive(Debug, Clone, Default)]
-struct PreparedSearchLibrary {
+pub(super) struct PreparedSearchLibrary {
     tracks: Vec<Arc<PreparedTrackEntry>>,
     album_inventory: HashMap<String, AlbumInventoryAcc>,
     artist_album_counts: HashMap<String, u32>,
     /// The words of the library's names, for spelling suggestions: made
     /// the first time a search of this library finds nothing.
     vocabulary: OnceLock<Arc<SearchVocabulary>>,
+}
+
+impl PreparedSearchLibrary {
+    /// The fields of the library's track at `index`, if it is the track at
+    /// `path`: the index is of the library this was prepared from.
+    pub(super) fn fields_of(&self, index: usize, path: &Path) -> Option<&SearchFields> {
+        self.tracks
+            .get(index)
+            .filter(|entry| entry.track.path == path)
+            .map(|entry| &entry.fields)
+    }
+}
+
+/// Global search's index of `library`, for the tests of the searches that
+/// share it.
+#[cfg(test)]
+pub(super) fn prepared_library_for_tests(library: &LibrarySnapshot) -> PreparedSearchLibrary {
+    prepare_search_library(library)
 }
 
 /// The album group a track belongs to, for the album inventory.
@@ -1123,33 +1146,19 @@ fn prepare_search_track(
         .unwrap_or(&track.path);
     let path_string = relative_path.to_string_lossy();
     let artist = track.artist.trim();
-    // A tag's values, joined, then the track's own details.
-    let mut fields: Vec<(&str, String)> = track
-        .search_tags
-        .iter()
-        .map(|(key, values)| (key, normalize_for_search(&join_values(values))))
-        .collect();
-    for (key, value) in [
-        ("title", track.title.trim()),
-        ("artist", artist),
-        ("album", track.album.trim()),
-        ("genre", track.genre.trim()),
-        ("path", &path_string),
-    ] {
-        let field = field_mut(&mut fields, key);
-        field.push(' ');
-        field.push_str(&normalize_for_search(value));
-    }
-    if let Some(year) = track.year {
-        *field_mut(&mut fields, "year") = year.to_string();
-    }
-    if let Some(number) = track.track_no {
-        *field_mut(&mut fields, "track") = number.to_string();
-    }
     let root = roots_by_path.get(&track.root_path);
-    if let Some(root) = root {
-        *field_mut(&mut fields, "root") = normalize_for_search(&root.root_label);
+    let fields = TrackSearchText {
+        tags: &track.search_tags,
+        title: &track.title,
+        artist,
+        album: &track.album,
+        genre: &track.genre,
+        path: &path_string,
+        year: track.year,
+        track_no: track.track_no,
+        root_label: root.map(|root| root.root_label.as_str()),
     }
+    .fields();
 
     let album_membership = root
         .and_then(|root| derive_tree_path_context_for_root(&track.path, root, artist))
@@ -1165,8 +1174,56 @@ fn prepare_search_track(
 
     PreparedTrackEntry {
         track: Arc::clone(track),
-        fields: KeyedText::from_pairs(fields),
+        fields,
         album: album_membership,
+    }
+}
+
+/// The text of a track that a query can match.
+pub(super) struct TrackSearchText<'a> {
+    pub(super) tags: &'a SearchTags,
+    pub(super) title: &'a str,
+    pub(super) artist: &'a str,
+    pub(super) album: &'a str,
+    pub(super) genre: &'a str,
+    /// The part of the track's path that matches.
+    pub(super) path: &'a str,
+    pub(super) year: Option<i32>,
+    pub(super) track_no: Option<u32>,
+    /// The label of the library root the track is in.
+    pub(super) root_label: Option<&'a str>,
+}
+
+impl TrackSearchText<'_> {
+    /// The normalized text of each field: a tag's values, joined, then the
+    /// track's own details.
+    pub(super) fn fields(&self) -> SearchFields {
+        let mut fields: Vec<(&str, String)> = self
+            .tags
+            .iter()
+            .map(|(key, values)| (key, normalize_for_search(&join_values(values))))
+            .collect();
+        for (key, value) in [
+            ("title", self.title.trim()),
+            ("artist", self.artist.trim()),
+            ("album", self.album.trim()),
+            ("genre", self.genre.trim()),
+            ("path", self.path),
+        ] {
+            let field = field_mut(&mut fields, key);
+            field.push(' ');
+            field.push_str(&normalize_for_search(value));
+        }
+        if let Some(year) = self.year {
+            *field_mut(&mut fields, "year") = year.to_string();
+        }
+        if let Some(number) = self.track_no {
+            *field_mut(&mut fields, "track") = number.to_string();
+        }
+        if let Some(label) = self.root_label {
+            *field_mut(&mut fields, "root") = normalize_for_search(label);
+        }
+        KeyedText::from_pairs(fields)
     }
 }
 
@@ -1592,16 +1649,42 @@ fn search_suggestion(
 // Worker / drain / process
 // ---------------------------------------------------------------------------
 
+/// What woke the search worker.
+enum SearchWorkerWake {
+    Library(SearchWorkerQuery),
+    Queue(QueueSearchJob),
+    Closed,
+}
+
+/// The search worker: global search's queries, and Find in Queue's, which
+/// shares global search's index of the library. A query of one never
+/// cancels a search of the other; each waits for the search running.
 pub(super) fn run_search_worker(
     query_rx: &Receiver<SearchWorkerQuery>,
     results_tx: &Sender<BridgeSearchResultsFrame>,
+    queue_rx: &Receiver<QueueSearchJob>,
+    queue_results_tx: &Sender<QueueSearchFrame>,
 ) {
-    let Ok(mut query) = query_rx.recv() else {
-        return;
-    };
     let mut prepared_cache = SearchWorkerPreparedCache::default();
+    let mut queue_cache = QueueSearchCache::default();
     let profile_search = search_profile_enabled();
+    let mut queue_rx = queue_rx.clone();
+    // A library query to run next: one that cancelled the search before.
+    let mut next_query: Option<SearchWorkerQuery> = None;
     loop {
+        let mut query = match next_query.take() {
+            Some(query) => query,
+            None => match wait_for_search(query_rx, &mut queue_rx) {
+                SearchWorkerWake::Library(query) => query,
+                SearchWorkerWake::Queue(job) => {
+                    let frame =
+                        run_queue_search(job, &mut prepared_cache, &mut queue_cache, &queue_rx);
+                    let _ = queue_results_tx.send(frame);
+                    continue;
+                }
+                SearchWorkerWake::Closed => break,
+            },
+        };
         while let Ok(next) = query_rx.try_recv() {
             // Cache warmups are advisory; a library refresh must never erase
             // the response owed to an interactive query (including a clear).
@@ -1618,14 +1701,7 @@ pub(super) fn run_search_worker(
                 prepared_cache.prepared_for(&query.library, || poll_latest_search_query(query_rx))
             {
                 // An interactive query arrived; what was prepared is kept.
-                query = next;
-                continue;
-            }
-            match query_rx.recv() {
-                Ok(next) => {
-                    query = next;
-                }
-                Err(_) => break,
+                next_query = Some(next);
             }
             continue;
         }
@@ -1652,16 +1728,53 @@ pub(super) fn run_search_worker(
                         query_started.elapsed().as_millis()
                     );
                 }
-                query = next;
-                continue;
+                next_query = Some(next);
             }
         }
+    }
+}
 
-        match query_rx.recv() {
-            Ok(next) => {
-                query = next;
+/// Wait for a query of either search. Closed once global search's channel
+/// is; a closed queue channel is no longer listened to.
+fn wait_for_search(
+    query_rx: &Receiver<SearchWorkerQuery>,
+    queue_rx: &mut Receiver<QueueSearchJob>,
+) -> SearchWorkerWake {
+    loop {
+        crossbeam_channel::select! {
+            recv(query_rx) -> query => {
+                return query.map_or(SearchWorkerWake::Closed, SearchWorkerWake::Library);
             }
-            Err(_) => break,
+            recv(queue_rx) -> job => match job {
+                Ok(job) => return SearchWorkerWake::Queue(job),
+                Err(_) => *queue_rx = crossbeam_channel::never(),
+            },
+        }
+    }
+}
+
+/// Search the queue for `job`, or for the newest job that replaced it
+/// while it ran.
+fn run_queue_search(
+    mut job: QueueSearchJob,
+    prepared_cache: &mut SearchWorkerPreparedCache,
+    queue_cache: &mut QueueSearchCache,
+    queue_rx: &Receiver<QueueSearchJob>,
+) -> QueueSearchFrame {
+    loop {
+        if let Some(newer) = newer_job(queue_rx) {
+            job = newer;
+        }
+        // Global search's index of the library, prepared once per library
+        // for both searches; a query of global search waits for it.
+        let prepared = if job.query.is_empty() || job.library.tracks.is_empty() {
+            None
+        } else {
+            prepared_cache.prepared_for(&job.library, || None).ok()
+        };
+        match search_queue(&job, prepared.as_deref(), queue_cache, queue_rx) {
+            Ok(frame) => return frame,
+            Err(newer) => job = newer,
         }
     }
 }
@@ -2869,7 +2982,9 @@ mod tests {
         })
         .expect("warmup");
         drop(tx);
-        run_search_worker(&rx, &results_tx);
+        let (_queue_tx, queue_rx) = crossbeam_channel::unbounded();
+        let (queue_results_tx, _queue_results) = crossbeam_channel::unbounded();
+        run_search_worker(&rx, &results_tx, &queue_rx, &queue_results_tx);
         let frame = results_rx.try_recv().expect("interactive response");
         assert_eq!(frame.seq, 42);
         assert_eq!(frame.totals[2], 1);

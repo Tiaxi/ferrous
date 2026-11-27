@@ -114,6 +114,7 @@ qt_add_library(ferrous_ui_core STATIC
     src/BridgeClient.cpp
     src/ConsoleTee.cpp
     src/QueueRows.cpp
+    src/QueueSearchResultsModel.cpp
     src/CoverImageProvider.cpp
     src/DiagnosticsLog.cpp
     src/DiagnosticsLogLayout.cpp
@@ -310,6 +311,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/dialogs/KeyboardShortcutsDialog.qml
         qml/dialogs/LibraryRootNameDialog.qml
         qml/dialogs/PreferencesDialog.qml
+        qml/dialogs/QueueSearchDialog.qml
         qml/dialogs/QuitSaveFailedDialog.qml
         qml/dialogs/RecentErrorsDialog.qml
         qml/dialogs/RenamePreviewDialog.qml
@@ -990,6 +992,17 @@ if(BUILD_TESTING)
         TIMEOUT 180
     )
     ferrous_add_default_platform_test(ferrous_bridge_client_tests drawsOffscreenUnlessAPlatformIsChosen)
+
+    # Find in Queue (#814): the results model and the palette.
+    ferrous_add_app_test(ferrous_queue_search_tests
+        tests/tst_queue_search.cpp
+    )
+    add_test(NAME ferrous_queue_search_tests COMMAND ferrous_queue_search_tests)
+    set_tests_properties(ferrous_queue_search_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        TIMEOUT 120
+    )
+    ferrous_add_default_platform_test(ferrous_queue_search_tests drawsOffscreenUnlessAPlatformIsChosen)
 
     # The QML module as the app loads it; tests/tst_qml_module.cpp.
     ferrous_add_app_test(ferrous_qml_module_tests

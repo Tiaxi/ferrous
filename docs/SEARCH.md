@@ -27,6 +27,23 @@ When a search finds nothing and a misspelled word has a close match in the libra
 
 Search runs in a background worker. Enter, Ctrl+Enter or Alt+Enter pressed in the search field while a query runs acts on the selection once that query's results arrive, never on an older query's results. Editing the query, Up, Down, Page Up, Page Down, Esc or closing the palette cancels it. Clicks on an older query's results do nothing.
 
+## Find in Queue
+
+Find in Queue (Ctrl+J, J in the queue, or **Edit › Find in Queue…**) searches the queue alone, with the same matching and query syntax as global search, so `artist:` and quoted phrases work the same way in both. It matches each queue row's title, artist, album, tags such as the album artist, and file name. A track in the library matches as global search matches it, its path from the library root down; a file outside the library matches its folder's name and its file name. Every row is a track, so `type:track` finds them all and the other types find none. The search runs in the background, as global search's does, and finds every match.
+
+The results are the matching rows in the queue's order, each with its place in the queue, rather than ranked: a file in the queue twice gives two results. The first result is selected, and the bar at the bottom names what the keys do for it. A row marked to [play next](FEATURES.md#play-next) shows its place among the marked rows, and Ctrl+Enter unmarks it.
+
+| Action | Control |
+| --- | --- |
+| Move through results | Up/Down; Page Up/Page Down; Home/End in the results |
+| Play the selection, without replacing the queue | Enter or double-click |
+| Mark the selection to play next, or unmark it | Ctrl+Enter or Play Next in the context menu |
+| Select and show the selection in the queue | Alt+Enter or Show in Queue in the context menu |
+| Return to the query | Ctrl+F |
+| Close | Esc |
+
+A result acts on its own row, wherever the queue's edits have moved it since the search; once its row has been removed, the result is gone, and a key acts on no other row in its place. [Find in Queue](FEATURES.md#find-in-queue) in the feature guide says what Enter does with shuffle on.
+
 ## Phrases and filters
 
 Put double quotes around words that must occur together. All terms and filters are combined with AND; plain words may match different fields.

@@ -2,7 +2,7 @@
 
 use super::channel_mix::ChannelMix;
 use super::play_next::{self, PlayNextRestore};
-use super::queue::{same_audio_extension, CancelledAdvance, GaplessQueue, Handoff};
+use super::queue::{same_audio_extension, CancelledAdvance, GaplessQueue, Handoff, ManualMove};
 use super::{
     EngineExit, FileStamp, PlaybackCommand, PlaybackError, PlaybackErrorOutcome, PlaybackEvent,
     PlaybackSnapshot, PlaybackState, TrackChangeKind,
@@ -177,6 +177,17 @@ impl MockPlaybackRuntime {
         self.snapshot.muted_channels_mask = self.channel_mix.muted_in(0);
         self.snapshot.soloed_channels_mask = self.channel_mix.soloed_in(0);
     }
+    /// Switch to the row the queue went to, if any, and play it when
+    /// `play` says so; otherwise the playback state stays.
+    fn go_to_row(&mut self, target: Option<ManualMove>, play: bool) {
+        if let Some(target) = target {
+            self.switch_manually(target.path, target.index);
+            if play {
+                self.snapshot.state = PlaybackState::Playing;
+            }
+        }
+    }
+
     fn handle_command(&mut self, cmd: PlaybackCommand) {
         if cmd.edits_queue() {
             self.snapshot.queue_commands += 1;
@@ -236,15 +247,16 @@ impl MockPlaybackRuntime {
                 self.continue_after_cancelled_advance(cancelled);
             }
             PlaybackCommand::PlayAt(idx) => {
-                if let Some(target) = self.queue.set_current(idx) {
-                    self.switch_manually(target.path, target.index);
-                }
+                let target = self.queue.set_current(idx);
+                self.go_to_row(target, false);
             }
             PlaybackCommand::StartAt(idx) => {
-                if let Some(target) = self.queue.set_current(idx) {
-                    self.switch_manually(target.path, target.index);
-                    self.snapshot.state = PlaybackState::Playing;
-                }
+                let target = self.queue.set_current(idx);
+                self.go_to_row(target, true);
+            }
+            PlaybackCommand::JumpTo(idx) => {
+                let target = self.queue.jump_to(idx);
+                self.go_to_row(target, true);
             }
             PlaybackCommand::Next => self.advance_manually(true),
             PlaybackCommand::Previous => self.advance_manually(false),

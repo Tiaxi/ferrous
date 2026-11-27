@@ -12,6 +12,8 @@ QtObject {
     required property var openTagEditorDialog
 
     property var playAt: function(index) { root.uiBridge.playAt(index) }
+    // Opens Find in Queue, which J opens while the queue has the focus.
+    property var openFindInQueue: function() {}
     property var view: null
     property var selectedIndices: []
     property var selectedIndexLookup: ({})
@@ -501,6 +503,13 @@ QtObject {
         return event.key === Qt.Key_Q && KeyUtils.isUnmodified(event)
     }
 
+    // J alone, which opens Find in Queue from the queue, as Winamp's Jump
+    // to File; the queue has no type-ahead to take it. Shortcuts the user
+    // gave it elsewhere wait while the queue has the focus.
+    function isFindInQueueKey(event) {
+        return event.key === Qt.Key_J && KeyUtils.isUnmodified(event)
+    }
+
     // Mark the selected rows to play next, or, with none selected, the
     // ringed row; or unmark them when every one is marked.
     function togglePlayNextOfSelection() {
@@ -651,6 +660,12 @@ QtObject {
 
         if (root.isPlayNextKey(event)) {
             root.togglePlayNextOfSelection()
+            event.accepted = true
+            return
+        }
+
+        if (root.isFindInQueueKey(event)) {
+            root.openFindInQueue()
             event.accepted = true
             return
         }

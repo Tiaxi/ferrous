@@ -473,6 +473,9 @@ impl QueueSync {
             BridgeQueueCommand::PlayAt(index) => {
                 BridgeQueueCommand::PlayAt(map(index).ok_or(PLAY_REMOVED_ROW_MESSAGE)?)
             }
+            BridgeQueueCommand::JumpTo(index) => {
+                BridgeQueueCommand::JumpTo(map(index).ok_or(PLAY_REMOVED_ROW_MESSAGE)?)
+            }
             BridgeQueueCommand::Select(Some(index)) => match map(index) {
                 Some(index) => BridgeQueueCommand::Select(Some(index)),
                 None => return Ok(None),
@@ -742,6 +745,15 @@ mod tests {
         assert!(matches!(
             resolve(BridgeQueueCommand::PlayAt(3)),
             Ok(Some(BridgeQueueCommand::PlayAt(0)))
+        ));
+        // A row Find in Queue found plays where it is now, or not at all.
+        assert!(matches!(
+            resolve(BridgeQueueCommand::JumpTo(1)),
+            Err(message) if message == PLAY_REMOVED_ROW_MESSAGE
+        ));
+        assert!(matches!(
+            resolve(BridgeQueueCommand::JumpTo(3)),
+            Ok(Some(BridgeQueueCommand::JumpTo(0)))
         ));
         assert!(matches!(
             resolve(BridgeQueueCommand::Select(Some(0))),
