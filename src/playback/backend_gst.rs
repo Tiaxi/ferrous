@@ -8253,6 +8253,62 @@ mod engine_tests {
         assert!(engine.snapshot.play_next.is_empty());
     }
 
+    /// Marking the staged successor that follows anyway, the next row in
+    /// the queue's order or, with Repeat-One, the current track again, and
+    /// unmarking it, keeps it staged in the pipeline: it follows gaplessly,
+    /// unmarked as it starts, and then the queue's order goes on.
+    #[test]
+    fn marking_or_unmarking_a_staged_successor_that_follows_anyway_keeps_it_staged() {
+        for repeat_one in [false, true] {
+            let fixtures = Fixtures::new("play-next-keep-staged");
+            let a = fixtures.wav("a.wav", 4_000);
+            let b = fixtures.wav("b.wav", 4_500);
+            let c = fixtures.wav("c.wav", 5_000);
+            let mut engine = Engine::start();
+            engine.case = Some(format!("Repeat-One {repeat_one}"));
+            if repeat_one {
+                engine.send(PlaybackCommand::SetRepeatMode(RepeatMode::One));
+            }
+            engine.send(PlaybackCommand::LoadQueue(vec![
+                a.clone(),
+                b.clone(),
+                c.clone(),
+            ]));
+            engine.send(PlaybackCommand::Play);
+            let (successor, row, duration) = if repeat_one {
+                (&a, 0, 4_000)
+            } else {
+                (&b, 1, 4_500)
+            };
+            engine.wait_for_settled_window(successor);
+            let changes = engine.changes.len();
+            for marks in [vec![row], Vec::new(), vec![row]] {
+                engine.send(PlaybackCommand::TogglePlayNext(vec![row]));
+                engine.wait_until("the marks did not change", |engine| {
+                    *engine.snapshot.play_next == *marks
+                });
+            }
+            assert_change(
+                &engine.wait_for_changes(changes + 1),
+                successor,
+                row,
+                Expect::Gapless,
+            );
+            engine.wait_for_playing(row, millis(duration));
+            assert!(engine.snapshot.play_next.is_empty());
+            assert_eq!(engine.cancelled_staging, 0, "the handoff was cancelled");
+            if !repeat_one {
+                assert_change(
+                    &engine.wait_for_changes(changes + 2),
+                    &c,
+                    2,
+                    Expect::Gapless,
+                );
+            }
+            assert_eq!(engine.cancelled_staging, 0, "the handoff was cancelled");
+        }
+    }
+
     /// The engine's side of an undo and a redo of a replacement: two
     /// restores in a row, with the rows the bridge would send. Which rows
     /// the bridge sends is covered by its own tests.
@@ -15295,6 +15351,53 @@ mod engine_tests {
             assert_streams_at(
                 &streams.lock().unwrap()[..2],
                 &[(ALBUM_DB, Start::Run), (ALBUM_DB, Start::Gapless)],
+            );
+        }
+
+        /// The staged shuffle pick, marked to play next, is no shuffle pick
+        /// any more: it is staged again, so Auto plays it at its album gain
+        /// rather than at the track gain it was handed over with.
+        #[test]
+        fn auto_plays_a_staged_shuffle_pick_marked_to_play_next_at_album_gain() {
+            let fixtures = Fixtures::new("replay-gain-auto-mark-staged");
+            let rows: Vec<PathBuf> = ["a.flac", "b.flac", "c.flac", "d.flac"]
+                .iter()
+                .map(|name| album_track(&fixtures, name, 4_000))
+                .collect();
+            let mut engine = Engine::start();
+            engine.send(PlaybackCommand::SetReplayGain(settings(
+                ReplayGainMode::Auto,
+                0.0,
+                0.0,
+            )));
+            engine.send(PlaybackCommand::SetShuffle(true));
+            engine.send(PlaybackCommand::LoadQueue(rows.clone()));
+            engine.send(PlaybackCommand::Play);
+            engine.wait_until("about-to-finish did not stage a pick", |engine| {
+                !engine.prepared.is_empty()
+            });
+            let picked = engine.prepared[0].clone();
+            let row = rows.iter().position(|path| *path == picked).unwrap();
+            engine.wait_for_settled_window(&picked);
+            engine.send(PlaybackCommand::TogglePlayNext(vec![row]));
+            engine.wait_until("the staged pick was not cancelled", |engine| {
+                engine.cancelled_staging == 1 && *engine.snapshot.play_next == [row]
+            });
+            let marked = engine.wait_for_changes(2);
+            assert_change(&marked, &picked, row, Expect::Gapless);
+            assert_eq!(
+                engine.queue.lock().unwrap().current_pick(),
+                TrackPick::Other
+            );
+            engine.wait_until("the marked row's gain was not reported", |engine| {
+                engine
+                    .snapshot
+                    .replay_gain
+                    .is_some_and(|report| report.track_token == marked.token)
+            });
+            assert_eq!(
+                auto_choices(&engine, marked.token),
+                [Some(GainChoice::Album)]
             );
         }
 
