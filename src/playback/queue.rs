@@ -990,14 +990,22 @@ impl GaplessQueue {
     /// Keep the staged successors that the current queue, marks and
     /// settings would still choose, in order, and drop the rest. Those kept
     /// take the marks left after them.
+    ///
+    /// A successor that would now come to play another way, such as the
+    /// next row in the queue's order once it is marked, stays when it is
+    /// still the same row by the same pick, the pick the gain stage was
+    /// given with it: it takes the cursor it would be staged with now, and
+    /// so do the successors after it.
     fn revalidate_pending(&mut self) -> Option<CancelledAdvance> {
         let rules = self.rules();
         let marks = Arc::clone(&self.cursor.play_next);
         let mut previous = self.cursor.index;
         // Where the marks left after each successor start.
         let mut rest = 0;
-        let mut rests = Vec::with_capacity(self.pending.len());
-        let cut = self.pending.iter().position(|pending| {
+        let mut restaged = false;
+        let mut cut = None;
+        for position in 0..self.pending.len() {
+            let pending = &self.pending[position];
             // The first marked row that has not failed comes next, if any.
             let first_mark = marks[rest..]
                 .iter()
@@ -1015,17 +1023,46 @@ impl GaplessQueue {
                         self.sequential_successor(previous) == Some(pending.cursor.index)
                     }
             };
-            let valid = follows && self.queue.get(pending.cursor.index) == Some(&pending.path);
-            previous = pending.cursor.index;
-            rests.push(rest);
-            !valid
-        });
-        for (pending, rest) in self.pending.iter_mut().zip(rests) {
-            if pending.cursor.play_next[..] != marks[rest..] {
-                pending.cursor.play_next = Arc::from(&marks[rest..]);
+            let in_place = self.queue.get(pending.cursor.index) == Some(&pending.path);
+            if !in_place {
+                cut = Some(position);
+                break;
             }
+            if follows && !restaged {
+                let pending = &mut self.pending[position];
+                if pending.cursor.play_next[..] != marks[rest..] {
+                    pending.cursor.play_next = Arc::from(&marks[rest..]);
+                }
+            } else if self.restage(position) {
+                restaged = true;
+            } else {
+                cut = Some(position);
+                break;
+            }
+            previous = self.pending[position].cursor.index;
         }
         self.drop_pending_from(cut?)
+    }
+
+    /// Give the successor at `position` the cursor that the track before it
+    /// would stage it with now, when that is the same row by the same pick.
+    /// Returns whether it did.
+    fn restage(&mut self, position: usize) -> bool {
+        let rules = self.rules();
+        let from = position
+            .checked_sub(1)
+            .map_or(&self.cursor, |before| &self.pending[before].cursor);
+        let Some((cursor, marked)) = self.natural_successor(from) else {
+            return false;
+        };
+        let pending = &mut self.pending[position];
+        if cursor.index != pending.cursor.index || cursor.pick != pending.cursor.pick {
+            return false;
+        }
+        pending.cursor = cursor;
+        pending.marked = marked;
+        pending.random_successor = rules.random_successor();
+        true
     }
 
     /// Drop the successors from `cut` onwards. The pipeline can drop a
@@ -2164,6 +2201,92 @@ mod tests {
         assert_eq!(queue.move_item(6, 7), None);
         assert_eq!(committed_index(&mut queue), Some(2));
         assert_eq!(marks(&queue), vec![0]);
+    }
+
+    /// Whether each staged successor has the cursor that the track before
+    /// it would stage it with now.
+    fn staged_as_now(queue: &GaplessQueue) -> bool {
+        let mut from = &queue.cursor;
+        queue.pending.iter().all(|pending| {
+            let now = queue.natural_successor(from);
+            from = &pending.cursor;
+            now.is_some_and(|(cursor, marked)| cursor == pending.cursor && marked == pending.marked)
+        })
+    }
+
+    #[test]
+    fn marking_or_unmarking_a_staged_successor_that_follows_anyway_keeps_it() {
+        // Without shuffle: the next row in the queue's order, and one more
+        // staged after it, stay staged as the row is marked and unmarked.
+        let (mut queue, _) = queue_of(6);
+        queue.set_current(1);
+        assert_eq!(staged_index(&mut queue), Some(2));
+        assert_eq!(staged_index(&mut queue), Some(3));
+        assert_eq!(queue.toggle_play_next(&[2]), None);
+        assert_eq!(queue.pending.len(), 2);
+        assert!(queue.pending[0].marked && staged_as_now(&queue));
+        assert_eq!(queue.toggle_play_next(&[2]), None);
+        assert!(!queue.pending[0].marked && staged_as_now(&queue));
+        // Marked again, it plays as the marked row, the queue's order goes
+        // on after it, and Previous goes back through it.
+        assert_eq!(queue.toggle_play_next(&[2]), None);
+        assert_eq!(committed_index(&mut queue), Some(2));
+        assert!(marks(&queue).is_empty());
+        assert_eq!(queue.current_pick(), TrackPick::Other);
+        assert_eq!(committed_index(&mut queue), Some(3));
+        assert_eq!(queue.cursor.jumps, vec![(1, 2)]);
+        assert_eq!(queue.previous_manual().map(|moved| moved.index), Some(2));
+        assert_eq!(queue.previous_manual().map(|moved| moved.index), Some(1));
+
+        // Repeat-One: the playing row, staged again, stays staged as it is
+        // marked to play again and unmarked, by the same pick.
+        for shuffle in [false, true] {
+            let (mut queue, _) = queue_of(4);
+            queue.seed_shuffle(5);
+            queue.set_shuffle_enabled(shuffle);
+            queue.set_repeat_mode(RepeatMode::One);
+            assert_eq!(staged_index(&mut queue), Some(0));
+            assert_eq!(queue.toggle_play_next(&[0]), None, "shuffle {shuffle}");
+            assert!(queue.pending[0].marked && staged_as_now(&queue));
+            assert_eq!(queue.toggle_play_next(&[0]), None, "shuffle {shuffle}");
+            assert!(!queue.pending[0].marked && staged_as_now(&queue));
+        }
+    }
+
+    #[test]
+    fn a_staged_successor_that_would_come_to_play_by_another_pick_is_dropped() {
+        // The gain stage was given the staged successor's pick, which Auto
+        // mode levels it by: a shuffle pick that is marked would be no
+        // shuffle pick, so it is staged again.
+        let (mut queue, _) = queue_of(6);
+        queue.seed_shuffle(9);
+        queue.set_shuffle_enabled(true);
+        let staged = queue.stage_natural(gapless).expect("a shuffle pick");
+        assert_eq!(staged.pick, TrackPick::Shuffle);
+        let row = queue.pending[0].cursor.index;
+        assert_eq!(queue.toggle_play_next(&[row]), HANDED);
+        let marked = queue.stage_natural(gapless).expect("the marked row");
+        assert_eq!(
+            (queue.pending[0].cursor.index, marked.pick),
+            (row, TrackPick::Other)
+        );
+        // Unmarked, a shuffle pick follows instead, drawn when staged.
+        assert_eq!(queue.toggle_play_next(&[row]), HANDED);
+
+        // Repeat-One plays a shuffle pick again as a shuffle pick, and as
+        // no shuffle pick once it is marked to play again.
+        let (mut queue, _) = queue_of(4);
+        queue.seed_shuffle(9);
+        queue.set_shuffle_enabled(true);
+        let picked = queue.next_manual().expect("a shuffle pick").index;
+        queue.set_repeat_mode(RepeatMode::One);
+        assert_eq!(queue.current_pick(), TrackPick::Shuffle);
+        assert_eq!(staged_index(&mut queue), Some(picked));
+        assert_eq!(queue.toggle_play_next(&[picked]), HANDED);
+        assert_eq!(
+            queue.stage_natural(gapless).map(|staged| staged.pick),
+            Some(TrackPick::Other)
+        );
     }
 
     #[test]
