@@ -3401,6 +3401,36 @@ void BridgeClient::clearQueue() {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdClearQueue));
 }
 
+void BridgeClient::togglePlayNext(const QVariantList &rows) {
+    const QList<quint32> sorted = queueRowList(rows);
+    if (sorted.isEmpty()) {
+        return;
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandTogglePlayNext(m_queueRevision, sorted));
+}
+
+void BridgeClient::clearPlayNext() {
+    if (m_queueRowsModel.playNextCount() == 0) {
+        return;
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdClearPlayNext));
+}
+
+int BridgeClient::playNextCount() const {
+    return m_queueRowsModel.playNextCount();
+}
+
+int BridgeClient::playNextPlace(int row) const {
+    return m_queueRowsModel.playNextPlace(row);
+}
+
+bool BridgeClient::allPlayNext(const QVariantList &rows) const {
+    const QList<quint32> sorted = queueRowList(rows);
+    return !sorted.isEmpty() && std::all_of(sorted.cbegin(), sorted.cend(), [this](quint32 row) {
+        return m_queueRowsModel.playNextPlace(static_cast<int>(row)) > 0;
+    });
+}
+
 void BridgeClient::undoQueueChange() {
     if (m_queueUndoId == 0) {
         return;
@@ -5929,7 +5959,8 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         && !snapshot.metadata.present
         && !snapshot.settings.present
         && !snapshot.lastfm.present
-        && !snapshot.queueUndo.present) {
+        && !snapshot.queueUndo.present
+        && !snapshot.playNext.present) {
         return false;
     }
 
@@ -6206,6 +6237,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         snapshotSignalChanged = true;
     }
 
+    const QVector<int> playNextBefore = m_queueRowsModel.playNextRows();
     if (queue.present && !queueFits) {
         requestQueueResync();
     } else if (queueFits) {
@@ -6249,6 +6281,17 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         if (m_queueLength != previousLength) {
             queueSignalChanged = true;
         }
+    }
+    if (snapshot.playNext.present) {
+        // The marks name the rows of the revision they come with. Rows of
+        // another, while the whole queue is on its way, show none.
+        m_queueRowsModel.setPlayNext(snapshot.playNext.revision == m_queueRevision
+                                         ? snapshot.playNext.rows
+                                         : QVector<int>{});
+    }
+    if (m_queueRowsModel.playNextRows() != playNextBefore) {
+        changed = true;
+        emit playNextChanged();
     }
     finishSnapshotSection(snapshotQueueMs);
 

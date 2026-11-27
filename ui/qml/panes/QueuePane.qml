@@ -891,6 +891,10 @@ Rectangle {
                 // The row being dragged, which Escape stops.
                 property var draggingRow: null
 
+                // Q marks rows to play next, before a shortcut stored for it.
+                Keys.onShortcutOverride: function(event) {
+                    event.accepted = root.controller.isPlayNextKey(event)
+                }
                 Keys.onPressed: function(event) {
                     if (event.key === Qt.Key_Escape && playlistView.draggingRow) {
                         playlistView.draggingRow.cancelDrag()
@@ -970,6 +974,13 @@ Rectangle {
                     readonly property string lengthTextValue: rowValues.lengthText
                         || I18n.i18nc("@info:status no time", "–:––")
                     readonly property string pathValue: rowValues.path || ""
+                    // The row's place among the rows marked to play next,
+                    // from 1; 0 for a row not marked.
+                    readonly property int playNextPlace: rowValues.playNext || 0
+                    readonly property string playNextText: playNextPlace > 0
+                        ? I18n.i18nc("@info accessible state of a queue row marked to play next, %1 is its place in their order",
+                                     "plays next, number %1", playNextPlace)
+                        : ""
                     readonly property bool isCurrentQueueRow: index === root.uiBridge.playingQueueIndex
                     // Playing or paused: amber marks only what is playing now.
                     readonly property bool isNow: isCurrentQueueRow
@@ -1046,6 +1057,7 @@ Rectangle {
                         albumValue,
                         lengthTextValue,
                         playbackStateText,
+                        playNextText,
                         unreadableReason
                     ].filter(function(part) { return part.length > 0 }).join(", ")
                     Accessible.selectable: true
@@ -1095,10 +1107,16 @@ Rectangle {
                         height: playlistRow.height
 
                         Kirigami.Icon {
+                            id: rowStateGlyph
                             objectName: "queueRowState"
                             readonly property string glyph: playlistRow.stateGlyph
                             visible: glyph.length > 0
-                            anchors.centerIn: parent
+                            // At the column's start when the row's place
+                            // to play next shows beside it.
+                            x: playlistRow.playNextPlace > 0
+                                ? root.uiPalette.scaledSize(2)
+                                : Math.round((parent.width - width) / 2)
+                            anchors.verticalCenter: parent.verticalCenter
                             // The error mark at the status bar's size, the
                             // transport's marks smaller, and the stop
                             // square smaller again, so that its solid ink
@@ -1122,6 +1140,32 @@ Rectangle {
                             // The amber glyph fades in as the old row's
                             // fades out.
                             opacity: playlistRow.isNow ? playlistRow.amberIn : 1
+                        }
+
+                        // The row's place among the rows marked to play
+                        // next, in the accent read as text: in the column,
+                        // or after the state glyph of a row that has one,
+                        // such as the playing row marked to play again.
+                        Text {
+                            objectName: "queueRowPlayNext"
+                            visible: playlistRow.playNextPlace > 0 && playlistRow.amberLeft <= 0
+                            x: rowStateGlyph.visible ? rowStateGlyph.x + rowStateGlyph.width : 0
+                            width: parent.width - x
+                            height: parent.height
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                            textFormat: Text.PlainText
+                            text: String(playlistRow.playNextPlace)
+                            font.family: root.uiPalette.baseFont.family
+                            font.pointSize: root.uiPalette.basePointSize * 0.85
+                            font.weight: Font.DemiBold
+                            font.features: root.uiPalette.tabularFigures
+                            // A long list's larger numbers shrink to fit.
+                            fontSizeMode: Text.HorizontalFit
+                            minimumPointSize: root.uiPalette.basePointSize * 0.6
+                            color: playlistRow.rowSelected
+                                ? root.uiPalette.playNextSelected
+                                : root.uiPalette.playNext
                         }
 
                         // The glyph the row had while it was now, fading
@@ -1381,6 +1425,23 @@ Rectangle {
                                 root.controller.playAt(playlistContextMenu.rowIndex)
                             }
                         }
+                    }
+
+                    Components.KeyHintMenuItem {
+                        objectName: "queuePlayNextItem"
+                        // Unmarks when every row it acts on is marked.
+                        // Again as the marks change while the menu is open,
+                        // such as when a marked row starts.
+                        readonly property bool unmarks: playlistContextMenu.opened
+                            && root.uiBridge.playNextCount > 0
+                            && root.controller.allPlayNextOf(playlistContextMenu.rowIndex)
+                        text: unmarks
+                            ? I18n.i18nc("@action:inmenu", "Don’t Play Next")
+                            : I18n.i18nc("@action:inmenu", "Play Next")
+                        icon.name: "go-next"
+                        keyHint: I18n.i18nc("@info:shortcut key name", "Q")
+                        enabled: playlistContextMenu.rowIndex >= 0
+                        onTriggered: root.controller.togglePlayNextOf(playlistContextMenu.rowIndex)
                     }
 
                     MenuSeparator {}

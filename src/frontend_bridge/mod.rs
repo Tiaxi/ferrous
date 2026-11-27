@@ -197,6 +197,12 @@ pub enum BridgeQueueCommand {
     },
     Select(Option<usize>),
     Clear,
+    /// Mark the rows to play next, or unmark them when every one is marked;
+    /// see [`PlaybackCommand::TogglePlayNext`]. Not a change that can be
+    /// undone, and the undo offered stays.
+    TogglePlayNext(Vec<usize>),
+    /// Unmark every row marked to play next.
+    ClearPlayNext,
     /// Undo the destructive queue change the UI was offered under this ID;
     /// see [`queue_undo`].
     Undo(u64),
@@ -882,6 +888,9 @@ pub(super) struct BridgeState {
     /// Number of `SetVolume` commands sent to the playback engine; see
     /// [`PlaybackEvent::OutsideVolume`].
     volume_commands_sent: u64,
+    /// The commands that edit the queue's rows or marks sent to the engine
+    /// before its events are taken; see [`PlaybackSnapshot::queue_commands`].
+    engine_queue_commands_sent: u64,
     /// Keys of the restored session file that this build does not know,
     /// saved again as they were.
     session_unknown_keys: serde_json::Map<String, serde_json::Value>,
@@ -1058,7 +1067,12 @@ impl BridgeState {
             Vec::new()
         };
         BridgeSnapshot {
-            playback: self.playback.clone(),
+            // The marks the engine reported, carried across the edits the
+            // bridge made since, so they fit the rows the snapshot carries.
+            playback: PlaybackSnapshot {
+                play_next: self.queue_sync.play_next(),
+                ..self.playback.clone()
+            },
             play_serial: self.play_serial,
             analysis: self.analysis.clone(),
             metadata,
@@ -2324,6 +2338,7 @@ impl BridgeLoopRuntime {
         event_tx: &Sender<BridgeEvent>,
     ) -> SnapshotUrgency {
         let volume = self.state.settings.volume;
+        self.state.engine_queue_commands_sent = self.playback.queue_commands_sent();
         let urgency = process_playback_event(
             event,
             &self.analysis,
@@ -2628,6 +2643,7 @@ impl BridgeLoopRuntime {
 
     fn pump_bridge_events(&mut self, event_tx: &Sender<BridgeEvent>) -> SnapshotUrgency {
         let volume = self.state.settings.volume;
+        self.state.engine_queue_commands_sent = self.playback.queue_commands_sent();
         let mut urgency = drain_playback_events(
             &self.playback_rx,
             &self.analysis,
@@ -5731,7 +5747,7 @@ mod tests {
         engine_rx
             .try_iter()
             .filter_map(|command| match command {
-                PlaybackCommand::RestoreQueue { paths, current } => Some((paths, current)),
+                PlaybackCommand::RestoreQueue { paths, current, .. } => Some((paths, current)),
                 _ => None,
             })
             .collect()
@@ -5758,6 +5774,211 @@ mod tests {
         replace_queue(&mut runtime, queue, &event_tx);
         assert!(runtime.emit_snapshot(&event_tx));
         (runtime, event_tx, event_rx)
+    }
+
+    /// A bridge with `count` queued rows sent to the UI, whose engine
+    /// events the test sends on the returned sender.
+    fn play_next_runtime(
+        count: usize,
+    ) -> (
+        BridgeLoopRuntime,
+        Receiver<PlaybackCommand>,
+        Sender<PlaybackEvent>,
+        Sender<BridgeEvent>,
+        Vec<PathBuf>,
+    ) {
+        let (mut runtime, engine_rx, _, _) = queue_order_runtime();
+        let (engine_events, playback_rx) = unbounded();
+        runtime.playback_rx = playback_rx;
+        let (event_tx, _event_rx) = bounded::<BridgeEvent>(64);
+        let queue: Vec<PathBuf> = (0..count)
+            .map(|row| p(&format!("/music/{row}.flac")))
+            .collect();
+        replace_queue(&mut runtime, &queue, &event_tx);
+        let _ = engine_rx.try_iter().count();
+        (runtime, engine_rx, engine_events, event_tx, queue)
+    }
+
+    /// The engine's report of `rows` marked, made once it had applied
+    /// `queue_commands` edits.
+    fn marks_reported(rows: &[usize], queue_commands: u64) -> PlaybackEvent {
+        PlaybackEvent::Snapshot(PlaybackSnapshot {
+            play_next: rows.into(),
+            queue_commands,
+            ..PlaybackSnapshot::default()
+        })
+    }
+
+    fn marks_shown(runtime: &BridgeLoopRuntime) -> Vec<usize> {
+        runtime.state.snapshot(false).playback.play_next.to_vec()
+    }
+
+    fn mark_commands(engine_rx: &Receiver<PlaybackCommand>) -> Vec<String> {
+        engine_rx
+            .try_iter()
+            .filter(|command| {
+                matches!(
+                    command,
+                    PlaybackCommand::TogglePlayNext(_) | PlaybackCommand::SetPlayNext(_)
+                )
+            })
+            .map(|command| format!("{command:?}"))
+            .collect()
+    }
+
+    #[test]
+    fn the_bridge_carries_the_engines_marks_across_its_edits_until_the_engine_reports() {
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, engine_events, event_tx, _) = play_next_runtime(5);
+        let shown = runtime.state.queue_sync.revision();
+        // Q on rows 4 and 2, at the revision the UI shows; the engine owns
+        // the marks, so the bridge shows them once the engine reports.
+        runtime.handle_command(
+            BridgeCommand::QueueAt {
+                revision: shown,
+                command: BridgeQueueCommand::TogglePlayNext(vec![4, 2]),
+            },
+            &event_tx,
+        );
+        assert_eq!(mark_commands(&engine_rx), ["TogglePlayNext([4, 2])"]);
+        assert!(marks_shown(&runtime).is_empty());
+        let sent = runtime.playback.queue_commands_sent();
+        engine_events.send(marks_reported(&[2, 4], sent)).unwrap();
+        assert_eq!(
+            runtime.pump_bridge_events(&event_tx),
+            SnapshotUrgency::Immediate
+        );
+        assert_eq!(marks_shown(&runtime), [2, 4]);
+
+        // A removal carries them with their rows, and is offered for undo.
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::RemoveMany(vec![0])),
+            &event_tx,
+        );
+        assert_eq!(marks_shown(&runtime), [1, 3]);
+        let offer = runtime.state.queue_undo.state().offer_id;
+        assert_ne!(offer, 0);
+        // A report from before the engine applied the removal is stale.
+        engine_events.send(marks_reported(&[2, 4], sent)).unwrap();
+        runtime.pump_bridge_events(&event_tx);
+        assert_eq!(marks_shown(&runtime), [1, 3]);
+
+        // Marking is no change to undo, and keeps the undo offered.
+        let edited = runtime.state.queue_sync.revision();
+        runtime.handle_command(
+            BridgeCommand::QueueAt {
+                revision: edited,
+                command: BridgeQueueCommand::TogglePlayNext(vec![1]),
+            },
+            &event_tx,
+        );
+        assert_eq!(runtime.state.queue_undo.state().offer_id, offer);
+        engine_events
+            .send(marks_reported(&[3], runtime.playback.queue_commands_sent()))
+            .unwrap();
+        runtime.pump_bridge_events(&event_tx);
+        assert_eq!(marks_shown(&runtime), [3]);
+
+        // A command for the rows the UI showed before the removal reaches
+        // the rows it named; a removed one is left out.
+        let _ = mark_commands(&engine_rx);
+        runtime.handle_command(
+            BridgeCommand::QueueAt {
+                revision: shown,
+                command: BridgeQueueCommand::TogglePlayNext(vec![0, 4]),
+            },
+            &event_tx,
+        );
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::ClearPlayNext),
+            &event_tx,
+        );
+        assert_eq!(
+            mark_commands(&engine_rx),
+            ["TogglePlayNext([3])", "SetPlayNext([])"]
+        );
+        assert_eq!(runtime.state.queue_undo.state().offer_id, offer);
+
+        // A stale report that wakes the bridge on its own is refused too.
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::Remove(0)),
+            &event_tx,
+        );
+        assert_eq!(marks_shown(&runtime), [2]);
+        let stale = marks_reported(&[0, 1], runtime.playback.queue_commands_sent() - 1);
+        runtime.handle_wake(BridgeLoopWake::Playback(stale), &event_tx);
+        assert_eq!(marks_shown(&runtime), [2]);
+        // The engine's report once it applied them shows at once, though
+        // its marks are those of the stale one.
+        let current = marks_reported(&[0, 1], runtime.playback.queue_commands_sent());
+        engine_events.send(current).unwrap();
+        assert_eq!(
+            runtime.pump_bridge_events(&event_tx),
+            SnapshotUrgency::Immediate
+        );
+        assert_eq!(marks_shown(&runtime), [0, 1]);
+    }
+
+    #[test]
+    fn undoing_a_removal_or_a_replacement_brings_back_the_marks_of_its_rows() {
+        use crate::playback::PlayNextRestore;
+
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, engine_events, event_tx, queue) = play_next_runtime(5);
+        engine_events
+            .send(marks_reported(
+                &[3, 1],
+                runtime.playback.queue_commands_sent(),
+            ))
+            .unwrap();
+        runtime.pump_bridge_events(&event_tx);
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::RemoveMany(vec![1, 2])),
+            &event_tx,
+        );
+        assert_eq!(marks_shown(&runtime), [1]);
+        let restores = |engine_rx: &Receiver<PlaybackCommand>| -> Vec<PlayNextRestore> {
+            engine_rx
+                .try_iter()
+                .filter_map(|command| match command {
+                    PlaybackCommand::RestoreQueue { play_next, .. } => Some(play_next),
+                    _ => None,
+                })
+                .collect()
+        };
+        let _ = restores(&engine_rx);
+        let offer = runtime.state.queue_undo.state().offer_id;
+        runtime.handle_command(ui_undo(offer), &event_tx);
+        assert_eq!(runtime.state.queue, queue);
+        assert_eq!(
+            restores(&engine_rx),
+            [PlayNextRestore::Reinserted {
+                rows: vec![1, 2],
+                before: vec![3, 1],
+            }]
+        );
+        // The bridge shows what the engine makes of them.
+        assert_eq!(marks_shown(&runtime), [3, 1]);
+
+        // A replaced queue comes back with its marks; a redo brings back
+        // the replacement with its own, none here.
+        let other = vec![p("/music/other.flac")];
+        replace_queue(&mut runtime, &other, &event_tx);
+        assert!(marks_shown(&runtime).is_empty());
+        let offer = runtime.state.queue_undo.state().offer_id;
+        runtime.handle_command(ui_undo(offer), &event_tx);
+        assert_eq!(runtime.state.queue, queue);
+        assert_eq!(restores(&engine_rx), [PlayNextRestore::Rows(vec![3, 1])]);
+        assert_eq!(marks_shown(&runtime), [3, 1]);
+        let redo = runtime.state.queue_undo.state().redo_id;
+        runtime.handle_command(ui_redo(redo), &event_tx);
+        assert_eq!(runtime.state.queue, other);
+        assert_eq!(restores(&engine_rx), [PlayNextRestore::Rows(Vec::new())]);
+        assert!(marks_shown(&runtime).is_empty());
+        // Its undo brings the marks back once more.
+        let offer = runtime.state.queue_undo.state().offer_id;
+        runtime.handle_command(ui_undo(offer), &event_tx);
+        assert_eq!(restores(&engine_rx), [PlayNextRestore::Rows(vec![3, 1])]);
     }
 
     #[test]
@@ -6545,7 +6766,8 @@ mod tests {
                 "{:?}",
                 PlaybackCommand::RestoreQueue {
                     paths: album.clone(),
-                    current: 1
+                    current: 1,
+                    play_next: crate::playback::PlayNextRestore::Rows(Vec::new()),
                 }
             )]
         );

@@ -64,6 +64,10 @@ pub(super) struct Change {
     /// The row of the track the engine had open before the change, also
     /// while stopped.
     pub(super) current: Option<usize>,
+    /// The rows marked to play next before the change, in their order. An
+    /// undo brings back the marks of the rows it restores; marking and
+    /// unmarking are no changes of their own to undo.
+    pub(super) play_next: Vec<usize>,
 }
 
 /// What a redone change makes of the queue an undo left.
@@ -92,6 +96,9 @@ pub(super) struct Redo {
     /// The row of the track the engine had open before the undo, where a
     /// redone replacement stops when that track is not in its queue.
     pub(super) current: Option<usize>,
+    /// The rows of a cleared or replaced queue marked to play next before
+    /// the undo, which a redone replacement marks again.
+    pub(super) play_next: Vec<usize>,
 }
 
 impl Change {
@@ -276,6 +283,7 @@ mod tests {
             before: Before::Queue(paths.iter().map(|path| p(path)).collect()),
             selected: Some(0),
             current: None,
+            play_next: Vec::new(),
         }
     }
 
@@ -367,6 +375,7 @@ mod tests {
             before: Before::Rows(vec![(1, p("/old.flac")), (3, p("/kept.flac"))]),
             selected: Some(1),
             current: Some(0),
+            play_next: Vec::new(),
         }));
         let id = undo.state().offer_id;
         undo.remap_paths(&PathRenames::from([(p("/old.flac"), p("/new.flac"))]));
@@ -383,6 +392,7 @@ mod tests {
             after: After::Queue(Vec::new()),
             selected: None,
             current: None,
+            play_next: Vec::new(),
         }
     }
 
@@ -428,6 +438,7 @@ mod tests {
             after: After::Queue(vec![p("/old.flac"), p("/kept.flac")]),
             selected: Some(0),
             current: Some(1),
+            play_next: Vec::new(),
         });
         let id = undo.state().redo_id;
         undo.remap_paths(&PathRenames::from([(p("/old.flac"), p("/new.flac"))]));

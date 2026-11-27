@@ -71,6 +71,9 @@ class BridgeClient : public QObject {
     // queueUndoKind name the change to undo.
     Q_PROPERTY(double queueRedoId READ queueRedoId NOTIFY queueUndoChanged)
     Q_PROPERTY(int queueRedoKind READ queueRedoKind NOTIFY queueUndoChanged)
+    // How many queue rows are marked to play next; queueRows' playNext role
+    // has each row's place among them.
+    Q_PROPERTY(int playNextCount READ playNextCount NOTIFY playNextChanged)
     // The playing row changes with the rows as well, such as when a track
     // is put before it: see queueChanged. trackIdentityChanged follows.
     Q_PROPERTY(int playingQueueIndex READ playingQueueIndex NOTIFY queueChanged)
@@ -319,6 +322,7 @@ public:
     double volume() const;
     int queueLength() const;
     double queueUndoId() const;
+    int playNextCount() const;
     int queueUndoKind() const;
     double queueRedoId() const;
     int queueRedoKind() const;
@@ -568,6 +572,17 @@ public:
     // Move each run of `rows` one row up (`direction` < 0) or down.
     Q_INVOKABLE void shiftQueueRows(const QVariantList &rows, int direction);
     Q_INVOKABLE void clearQueue();
+    // Mark the queue's `rows` to play next, after the rows marked already,
+    // in the queue's order; when every one of them is marked, unmark them.
+    Q_INVOKABLE void togglePlayNext(const QVariantList &rows);
+    // Unmark every row marked to play next.
+    Q_INVOKABLE void clearPlayNext();
+    // The place of `row` among the rows marked to play next, from 1; 0 for
+    // a row not marked.
+    Q_INVOKABLE int playNextPlace(int row) const;
+    // Whether every one of `rows` is marked to play next, so that marking
+    // them would unmark them; false for none.
+    Q_INVOKABLE bool allPlayNext(const QVariantList &rows) const;
     // Undo the change of queueUndoId. The backend refuses, with an error,
     // one that a newer change has withdrawn.
     Q_INVOKABLE void undoQueueChange();
@@ -721,6 +736,8 @@ signals:
     void bridgeError(const QString &message, int category, int severity, const QString &subject,
                      const QString &detail, bool failedToPlay);
     void queueUndoChanged();
+    // The rows marked to play next, or their places, changed.
+    void playNextChanged();
     // An undo brought back these rows, or a redo moved them here, and the
     // queue view selects them; they are rows of the queue as it is when
     // this is emitted.

@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -11,6 +12,8 @@ use crate::analysis::AnalysisCommand;
 
 pub mod clock;
 pub use clock::{monotonic_now, MonotonicTime};
+pub(crate) mod play_next;
+pub use play_next::PlayNextRestore;
 pub mod replay_gain;
 pub use replay_gain::{
     AppliedGain, GainChoice, GainSource, ReplayGainMode, ReplayGainSettings, TrackPick,
@@ -132,6 +135,12 @@ pub struct PlaybackSnapshot {
     /// its audio plays; `None` while `ReplayGain` is off, and before the
     /// output plays the current track's stream.
     pub replay_gain: Option<ReplayGainReport>,
+    /// The queue rows marked to play next, in the order they play.
+    pub play_next: Arc<[usize]>,
+    /// How many commands that edit the queue's rows or marks, see
+    /// [`PlaybackCommand::edits_queue`], the engine has applied. Rows in a
+    /// snapshot from before all those sent were applied may be stale.
+    pub queue_commands: u64,
 }
 
 /// The `ReplayGain` that the output applies to a track.
@@ -169,9 +178,11 @@ pub enum PlaybackCommand {
     /// its path, otherwise at its first row. Otherwise playback stops and
     /// row `current` becomes the current track, stopped at its start. The
     /// engine never starts playback for this command.
+    /// `play_next` says which rows are marked to play next then.
     RestoreQueue {
         paths: Vec<PathBuf>,
         current: usize,
+        play_next: PlayNextRestore,
     },
     RemoveAt(usize),
     RemoveMany(Vec<usize>),
@@ -191,6 +202,16 @@ pub enum PlaybackCommand {
         paths: Vec<PathBuf>,
     },
     ClearQueue,
+    /// Mark the rows to play next, after the rows marked already, in the
+    /// queue's order; when every one of them is marked, unmark them. The
+    /// first marked row is the natural successor and Next's target, also
+    /// with shuffle or Repeat-One on, and leaves the list when it becomes
+    /// the current track. A staged successor that no longer follows is
+    /// dropped.
+    TogglePlayNext(Vec<usize>),
+    /// Mark these rows to play next, in this order, in place of the marks,
+    /// as a restored session does; none to clear the marks.
+    SetPlayNext(Vec<usize>),
     /// Make row `idx` the current track, from its start, keeping the
     /// playback state: a stopped player stays stopped and a paused one
     /// paused.
@@ -230,6 +251,29 @@ pub enum PlaybackCommand {
     /// Add a channel to the soloed channels, or remove it.
     SoloChannel(u8),
     Poll,
+}
+
+impl PlaybackCommand {
+    /// Whether the command edits the queue's rows or the rows marked to
+    /// play next, which [`PlaybackSnapshot::queue_commands`] counts.
+    #[must_use]
+    pub fn edits_queue(&self) -> bool {
+        matches!(
+            self,
+            Self::LoadQueue(_)
+                | Self::PlayQueue(_)
+                | Self::AddToQueue(_)
+                | Self::RestoreQueue { .. }
+                | Self::RemoveAt(_)
+                | Self::RemoveMany(_)
+                | Self::MoveQueue { .. }
+                | Self::ReorderQueue(_)
+                | Self::InsertIntoQueue { .. }
+                | Self::ClearQueue
+                | Self::TogglePlayNext(_)
+                | Self::SetPlayNext(_)
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -460,6 +504,8 @@ pub struct PlaybackEngine {
     failure: Arc<OnceLock<String>>,
     /// What the engine left behind when it stopped.
     exit: Receiver<EngineExit>,
+    /// The commands sent that [`PlaybackSnapshot::queue_commands`] counts.
+    queue_commands_sent: AtomicU64,
 }
 
 /// What a playback engine that stopped left behind.
@@ -539,6 +585,7 @@ impl PlaybackEngine {
                 event_tx,
                 failure,
                 exit,
+                queue_commands_sent: AtomicU64::new(0),
             },
             event_rx,
         )
@@ -568,6 +615,9 @@ impl PlaybackEngine {
     /// [`PlaybackErrorOutcome::EngineUnavailable`] error instead, except
     /// for the bridge's own polls.
     pub fn command(&self, cmd: PlaybackCommand) {
+        if cmd.edits_queue() {
+            self.queue_commands_sent.fetch_add(1, Ordering::Relaxed);
+        }
         let Err(crossbeam_channel::SendError(cmd)) = self.tx.send(cmd) else {
             return;
         };
@@ -584,6 +634,14 @@ impl PlaybackEngine {
             detail,
             outcome: PlaybackErrorOutcome::EngineUnavailable,
         }));
+    }
+
+    /// How many commands that [`PlaybackSnapshot::queue_commands`] counts
+    /// were sent. A snapshot that counts fewer was made before the engine
+    /// applied them all.
+    #[must_use]
+    pub fn queue_commands_sent(&self) -> u64 {
+        self.queue_commands_sent.load(Ordering::Relaxed)
     }
 
     /// An engine that plays to no audio device: the `GStreamer` backend's
@@ -606,6 +664,7 @@ impl PlaybackEngine {
             event_tx: crossbeam_channel::unbounded().0,
             failure: Arc::new(OnceLock::new()),
             exit: crossbeam_channel::never(),
+            queue_commands_sent: AtomicU64::new(0),
         }
     }
 }
@@ -1014,6 +1073,7 @@ mod tests {
         engine.command(PlaybackCommand::RestoreQueue {
             paths: paths.clone(),
             current: 2,
+            play_next: super::PlayNextRestore::None,
         });
         let snapshot = recv_snapshot(&rx, Duration::from_millis(100)).expect("kept track");
         assert_eq!(snapshot.current, Some(paths[2].clone()));
@@ -1029,6 +1089,7 @@ mod tests {
         engine.command(PlaybackCommand::RestoreQueue {
             paths: other.clone(),
             current: 1,
+            play_next: super::PlayNextRestore::None,
         });
         let snapshot = recv_snapshot(&rx, Duration::from_millis(100)).expect("stopped");
         assert_eq!(snapshot.current, Some(other[1].clone()));

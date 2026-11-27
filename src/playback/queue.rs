@@ -12,7 +12,9 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use super::play_next::{self, PlayNextRestore};
 use super::{PathRenames, RepeatMode, TrackPick};
 
 /// A queue position together with the shuffle navigation and random state
@@ -29,6 +31,14 @@ struct Cursor {
     /// change to the queue or its rules leaves it as it is, so the track
     /// keeps the gain that Auto mode chose for it.
     pick: TrackPick,
+    /// The rows marked to play next, in the order they play. A natural
+    /// advance and Next go to the first; a row leaves the list when the
+    /// cursor goes to it.
+    play_next: Arc<[usize]>,
+    /// Without shuffle, each marked row the cursor went to, with the row it
+    /// went from, latest last, so that Previous goes back through what
+    /// played. Shuffle keeps them in its history.
+    jumps: Vec<(usize, usize)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,11 +58,48 @@ impl Cursor {
     fn clear_shuffle_navigation(&mut self) {
         self.shuffle_history.clear();
         self.shuffle_forward.clear();
+        self.jumps.clear();
     }
 
-    /// Restart navigation after the queue order changed.
+    /// Take the row the cursor is at out of the list of rows to play next.
+    fn unmark_current(&mut self) {
+        if self.play_next.contains(&self.index) {
+            let index = self.index;
+            self.play_next = self
+                .play_next
+                .iter()
+                .copied()
+                .filter(|row| *row != index)
+                .collect();
+        }
+    }
+
+    /// Put each marked row where `remap` says, leaving out those it drops.
+    fn remap_play_next(&mut self, remap: impl FnOnce(&[usize]) -> Vec<usize>) {
+        if !self.play_next.is_empty() {
+            self.play_next = remap(&self.play_next).into();
+        }
+    }
+
+    /// Carry the jumps to marked rows to where `map` puts their rows. A
+    /// jump `map` drops a row of ends the history: Previous reaches the
+    /// jumps before it only through it.
+    fn remap_jumps(&mut self, map: impl Fn(usize) -> Option<usize>) {
+        let mut kept = Vec::with_capacity(self.jumps.len());
+        for (from, to) in &self.jumps {
+            match (map(*from), map(*to)) {
+                (Some(from), Some(to)) => kept.push((from, to)),
+                _ => kept.clear(),
+            }
+        }
+        self.jumps = kept;
+    }
+
+    /// Restart navigation after the queue order changed. The jumps to
+    /// marked rows stay, for the caller to carry with their rows.
     fn reset_navigation(&mut self, len: usize) {
-        self.clear_shuffle_navigation();
+        self.shuffle_history.clear();
+        self.shuffle_forward.clear();
         self.rebuild_shuffle_pool(len);
     }
 
@@ -85,6 +132,12 @@ impl Cursor {
             return false;
         }
         match advance {
+            // A marked row plays next, also with Repeat-One: marking it
+            // asked for it.
+            Advance::Natural | Advance::NextManual if !self.play_next.is_empty() => {
+                self.advance_play_next(len, rules);
+                true
+            }
             Advance::Natural if rules.repeat_mode == RepeatMode::One => true,
             Advance::Natural | Advance::NextManual => {
                 if rules.shuffle_enabled {
@@ -105,10 +158,42 @@ impl Cursor {
                         self.pick = TrackPick::Shuffle;
                         return true;
                     }
+                } else if let Some(&(from, to)) = self.jumps.last() {
+                    // Back from a marked row to the row that played before.
+                    if to == self.index && from < len {
+                        self.jumps.pop();
+                        self.index = from;
+                        self.pick = TrackPick::Other;
+                        self.rebuild_shuffle_pool(len);
+                        return true;
+                    }
                 }
                 self.advance_sequential(len, rules, false)
             }
         }
+    }
+
+    /// Go to the first marked row, which leaves the list. It is no shuffle
+    /// pick, also with shuffle on, and the queue's order goes on after it.
+    fn advance_play_next(&mut self, len: usize, rules: Rules) {
+        let next = self.play_next[0];
+        self.play_next = Arc::from(&self.play_next[1..]);
+        if rules.shuffle_enabled {
+            if next != self.index {
+                self.shuffle_forward.clear();
+                self.shuffle_history.push(self.index);
+            }
+            // It counts as played for the shuffle's round.
+            self.shuffle_pool.retain(|row| *row != next);
+            self.index = next;
+        } else {
+            if next != self.index {
+                self.jumps.push((self.index, next));
+            }
+            self.index = next;
+            self.rebuild_shuffle_pool(len);
+        }
+        self.pick = TrackPick::Other;
     }
 
     fn advance_sequential(&mut self, len: usize, rules: Rules, forward: bool) -> bool {
@@ -227,6 +312,8 @@ struct PendingAdvance {
     handoff: Handoff,
     staged_spectrogram: bool,
     random_successor: bool,
+    /// The successor is the first marked row of the cursor before it.
+    marked: bool,
 }
 
 /// The successor that `stage_natural` staged.
@@ -375,6 +462,29 @@ impl GaplessQueue {
         self.cursor.pick
     }
 
+    /// The rows marked to play next, in the order they play.
+    pub(crate) fn play_next(&self) -> Arc<[usize]> {
+        Arc::clone(&self.cursor.play_next)
+    }
+
+    /// Mark `rows` to play next, or unmark them when every one is marked;
+    /// see [`play_next::toggled`]. Staged successors that no longer follow
+    /// are dropped.
+    pub(crate) fn toggle_play_next(&mut self, rows: &[usize]) -> Option<CancelledAdvance> {
+        let list = play_next::toggled(&self.cursor.play_next, rows, self.queue.len());
+        self.set_play_next(list)
+    }
+
+    /// Mark `rows` to play next, in this order, in place of the marks.
+    pub(crate) fn set_play_next(&mut self, rows: Vec<usize>) -> Option<CancelledAdvance> {
+        let list = play_next::sanitized(rows, self.queue.len());
+        if *self.cursor.play_next == *list {
+            return None;
+        }
+        self.cursor.play_next = list.into();
+        self.revalidate_pending()
+    }
+
     /// Path of the row at `index`.
     #[cfg(feature = "gst")]
     pub(crate) fn path_at(&self, index: usize) -> Option<&Path> {
@@ -437,7 +547,7 @@ impl GaplessQueue {
     /// `None` and stays when no such track is left; with repeat-one, the
     /// failed track is the only natural successor.
     pub(crate) fn skip_failed_current(&mut self) -> Option<ManualMove> {
-        let cursor = self.natural_successor(&self.cursor)?;
+        let (cursor, _) = self.natural_successor(&self.cursor)?;
         let path = self.queue.get(cursor.index)?.clone();
         let cancelled = self.cancel_pending();
         self.cursor = cursor;
@@ -460,26 +570,36 @@ impl GaplessQueue {
         self.queue = queue;
         self.cursor.index = 0;
         self.cursor.pick = TrackPick::Other;
+        self.cursor.play_next = Arc::default();
+        self.cursor.jumps.clear();
         self.cursor.reset_navigation(self.queue.len());
         cancelled
     }
 
     /// Replace the queue with `queue`, in which the committed track is row
-    /// `current`, such as when an undo puts removed rows back around it.
-    /// Staged successors stay while they are still the tracks that would
-    /// follow; the rest are dropped.
+    /// `current`, such as when an undo puts removed rows back around it,
+    /// with the marks `marks` brings back. Staged successors stay while
+    /// they are still the tracks that would follow; the rest are dropped.
     pub(crate) fn restore(
         &mut self,
         queue: Vec<PathBuf>,
         current: usize,
+        marks: &PlayNextRestore,
     ) -> Option<CancelledAdvance> {
+        let list = play_next::restored(&self.cursor.play_next, marks, queue.len());
+        // Rows put back keep the rows around them, and the jumps between.
+        let stayed = play_next::reinserted_rows(marks, queue.len());
         self.queue = queue;
         self.cursor.index = current;
+        self.cursor.play_next = list.into();
         let random = self.rules().random_successor();
         let mut previous = current;
+        let mut marked = self.cursor.play_next.iter().copied();
         let mut rows = Vec::with_capacity(self.pending.len());
         for pending in &self.pending {
-            let row = if random {
+            let row = if pending.marked {
+                marked.find(|row| !self.row_failed(*row))
+            } else if random {
                 self.queue.iter().position(|path| *path == pending.path)
             } else {
                 self.sequential_successor(previous)
@@ -493,7 +613,13 @@ impl GaplessQueue {
             pending.cursor.index = row;
         }
         let len = self.queue.len();
-        self.for_each_cursor(|cursor| cursor.reset_navigation(len));
+        self.for_each_cursor(|cursor| {
+            match &stayed {
+                Some(stayed) => cursor.remap_jumps(|row| stayed.get(row).copied()),
+                None => cursor.jumps.clear(),
+            }
+            cursor.reset_navigation(len);
+        });
         self.revalidate_pending()
     }
 
@@ -531,6 +657,8 @@ impl GaplessQueue {
         self.cursor.index = idx;
         // The user's pick, also with shuffle on.
         self.cursor.pick = TrackPick::Other;
+        self.cursor.unmark_current();
+        self.cursor.jumps.clear();
         self.cursor.reset_navigation(self.queue.len());
         Some(ManualMove {
             path,
@@ -559,12 +687,23 @@ impl GaplessQueue {
         for pending in &mut self.pending {
             pending.cursor.index -= removed.partition_point(|r| *r < pending.cursor.index);
         }
+        self.for_each_cursor(|cursor| {
+            cursor.remap_play_next(|list| play_next::after_removal(list, &removed));
+            cursor.remap_jumps(|row| {
+                removed
+                    .binary_search(&row)
+                    .is_err()
+                    .then(|| row - removed.partition_point(|removed| *removed < row))
+            });
+        });
         self.cursor.index =
             super::remove_queue_indices(&mut self.queue, Some(self.cursor.index), &removed)
                 .unwrap_or(0);
         if current_removed {
-            // The row that takes the removed one's place, in queue order.
+            // The row that takes the removed one's place, in queue order,
+            // which starts.
             self.cursor.pick = TrackPick::Other;
+            self.cursor.unmark_current();
         }
         let len = self.queue.len();
         self.for_each_cursor(|cursor| cursor.reset_navigation(len));
@@ -594,6 +733,8 @@ impl GaplessQueue {
         };
         self.for_each_cursor(|cursor| {
             cursor.index = remap(cursor.index);
+            cursor.remap_play_next(|list| list.iter().map(|row| remap(*row)).collect());
+            cursor.remap_jumps(|row| Some(remap(row)));
             cursor.reset_navigation(len);
         });
         self.revalidate_pending()
@@ -615,6 +756,8 @@ impl GaplessQueue {
             if let Some(position) = positions.get(cursor.index) {
                 cursor.index = *position;
             }
+            cursor.remap_play_next(|list| play_next::after_reorder(list, &positions));
+            cursor.remap_jumps(|row| positions.get(row).copied());
             cursor.reset_navigation(len);
         });
         self.revalidate_pending()
@@ -635,6 +778,8 @@ impl GaplessQueue {
             if !was_empty && cursor.index >= at {
                 cursor.index += count;
             }
+            cursor.remap_play_next(|list| play_next::after_insert(list, at, count));
+            cursor.remap_jumps(|row| Some(if row >= at { row + count } else { row }));
             cursor.reset_navigation(len);
         });
         self.revalidate_pending()
@@ -677,6 +822,9 @@ impl GaplessQueue {
         if !cursor.advance(self.queue.len(), self.rules(), advance) {
             return None;
         }
+        // A marked row that Previous goes back to plays, so it leaves the
+        // list too.
+        cursor.unmark_current();
         let path = self.queue.get(cursor.index).cloned()?;
         let cancelled = self.cancel_pending();
         self.cursor = cursor;
@@ -695,33 +843,39 @@ impl GaplessQueue {
             .map_or(&self.cursor, |pending| &pending.cursor)
     }
 
-    /// The cursor of the natural successor of `from` that has not failed.
+    /// The cursor of the natural successor of `from` that has not failed,
+    /// and whether it is a marked row.
     ///
     /// The search ends once no row that a natural advance can still reach
     /// is left unfailed. A shuffled advance can revisit a failed row when
     /// it refreshes its pool, so a fixed number of advances is no bound.
-    fn natural_successor(&self, from: &Cursor) -> Option<Cursor> {
+    fn natural_successor(&self, from: &Cursor) -> Option<(Cursor, bool)> {
         let len = self.queue.len();
         let rules = self.rules();
         let mut cursor = from.clone();
         // While a reachable row has not failed, this many advances reach
-        // one: the shuffle navigation and pool of `from`, then at most two
-        // refreshed pools, which leave out only the row they start from. A
-        // sequential advance needs at most `len`.
-        let steps = from.shuffle_forward.len() + from.shuffle_pool.len() + 2 * len;
+        // one: the marked rows, the shuffle navigation and pool of `from`,
+        // then at most two refreshed pools, which leave out only the row
+        // they start from. A sequential advance needs at most `len`.
+        let steps =
+            from.play_next.len() + from.shuffle_forward.len() + from.shuffle_pool.len() + 2 * len;
         for _ in 0..steps {
+            let marked = !cursor.play_next.is_empty();
             if !self.reachable_row_not_failed(&cursor)
                 || !cursor.advance(len, rules, Advance::Natural)
             {
                 return None;
             }
             if !self.row_failed(cursor.index) {
+                if marked {
+                    return Some((cursor, true));
+                }
                 if !rules.shuffle_enabled && cursor.index == from.index {
                     // Past failed rows, back to the row it started from,
                     // which plays again as it came to play.
                     cursor.pick = from.pick;
                 }
-                return Some(cursor);
+                return Some((cursor, false));
             }
         }
         None
@@ -737,6 +891,9 @@ impl GaplessQueue {
     /// not failed.
     fn reachable_row_not_failed(&self, cursor: &Cursor) -> bool {
         let not_failed = |index: &usize| !self.row_failed(*index);
+        if cursor.play_next.iter().any(not_failed) {
+            return true;
+        }
         match self.repeat_mode {
             RepeatMode::One => not_failed(&cursor.index),
             RepeatMode::All => (0..self.queue.len()).any(|index| not_failed(&index)),
@@ -758,7 +915,7 @@ impl GaplessQueue {
         let rules = self.rules();
         let feeding = self.feeding();
         let finishing = self.queue.get(feeding.index)?.clone();
-        let cursor = self.natural_successor(feeding)?;
+        let (cursor, marked) = self.natural_successor(feeding)?;
         let path = self.queue.get(cursor.index)?.clone();
         let handoff = if self.handoffs_held {
             Handoff::AtEos
@@ -773,6 +930,7 @@ impl GaplessQueue {
             handoff,
             staged_spectrogram,
             random_successor: rules.random_successor(),
+            marked,
         });
         Some(StagedAdvance {
             path,
@@ -812,7 +970,7 @@ impl GaplessQueue {
                 released,
             });
         }
-        let cursor = self.natural_successor(&self.cursor)?;
+        let (cursor, _) = self.natural_successor(&self.cursor)?;
         let path = self.queue.get(cursor.index)?.clone();
         self.cursor = cursor;
         Some(EosSuccessor {
@@ -829,22 +987,45 @@ impl GaplessQueue {
         }
     }
 
-    /// Keep the staged successors that the current queue and settings
-    /// would still choose, in order, and drop the rest.
+    /// Keep the staged successors that the current queue, marks and
+    /// settings would still choose, in order, and drop the rest. Those kept
+    /// take the marks left after them.
     fn revalidate_pending(&mut self) -> Option<CancelledAdvance> {
         let rules = self.rules();
+        let marks = Arc::clone(&self.cursor.play_next);
         let mut previous = self.cursor.index;
+        // Where the marks left after each successor start.
+        let mut rest = 0;
+        let mut rests = Vec::with_capacity(self.pending.len());
         let cut = self.pending.iter().position(|pending| {
-            let valid = self.queue.get(pending.cursor.index) == Some(&pending.path)
-                && if rules.random_successor() {
-                    pending.random_successor
-                } else {
-                    self.sequential_successor(previous) == Some(pending.cursor.index)
-                };
+            // The first marked row that has not failed comes next, if any.
+            let first_mark = marks[rest..]
+                .iter()
+                .position(|row| !self.row_failed(*row))
+                .map(|skipped| rest + skipped);
+            let follows = if let Some(mark) = first_mark {
+                rest = mark + 1;
+                pending.marked && pending.cursor.index == marks[mark]
+            } else {
+                rest = marks.len();
+                !pending.marked
+                    && if rules.random_successor() {
+                        pending.random_successor
+                    } else {
+                        self.sequential_successor(previous) == Some(pending.cursor.index)
+                    }
+            };
+            let valid = follows && self.queue.get(pending.cursor.index) == Some(&pending.path);
             previous = pending.cursor.index;
+            rests.push(rest);
             !valid
-        })?;
-        self.drop_pending_from(cut)
+        });
+        for (pending, rest) in self.pending.iter_mut().zip(rests) {
+            if pending.cursor.play_next[..] != marks[rest..] {
+                pending.cursor.play_next = Arc::from(&marks[rest..]);
+            }
+        }
+        self.drop_pending_from(cut?)
     }
 
     /// Drop the successors from `cut` onwards. The pipeline can drop a
@@ -894,7 +1075,7 @@ mod tests {
 
     use super::{
         same_audio_extension, Advance, CancelledAdvance, GaplessQueue, Handoff, PathRenames,
-        RepeatMode, TrackPick,
+        PlayNextRestore, RepeatMode, TrackPick,
     };
 
     fn paths(count: usize) -> Vec<PathBuf> {
@@ -1246,7 +1427,10 @@ mod tests {
         let restored = ["/a.flac", "/b.flac", "/c.flac", "/d.flac"]
             .map(PathBuf::from)
             .to_vec();
-        assert_eq!(queue.restore(restored.clone(), 1), None);
+        assert_eq!(
+            queue.restore(restored.clone(), 1, &PlayNextRestore::None),
+            None
+        );
         assert_eq!(queue.current(), Some(restored[1].clone()));
         let committed = queue.commit_gapless().expect("commit");
         assert_eq!((committed.path, committed.index), (restored[2].clone(), 2));
@@ -1256,7 +1440,10 @@ mod tests {
         let mut queue = GaplessQueue::new();
         queue.set_queue(vec![PathBuf::from("/a.flac"), PathBuf::from("/c.flac")]);
         queue.stage_natural(gapless);
-        assert_eq!(queue.restore(restored[..3].to_vec(), 0), HANDED);
+        assert_eq!(
+            queue.restore(restored[..3].to_vec(), 0, &PlayNextRestore::None),
+            HANDED
+        );
         assert_eq!(queue.stage_natural(gapless).unwrap().path, restored[1]);
 
         // With repeat-one, the committed track follows itself wherever its
@@ -1265,7 +1452,10 @@ mod tests {
         queue.set_queue(vec![PathBuf::from("/b.flac")]);
         queue.set_repeat_mode(RepeatMode::One);
         queue.stage_natural(gapless);
-        assert_eq!(queue.restore(restored.clone(), 1), None);
+        assert_eq!(
+            queue.restore(restored.clone(), 1, &PlayNextRestore::None),
+            None
+        );
         assert_eq!(committed_index(&mut queue), Some(1));
     }
 
@@ -1685,7 +1875,7 @@ mod tests {
         assert_eq!(expected.is_some(), reachable_not_failed, "{case}");
 
         let found = queue.natural_successor(&queue.cursor);
-        assert_eq!(found.map(|cursor| cursor.index), expected, "{case}");
+        assert_eq!(found.map(|(cursor, _)| cursor.index), expected, "{case}");
     }
 
     #[test]
@@ -1734,6 +1924,338 @@ mod tests {
         queue.set_shuffle_enabled(true);
         assert_eq!(queue.take_eos_successor().unwrap().path, paths[1]);
         assert_eq!(queue.take_eos_successor(), None);
+    }
+
+    fn marks(queue: &GaplessQueue) -> Vec<usize> {
+        queue.play_next().to_vec()
+    }
+
+    fn staged_index(queue: &mut GaplessQueue) -> Option<usize> {
+        let staged = queue.stage_natural(gapless)?;
+        Some(queue.pending.back()?.cursor.index).filter(|_| !staged.path.as_os_str().is_empty())
+    }
+
+    #[test]
+    fn marked_rows_play_next_in_order_and_the_order_goes_on_after_the_last() {
+        let (mut queue, paths) = queue_of(8);
+        assert_eq!(queue.toggle_play_next(&[5]), None);
+        assert_eq!(queue.toggle_play_next(&[2]), None);
+        assert_eq!(marks(&queue), vec![5, 2]);
+
+        // The natural successor is the first marked row, which leaves the
+        // list only once it starts. It is no shuffle pick.
+        let staged = queue.stage_natural(gapless).expect("the first marked row");
+        assert_eq!(
+            (staged.path, staged.pick),
+            (paths[5].clone(), TrackPick::Other)
+        );
+        assert_eq!(marks(&queue), vec![5, 2]);
+        assert_eq!(committed_index(&mut queue), Some(5));
+        assert_eq!(marks(&queue), vec![2]);
+        assert_eq!(queue.current_pick(), TrackPick::Other);
+
+        // At end of stream too, and then the queue's order goes on after
+        // the last marked row that played.
+        let staged = queue.stage_natural(|_, _| Handoff::AtEos).expect("row 2");
+        assert_eq!(staged.path, paths[2]);
+        assert_eq!(queue.take_eos_successor().map(|eos| eos.index), Some(2));
+        assert!(marks(&queue).is_empty());
+        assert_eq!(staged_index(&mut queue), Some(3));
+        queue.cancel_pending();
+
+        // Next goes to the first marked row too.
+        queue.toggle_play_next(&[7, 0]);
+        assert_eq!(queue.next_manual().map(|next| next.index), Some(0));
+        assert_eq!(marks(&queue), vec![7]);
+        assert_eq!(queue.next_manual().map(|next| next.index), Some(7));
+        assert_eq!(queue.next_manual(), None, "the queue ends after row 7");
+    }
+
+    #[test]
+    fn with_shuffle_a_marked_row_is_no_shuffle_pick_and_counts_as_played() {
+        let (mut queue, paths) = queue_of(6);
+        queue.seed_shuffle(11);
+        queue.set_shuffle_enabled(true);
+        queue.toggle_play_next(&[4]);
+        let staged = queue.stage_natural(gapless).expect("the marked row");
+        assert_eq!(
+            (staged.path, staged.pick),
+            (paths[4].clone(), TrackPick::Other)
+        );
+        assert_eq!(committed_index(&mut queue), Some(4));
+        assert_eq!(queue.current_pick(), TrackPick::Other);
+        // The shuffle's round counts it as played, and goes on with picks.
+        assert!(!queue.cursor.shuffle_pool.contains(&4));
+        let mut played = vec![0, 4];
+        while let Some(next) = queue.stage_natural(gapless) {
+            assert_eq!(next.pick, TrackPick::Shuffle);
+            played.push(committed_index(&mut queue).expect("a shuffle pick"));
+        }
+        played.sort_unstable();
+        assert_eq!(played, vec![0, 1, 2, 3, 4, 5], "each row once");
+
+        // Previous goes back through what played, the marked row too.
+        let (mut queue, _) = queue_of(6);
+        queue.seed_shuffle(3);
+        queue.set_shuffle_enabled(true);
+        queue.toggle_play_next(&[5]);
+        assert_eq!(queue.next_manual().map(|next| next.index), Some(5));
+        assert_eq!(
+            queue.previous_manual().map(|previous| previous.index),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn without_shuffle_previous_goes_back_from_a_marked_row_to_the_one_before() {
+        let (mut queue, _) = queue_of(8);
+        queue.set_current(1);
+        queue.toggle_play_next(&[6]);
+        assert_eq!(queue.next_manual().map(|next| next.index), Some(6));
+        assert_eq!(queue.next_manual().map(|next| next.index), Some(7));
+        assert_eq!(
+            queue.previous_manual().map(|previous| previous.index),
+            Some(6)
+        );
+        assert_eq!(
+            queue.previous_manual().map(|previous| previous.index),
+            Some(1)
+        );
+        assert_eq!(
+            queue.previous_manual().map(|previous| previous.index),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn previous_goes_back_from_a_marked_row_across_edits_that_keep_both_rows() {
+        // Row 0 plays, then marked row 2; removing row 3 keeps both.
+        let (mut queue, _) = queue_of(4);
+        queue.toggle_play_next(&[2]);
+        assert_eq!(queue.next_manual().map(|next| next.index), Some(2));
+        queue.remove_many(&[3]);
+        assert_eq!(
+            queue.previous_manual().map(|previous| previous.index),
+            Some(0)
+        );
+
+        // Moves and insertions carry the rows along.
+        let (mut queue, paths) = queue_of(6);
+        queue.set_current(1);
+        queue.toggle_play_next(&[4]);
+        assert_eq!(queue.next_manual().map(|next| next.index), Some(4));
+        queue.insert(0, vec![paths[5].clone()]);
+        queue.move_item(6, 0);
+        // Rows 1 and 4 are rows 3 and 6 now.
+        assert_eq!(queue.current_index(), Some(6));
+        assert_eq!(
+            queue.previous_manual().map(|previous| previous.index),
+            Some(3)
+        );
+
+        // With the row it went from gone, Previous goes back in order.
+        let (mut queue, _) = queue_of(6);
+        queue.set_current(1);
+        queue.toggle_play_next(&[4]);
+        assert_eq!(queue.next_manual().map(|next| next.index), Some(4));
+        queue.remove_many(&[1]);
+        assert_eq!(
+            queue.previous_manual().map(|previous| previous.index),
+            Some(2)
+        );
+
+        // An undone removal puts the rows back around the jump.
+        let (mut queue, paths) = queue_of(4);
+        queue.toggle_play_next(&[2]);
+        assert_eq!(queue.next_manual().map(|next| next.index), Some(2));
+        queue.remove_many(&[1, 3]);
+        let undo = PlayNextRestore::Reinserted {
+            rows: vec![1, 3],
+            before: Vec::new(),
+        };
+        assert_eq!(queue.restore(paths, 2, &undo), None);
+        assert_eq!(
+            queue.previous_manual().map(|previous| previous.index),
+            Some(0)
+        );
+
+        // A, then marked D, then marked B, then C and D in order: removing
+        // B ends the history, so Previous from D goes to C, not to A.
+        let (mut queue, _) = queue_of(4);
+        queue.toggle_play_next(&[3]);
+        assert_eq!(queue.next_manual().map(|next| next.index), Some(3));
+        queue.toggle_play_next(&[1]);
+        assert_eq!(queue.next_manual().map(|next| next.index), Some(1));
+        assert_eq!(queue.next_manual().map(|next| next.index), Some(2));
+        assert_eq!(queue.next_manual().map(|next| next.index), Some(3));
+        queue.remove_many(&[1]);
+        assert_eq!(queue.current_index(), Some(2));
+        assert_eq!(
+            queue.previous_manual().map(|previous| previous.index),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn repeat_one_plays_a_marked_row_and_the_playing_row_can_be_marked() {
+        let (mut queue, paths) = queue_of(4);
+        queue.set_repeat_mode(RepeatMode::One);
+        queue.toggle_play_next(&[2]);
+        assert_eq!(
+            queue.stage_natural(gapless).map(|staged| staged.path),
+            Some(paths[2].clone())
+        );
+        assert_eq!(committed_index(&mut queue), Some(2));
+        // Then Repeat-One repeats the row that played.
+        assert_eq!(staged_index(&mut queue), Some(2));
+        queue.cancel_pending();
+
+        // The playing row, marked, plays again next, as no shuffle pick.
+        queue.set_repeat_mode(RepeatMode::Off);
+        queue.set_shuffle_enabled(true);
+        queue.toggle_play_next(&[2]);
+        let again = queue.stage_natural(gapless).expect("the playing row again");
+        assert_eq!(
+            (again.path, again.pick),
+            (paths[2].clone(), TrackPick::Other)
+        );
+        assert_eq!(committed_index(&mut queue), Some(2));
+        assert!(marks(&queue).is_empty());
+    }
+
+    #[test]
+    fn changing_the_marks_drops_a_staged_successor_that_no_longer_follows() {
+        let (mut queue, paths) = queue_of(8);
+        // A successor in the queue's order, given to the pipeline, gives
+        // way to a marked row.
+        assert_eq!(staged_index(&mut queue), Some(1));
+        assert_eq!(queue.toggle_play_next(&[5]), HANDED);
+        assert!(queue.pending.is_empty());
+        assert_eq!(staged_index(&mut queue), Some(5));
+
+        // Marking another row keeps the staged one, which takes the new
+        // mark along to commit.
+        assert_eq!(queue.toggle_play_next(&[3]), None);
+        assert_eq!(queue.pending.len(), 1);
+        assert_eq!(committed_index(&mut queue), Some(5));
+        assert_eq!(marks(&queue), vec![3]);
+
+        // Unmarking the staged row drops it; so does clearing the marks.
+        assert_eq!(staged_index(&mut queue), Some(3));
+        assert_eq!(queue.toggle_play_next(&[3]), HANDED);
+        queue.toggle_play_next(&[7]);
+        assert_eq!(staged_index(&mut queue), Some(7));
+        assert_eq!(queue.set_play_next(Vec::new()), HANDED);
+        assert_eq!(staged_index(&mut queue), Some(6));
+        queue.cancel_pending();
+
+        // A shuffle pick gives way to a marked row as well, and a marked
+        // row to another that goes ahead of it.
+        queue.set_shuffle_enabled(true);
+        assert!(queue.stage_natural(gapless).is_some());
+        assert_eq!(queue.toggle_play_next(&[0]), HANDED);
+        assert_eq!(
+            queue.stage_natural(gapless).map(|staged| staged.path),
+            Some(paths[0].clone())
+        );
+        assert_eq!(queue.set_play_next(vec![2, 0]), HANDED);
+        assert_eq!(staged_index(&mut queue), Some(2));
+        // An edit that leaves the staged row first keeps it.
+        assert_eq!(queue.move_item(6, 7), None);
+        assert_eq!(committed_index(&mut queue), Some(2));
+        assert_eq!(marks(&queue), vec![0]);
+    }
+
+    #[test]
+    fn marks_follow_their_rows_through_edits_and_a_file_queued_twice() {
+        let mut queue = GaplessQueue::new();
+        let twice = PathBuf::from("/fixture/twice.flac");
+        let mut rows = paths(6);
+        rows[4] = twice.clone();
+        rows[1] = twice.clone();
+        queue.set_queue(rows);
+        // Only the row chosen is marked, not the other row of its file.
+        queue.toggle_play_next(&[4, 2]);
+        assert_eq!(marks(&queue), vec![2, 4]);
+        queue.remove_many(&[1, 3]);
+        assert_eq!(marks(&queue), vec![1, 2]);
+        queue.insert(0, paths(2));
+        assert_eq!(marks(&queue), vec![3, 4]);
+        queue.move_item(4, 0);
+        assert_eq!(marks(&queue), vec![4, 0]);
+        // Row 0 to the end, the others up.
+        queue.reorder(&[1, 2, 3, 4, 5, 0]);
+        assert_eq!(marks(&queue), vec![3, 5]);
+        queue.add_to_queue(paths(1));
+        assert_eq!(marks(&queue), vec![3, 5]);
+        queue.remove_many(&[5]);
+        assert_eq!(marks(&queue), vec![3]);
+        // A replaced queue has none.
+        queue.set_queue(paths(3));
+        assert!(marks(&queue).is_empty());
+    }
+
+    #[test]
+    fn a_row_leaves_the_marks_when_playback_goes_to_it_and_the_rest_stay() {
+        let (mut queue, _) = queue_of(6);
+        queue.toggle_play_next(&[2, 4]);
+        // Playing another row by hand keeps the marks.
+        queue.set_current(5);
+        assert_eq!(marks(&queue), vec![2, 4]);
+        // Playing a marked row by hand, or going back to one, unmarks it.
+        queue.set_current(4);
+        assert_eq!(marks(&queue), vec![2]);
+        queue.set_current(3);
+        assert_eq!(
+            queue.previous_manual().map(|previous| previous.index),
+            Some(2)
+        );
+        assert!(marks(&queue).is_empty());
+        // Removing the playing row starts the row that takes its place.
+        queue.toggle_play_next(&[3, 5]);
+        let removal = queue.remove_many(&[2]);
+        assert!(removal.current_removed);
+        assert_eq!(queue.current_index(), Some(2));
+        assert_eq!(marks(&queue), vec![4]);
+    }
+
+    #[test]
+    fn a_failed_marked_row_is_passed_over() {
+        let (mut queue, paths) = queue_of(6);
+        queue.toggle_play_next(&[4]);
+        queue.toggle_play_next(&[2]);
+        queue.mark_failed(paths[4].clone());
+        assert_eq!(staged_index(&mut queue), Some(2));
+        assert_eq!(committed_index(&mut queue), Some(2));
+        assert!(marks(&queue).is_empty());
+    }
+
+    #[test]
+    fn a_restored_queue_brings_back_the_marks_of_the_rows_it_restores() {
+        let (mut queue, paths) = queue_of(5);
+        queue.toggle_play_next(&[3, 1]);
+        assert_eq!(marks(&queue), vec![1, 3]);
+        // Rows 1 and 2 removed, then put back by an undo.
+        queue.remove_many(&[1, 2]);
+        assert_eq!(marks(&queue), vec![1]);
+        let marks_back = PlayNextRestore::Reinserted {
+            rows: vec![1, 2],
+            before: vec![1, 3],
+        };
+        assert_eq!(queue.restore(paths.clone(), 0, &marks_back), None);
+        assert_eq!(marks(&queue), vec![1, 3]);
+        // A staged marked successor that still comes first stays.
+        assert_eq!(staged_index(&mut queue), Some(1));
+        assert_eq!(
+            queue.restore(paths.clone(), 0, &PlayNextRestore::Rows(vec![1, 3])),
+            None
+        );
+        assert_eq!(committed_index(&mut queue), Some(1));
+        assert_eq!(
+            queue.restore(paths, 1, &PlayNextRestore::Rows(vec![4])),
+            None
+        );
+        assert_eq!(marks(&queue), vec![4]);
     }
 
     #[test]

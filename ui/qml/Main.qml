@@ -478,6 +478,18 @@ ApplicationWindow {
         }
         function moveQueue(from, to) {}
         function clearQueue() { queueCommands = queueCommands.concat(["clear"]) }
+        // The rows marked to play next, by row, with their places; see
+        // BridgeClient.
+        property var playNextPlaces: ({})
+        readonly property int playNextCount: Object.keys(playNextPlaces).length
+        function playNextPlace(row) { return playNextPlaces[row] || 0 }
+        function allPlayNext(rows) {
+            return rows.length > 0 && rows.every(function(row) { return (playNextPlaces[row] || 0) > 0 })
+        }
+        function togglePlayNext(rows) {
+            queueCommands = queueCommands.concat(["play next " + rows.join(",")])
+        }
+        function clearPlayNext() { queueCommands = queueCommands.concat(["clear play next"]) }
         // The queue change the user can undo; see BridgeClient.
         property double queueUndoId: 0
         property int queueUndoKind: 0
@@ -951,6 +963,18 @@ ApplicationWindow {
         enabled: uiBridge.queueLength > 0 && !root.viewerOpen
         onTriggered: uiBridge.clearQueue()
     }
+    // Unmarks every queue row marked to play next; the rows stay. The
+    // queue's Q and its context menu mark and unmark rows.
+    Components.ShortcutAction {
+        id: clearPlayNextAction
+        objectName: "clearPlayNextAction"
+        shortcutId: "clear_play_next"
+        overrides: root.keyboardShortcutOverrides
+        text: I18n.i18nc("@action:inmenu", "Clear Play &Next")
+        icon.name: "edit-clear"
+        enabled: uiBridge.playNextCount > 0 && !root.viewerOpen
+        onTriggered: uiBridge.clearPlayNext()
+    }
     // Queue edits with no menu item of their own in the menu bar: the
     // queue's context menu offers them for its rows.
     Components.ShortcutAction {
@@ -1366,7 +1390,7 @@ ApplicationWindow {
             title: I18n.i18nc("@title:group keyboard shortcuts of the Edit menu", "Edit"),
             actions: [
                 undoQueueChangeAction, redoQueueChangeAction, globalSearchAction, clearQueueAction,
-                moveTrackUpAction, moveTrackDownAction, selectPreviousTrackAction, selectNextTrackAction
+                clearPlayNextAction, moveTrackUpAction, moveTrackDownAction, selectPreviousTrackAction, selectNextTrackAction
             ]
         },
         {
@@ -1454,6 +1478,7 @@ ApplicationWindow {
             Components.AppMenuItem { action: globalSearchAction }
             MenuSeparator {}
             Components.AppMenuItem { action: clearQueueAction }
+            Components.AppMenuItem { action: clearPlayNextAction }
         }
         Components.AppMenu {
             objectName: "viewMenu"

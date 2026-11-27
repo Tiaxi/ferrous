@@ -104,6 +104,9 @@ QString StandardKeys::keptKeyRole(const QVariant &sequence) {
         return modifiers == Qt::ShiftModifier ? QStringLiteral("contextMenu") : QString();
     case Qt::Key_M:
         return modifiers == Qt::ControlModifier ? QStringLiteral("menuBar") : QString();
+    // The queue marks its selection to play next with it.
+    case Qt::Key_Q:
+        return alone ? QStringLiteral("playNext") : QString();
     default:
         return {};
     }

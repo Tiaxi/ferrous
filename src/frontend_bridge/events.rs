@@ -416,16 +416,38 @@ fn count_play_of_stopped_track(previous: PlaybackState, state: &mut BridgeState)
     }
 }
 
+/// Take the rows marked to play next that `snapshot` reports. A snapshot
+/// made before the engine applied every edit sent to it has marks for rows
+/// that may have moved since; the bridge's own carry them along until the
+/// engine reports them again.
+/// Returns whether the marks the bridge shows changed.
+fn take_engine_marks(snapshot: &PlaybackSnapshot, state: &mut BridgeState) -> bool {
+    if snapshot.queue_commands < state.engine_queue_commands_sent
+        || state.queue_sync.play_next() == snapshot.play_next
+    {
+        return false;
+    }
+    state
+        .queue_sync
+        .set_play_next(Arc::clone(&snapshot.play_next));
+    true
+}
+
 fn process_playback_snapshot_event(
     snapshot: PlaybackSnapshot,
     analysis: &AnalysisEngine,
     state: &mut BridgeState,
 ) -> SnapshotUrgency {
     let next_state = snapshot.state;
+    // The queue numbers the rows marked to play next.
+    let mut urgency = if take_engine_marks(&snapshot, state) {
+        SnapshotUrgency::Immediate
+    } else {
+        SnapshotUrgency::None
+    };
     let previous_playback = state.playback.clone();
-    let mut urgency = SnapshotUrgency::None;
     if state.playback != snapshot {
-        urgency = playback_snapshot_urgency(&state.playback, &snapshot);
+        urgency = urgency.max(playback_snapshot_urgency(&state.playback, &snapshot));
         super::event_log::log_playback_changes(&state.playback, &snapshot);
         state.playback = snapshot;
     }

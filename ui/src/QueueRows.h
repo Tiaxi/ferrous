@@ -69,6 +69,9 @@ public:
         PathRole,
         TrackNumberRole,
         YearRole,
+        // The row's place among the rows marked to play next, from 1; 0
+        // for a row not marked.
+        PlayNextRole,
     };
 
     // Takes rows the model no longer has, to free them elsewhere.
@@ -101,6 +104,16 @@ public:
     // length. Recent Issues asks it on every change of the rows.
     Q_INVOKABLE bool containsPath(const QString &path) const;
 
+    // Mark `rows` to play next, in this order, in place of the marks. Rows
+    // past the end, and repeated rows, are left out. The marks follow their
+    // rows through the row edits, until the next call names them anew.
+    void setPlayNext(const QVector<int> &rows);
+    // The rows marked to play next, in the order they play.
+    QVector<int> playNextRows() const;
+    // The place of `row` among them, from 1; 0 for a row not marked.
+    int playNextPlace(int row) const;
+    int playNextCount() const;
+
     // Hand rows the model drops, from kReleaseThreshold on, to `releaser`
     // instead of freeing them on the model's thread. None frees them here.
     void setRowReleaser(RowReleaser releaser);
@@ -111,10 +124,19 @@ private:
     // out (step -1) of m_pathCounts.
     void countPaths(const QVector<QueueRowData> &rows, qsizetype from, qsizetype count, int step);
     void countPath(const QString &path, int step);
+    // Carry the marks to where `map` puts each row, which is -1 for a row
+    // removed. Returns the rows, where they are now, whose places changed
+    // as the places closed up over a row removed.
+    QVector<int> remapPlayNext(const std::function<int(int)> &map);
+    // Tell `rows` that their PlayNextRole changed, one signal for each run
+    // of rows in a row.
+    void notifyPlayNext(QVector<int> rows);
 
     QVector<QueueRowData> m_rows;
     // How many rows hold each path; a path appears once per row.
     QHash<QString, int> m_pathCounts;
+    // The place of each row marked to play next, from 1.
+    QHash<int, int> m_playNextPlaces;
     RowReleaser m_releaser;
 };
 

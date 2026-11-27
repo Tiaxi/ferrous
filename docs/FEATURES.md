@@ -7,7 +7,18 @@ What each part of Ferrous does, in more detail than the [README](../README.md). 
 - GStreamer plays the queue with seeking, repeat, shuffle and volume. A track goes on gaplessly into the next one when their file name extensions match, such as two `.flac` files.
 - The queue comes back on the next launch, with the current track where you left it.
 - Clearing the queue, removing, moving or replacing tracks can be undone and redone until the queue changes another way ([details](SHORTCUTS.md#library-and-queue)).
+- **Play Next** marks queue tracks to play after the current one, in the order you mark them, without moving them and without turning shuffle off ([details](#play-next)).
 - Open files, add folders, import M3U and M3U8 playlists, and drag tracks to reorder them.
+
+## Play Next
+
+Play Next marks tracks in the queue to play next without moving them. With the whole library in the queue and shuffle on, mark the rest of an album, and its tracks play after the current one; then shuffle carries on.
+
+- **Marking.** Press Q, or choose **Play Next** in the queue's context menu, to mark the selected tracks. They join the end of the marked tracks in the queue's order, and each row shows its place among them. Q on tracks that are all marked unmarks them, as **Don't Play Next** does; with some marked, Q marks the others and leaves the marked ones in their places. **Edit › Clear Play Next** unmarks them all.
+- **Playing.** The first marked track plays when the current one ends, and Next goes to it too, gaplessly where the tracks allow. A track is unmarked as it starts, also when you play it yourself. The current track can be marked as well, to play it again next. Marked tracks play also with Repeat One on.
+- **After the marked tracks.** With shuffle on, shuffle carries on, and the marked tracks count as played for its round. With shuffle off, the queue goes on from the last marked track that played. Previous goes back through the tracks that played, the marked ones too.
+- **What stays.** Marks follow their rows when tracks move or are removed, and a file in the queue twice is marked only in the row you chose. Stop, and playing another track yourself, keep them. Marking isn't a change you undo, but undoing a removal or a replacement brings back the marks the tracks had. The marks come back with the queue on the next launch.
+- **ReplayGain.** A marked track isn't a shuffle pick: [Auto](#replaygain) plays it at its album gain, also with shuffle on.
 
 ## ReplayGain
 

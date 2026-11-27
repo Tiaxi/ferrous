@@ -34,9 +34,9 @@ use super::seek_locate::{Located, LocatedFrame, SeekLocator};
 use super::source_activation::SourceActivation;
 use super::stream_volume::{self, StreamVolumeChange, StreamVolumeReport, StreamVolumeWatch};
 use super::{
-    EngineExit, FileStamp, PathRenames, PlaybackCommand, PlaybackError, PlaybackErrorOutcome,
-    PlaybackEvent, PlaybackSnapshot, PlaybackState, RepeatMode, ReplayGainReport, TrackChangeKind,
-    TrackPick,
+    play_next, EngineExit, FileStamp, PathRenames, PlayNextRestore, PlaybackCommand, PlaybackError,
+    PlaybackErrorOutcome, PlaybackEvent, PlaybackSnapshot, PlaybackState, RepeatMode,
+    ReplayGainReport, TrackChangeKind, TrackPick,
 };
 use crate::file_identity::{self, file_id, FileId, ResolvedPath, WatchedFile};
 
@@ -1032,9 +1032,21 @@ impl GstPlaybackRuntime {
         });
     }
 
+    /// Bring the snapshot's queue settings and marks up to the queue's.
+    /// Takes the queue lock, so the caller must not hold it.
     fn set_queue_flags(&mut self, repeat_mode: RepeatMode, shuffle_enabled: bool) {
         self.snapshot.repeat_mode = repeat_mode;
         self.snapshot.shuffle_enabled = shuffle_enabled;
+        self.refresh_play_next();
+    }
+
+    /// Take the queue's rows marked to play next into the snapshot. They
+    /// change with commands and when a track starts, on this thread.
+    /// Takes the queue lock, so the caller must not hold it.
+    fn refresh_play_next(&mut self) {
+        if let Ok(queue) = self.queue_state.lock() {
+            self.snapshot.play_next = queue.play_next();
+        }
     }
 
     fn reset_channel_mute_state(&mut self) {
@@ -1106,6 +1118,8 @@ impl GstPlaybackRuntime {
         kind: TrackChangeKind,
         force_play: bool,
     ) {
+        // The track's row left the marks when the queue went to it.
+        self.refresh_play_next();
         let Some(uri) = file_uri(&path) else {
             return;
         };
@@ -1273,8 +1287,27 @@ impl GstPlaybackRuntime {
         self.continue_after_cancelled_advance(cancelled);
     }
 
+    /// Change the rows marked to play next with `edit`. A staged successor
+    /// that is no longer the first marked row, or one staged in the queue's
+    /// order or by shuffle while a row is marked now, is dropped, and the
+    /// current track plays on without it.
+    fn edit_play_next(&mut self, edit: impl FnOnce(&mut GaplessQueue) -> Option<CancelledAdvance>) {
+        // The rows stay, and so does the row the snapshot has: a stopped
+        // track has none.
+        let Some(cancelled) = self
+            .queue_state
+            .lock()
+            .ok()
+            .map(|mut state| edit(&mut state))
+        else {
+            return;
+        };
+        self.refresh_play_next();
+        self.continue_after_cancelled_advance(cancelled);
+    }
+
     /// See [`PlaybackCommand::RestoreQueue`].
-    fn restore_queue(&mut self, paths: Vec<PathBuf>, current: usize) {
+    fn restore_queue(&mut self, paths: Vec<PathBuf>, current: usize, marks: &PlayNextRestore) {
         let Some(last) = paths.len().checked_sub(1) else {
             return;
         };
@@ -1290,8 +1323,11 @@ impl GstPlaybackRuntime {
             return;
         };
         let Some(row) = open_row else {
+            let marked = play_next::restored(&state.play_next(), marks, paths.len());
             let cancelled = state.set_queue(paths);
             let target = state.set_current(current);
+            // After the current row is set, which would unmark it.
+            let _ = state.set_play_next(marked);
             let (repeat_mode, shuffle_enabled) = (state.repeat_mode(), state.shuffle_enabled());
             drop(state);
             self.set_queue_flags(repeat_mode, shuffle_enabled);
@@ -1304,7 +1340,7 @@ impl GstPlaybackRuntime {
             }
             return;
         };
-        let cancelled = state.restore(paths, row);
+        let cancelled = state.restore(paths, row, marks);
         let (repeat_mode, shuffle_enabled) = (state.repeat_mode(), state.shuffle_enabled());
         drop(state);
         self.set_queue_flags(repeat_mode, shuffle_enabled);
@@ -2192,6 +2228,7 @@ impl GstPlaybackRuntime {
     }
 
     fn commit_gapless_successor(&mut self, committed: CommittedAdvance) {
+        self.refresh_play_next();
         let track_token = self.advance_track_token();
         // Until the output applies the successor's segment, the pipeline
         // reports the previous track's position, and the successor is at
@@ -2882,6 +2919,10 @@ impl GstPlaybackRuntime {
     }
 
     fn apply_command(&mut self, cmd: PlaybackCommand) {
+        let edits_queue = cmd.edits_queue();
+        if edits_queue {
+            self.snapshot.queue_commands += 1;
+        }
         if matches!(
             cmd,
             PlaybackCommand::LoadQueue(_)
@@ -2901,13 +2942,23 @@ impl GstPlaybackRuntime {
             PlaybackCommand::PlayQueue(paths) => self.load_queue(paths, true),
             PlaybackCommand::AddToQueue(paths) => self.add_to_queue(paths),
             PlaybackCommand::RemapPaths(renames) => self.remap_paths(&renames),
-            PlaybackCommand::RestoreQueue { paths, current } => self.restore_queue(paths, current),
+            PlaybackCommand::RestoreQueue {
+                paths,
+                current,
+                play_next,
+            } => self.restore_queue(paths, current, &play_next),
             PlaybackCommand::RemoveAt(idx) => self.remove_at(idx),
             PlaybackCommand::RemoveMany(indices) => self.remove_many(&indices),
             PlaybackCommand::MoveQueue { from, to } => self.move_queue_item(from, to),
             PlaybackCommand::ReorderQueue(order) => self.reorder_queue(&order),
             PlaybackCommand::InsertIntoQueue { at, paths } => self.insert_into_queue(at, paths),
             PlaybackCommand::ClearQueue => self.clear_queue(),
+            PlaybackCommand::TogglePlayNext(rows) => {
+                self.edit_play_next(|state| state.toggle_play_next(&rows));
+            }
+            PlaybackCommand::SetPlayNext(rows) => {
+                self.edit_play_next(|state| state.set_play_next(rows));
+            }
             PlaybackCommand::PlayAt(idx) => self.play_at(idx, false),
             PlaybackCommand::StartAt(idx) => self.play_at(idx, true),
             PlaybackCommand::Next => self.navigate(&[true]),
@@ -2936,6 +2987,12 @@ impl GstPlaybackRuntime {
                 self.emit_snapshot();
             }
             PlaybackCommand::Poll => self.poll(),
+        }
+        // The bridge takes the marks only from a snapshot that counts every
+        // edit it sent, so each edit sends one, also those that change
+        // nothing else the snapshot reports, such as an append.
+        if edits_queue {
+            self.emit_snapshot();
         }
     }
 
@@ -8015,6 +8072,7 @@ mod engine_tests {
         engine.send(PlaybackCommand::RestoreQueue {
             paths: vec![removed, a.clone(), b.clone()],
             current: 1,
+            play_next: PlayNextRestore::None,
         });
         engine.wait_until(
             "the restored row did not move the current track",
@@ -8045,6 +8103,7 @@ mod engine_tests {
         engine.send(PlaybackCommand::RestoreQueue {
             paths: vec![a.clone(), b.clone(), c],
             current: 0,
+            play_next: PlayNextRestore::None,
         });
         engine.wait_until("the staged successor was not cancelled", |engine| {
             engine.cancelled_staging == 1
@@ -8057,6 +8116,141 @@ mod engine_tests {
             Expect::Gapless,
         );
         engine.wait_for_playing(1, millis(4_500));
+    }
+
+    /// Marking a row while its successor in the queue's order is staged
+    /// and handed to the pipeline drops that successor through the
+    /// cancellation of a different successor: the current track plays on,
+    /// and the marked row follows it gaplessly, unmarked as it starts.
+    #[test]
+    fn marking_a_row_drops_a_staged_successor_that_no_longer_follows() {
+        let fixtures = Fixtures::new("play-next-mark");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let c = fixtures.wav("c.wav", 5_000);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![
+            a.clone(),
+            b.clone(),
+            c.clone(),
+        ]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_settled_window(&b);
+        let changes = engine.changes.len();
+        engine.send(PlaybackCommand::TogglePlayNext(vec![2]));
+        engine.wait_until("the staged successor was not cancelled", |engine| {
+            engine.cancelled_staging == 1 && *engine.snapshot.play_next == [2]
+        });
+        assert_eq!(engine.snapshot.current.as_deref(), Some(a.as_path()));
+        assert_change(
+            &engine.wait_for_changes(changes + 1),
+            &c,
+            2,
+            Expect::Gapless,
+        );
+        engine.wait_for_playing(2, millis(5_000));
+        assert!(engine.snapshot.play_next.is_empty());
+        assert_eq!(engine.snapshot.queue_commands, 2);
+    }
+
+    /// Stop keeps the marks, and marking rows while stopped gives the
+    /// stopped track no row: Play starts it again, and the marked row
+    /// follows it.
+    #[test]
+    fn stop_keeps_the_marks_and_marking_while_stopped_leaves_the_track_stopped() {
+        let fixtures = Fixtures::new("play-next-stopped");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let c = fixtures.wav("c.wav", 5_000);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone(), b, c.clone()]));
+        engine.send(PlaybackCommand::TogglePlayNext(vec![2]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_playing(0, millis(4_000));
+        engine.send(PlaybackCommand::Stop);
+        engine.wait_until("playback did not stop", |engine| {
+            engine.snapshot.state == PlaybackState::Stopped
+                && engine.snapshot.current_queue_index.is_none()
+        });
+        assert_eq!(*engine.snapshot.play_next, [2]);
+        engine.send(PlaybackCommand::TogglePlayNext(vec![1]));
+        engine.wait_until("row 1 was not marked", |engine| {
+            *engine.snapshot.play_next == [2, 1]
+        });
+        assert_eq!(engine.snapshot.current_queue_index, None);
+        assert_eq!(engine.snapshot.current.as_deref(), Some(a.as_path()));
+        // Every edit is answered with a snapshot that counts it, also one
+        // that changes nothing else it reports, so the bridge can take the
+        // marks of a snapshot from after its edits.
+        while engine.events.try_recv().is_ok() {}
+        engine.send(PlaybackCommand::AddToQueue(vec![
+            fixtures.wav("d.wav", 1_000)
+        ]));
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let event = engine
+                .events
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("the append was not answered");
+            if let PlaybackEvent::Snapshot(snapshot) = &event {
+                if snapshot.queue_commands == 4 {
+                    break;
+                }
+            }
+            engine.record(event);
+        }
+        let changes = engine.changes.len();
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_playing(0, millis(4_000));
+        assert_change(
+            &engine.wait_for_changes(changes + 1),
+            &c,
+            2,
+            Expect::Gapless,
+        );
+        assert_eq!(*engine.snapshot.play_next, [1]);
+    }
+
+    /// A staged marked row stays staged while other rows are marked, and
+    /// is dropped once it is unmarked; Repeat-One then plays the next
+    /// marked row rather than the current track again.
+    #[test]
+    fn a_staged_marked_row_stays_while_others_are_marked_and_goes_when_unmarked() {
+        let fixtures = Fixtures::new("play-next-unmark");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_000);
+        let c = fixtures.wav("c.wav", 4_500);
+        let d = fixtures.wav("d.wav", 5_000);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::SetRepeatMode(RepeatMode::One));
+        engine.send(PlaybackCommand::LoadQueue(vec![
+            a.clone(),
+            b,
+            c.clone(),
+            d.clone(),
+        ]));
+        engine.send(PlaybackCommand::TogglePlayNext(vec![2]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_settled_window(&c);
+        engine.send(PlaybackCommand::TogglePlayNext(vec![3]));
+        engine.wait_until("row 3 was not marked", |engine| {
+            *engine.snapshot.play_next == [2, 3]
+        });
+        assert_eq!(engine.cancelled_staging, 0);
+        let changes = engine.changes.len();
+        engine.send(PlaybackCommand::TogglePlayNext(vec![2]));
+        engine.wait_until("the staged marked row was not cancelled", |engine| {
+            engine.cancelled_staging == 1 && *engine.snapshot.play_next == [3]
+        });
+        assert_eq!(engine.snapshot.current.as_deref(), Some(a.as_path()));
+        assert_change(
+            &engine.wait_for_changes(changes + 1),
+            &d,
+            3,
+            Expect::Gapless,
+        );
+        engine.wait_for_playing(3, millis(5_000));
+        assert!(engine.snapshot.play_next.is_empty());
     }
 
     /// The engine's side of an undo and a redo of a replacement: two
@@ -8081,6 +8275,7 @@ mod engine_tests {
         engine.send(PlaybackCommand::RestoreQueue {
             paths: vec![c.clone(), d.clone()],
             current: 1,
+            play_next: PlayNextRestore::None,
         });
         engine.wait_until("the undo did not stop at its current row", |engine| {
             engine.snapshot.current.as_deref() == Some(d.as_path())
@@ -8091,6 +8286,7 @@ mod engine_tests {
         engine.send(PlaybackCommand::RestoreQueue {
             paths: vec![a.clone(), b],
             current: 0,
+            play_next: PlayNextRestore::None,
         });
         engine.wait_until("the redo did not stop at its current row", |engine| {
             engine.snapshot.current.as_deref() == Some(a.as_path())
@@ -8184,6 +8380,7 @@ mod engine_tests {
         engine.send(PlaybackCommand::RestoreQueue {
             paths: vec![a, b.clone()],
             current: 1,
+            play_next: PlayNextRestore::None,
         });
         engine.wait_until("the restored current track was not loaded", |engine| {
             engine.snapshot.current.as_deref() == Some(b.as_path())
@@ -15052,6 +15249,52 @@ mod engine_tests {
                     (TRACK_DB, Start::Run),
                     (ALBUM_DB, Start::Run),
                 ],
+            );
+        }
+
+        /// A row marked to play next is no shuffle pick: Auto plays it at
+        /// its album gain also with shuffle on, from its first sample.
+        #[test]
+        fn auto_plays_a_marked_row_at_album_gain_also_with_shuffle_on() {
+            let fixtures = Fixtures::new("replay-gain-auto-play-next");
+            let rows: Vec<PathBuf> = ["a.flac", "b.flac", "c.flac", "d.flac"]
+                .iter()
+                .map(|name| album_track(&fixtures, name, 4_000))
+                .collect();
+            let mut engine = Engine::start();
+            let streams = record_streams(&engine.playbin);
+            engine.send(PlaybackCommand::SetReplayGain(settings(
+                ReplayGainMode::Auto,
+                0.0,
+                0.0,
+            )));
+            engine.send(PlaybackCommand::SetShuffle(true));
+            engine.send(PlaybackCommand::LoadQueue(rows.clone()));
+            engine.send(PlaybackCommand::TogglePlayNext(vec![2]));
+            engine.send(PlaybackCommand::Play);
+            let marked = engine.wait_for_changes(2);
+            assert_change(&marked, &rows[2], 2, Expect::Gapless);
+            assert_eq!(
+                engine.queue.lock().unwrap().current_pick(),
+                TrackPick::Other
+            );
+            engine.wait_until("the marked row's gain was not reported", |engine| {
+                engine
+                    .snapshot
+                    .replay_gain
+                    .is_some_and(|report| report.track_token == marked.token)
+            });
+            engine.wait_until("the marked row did not play", |_| {
+                let streams = streams.lock().unwrap();
+                streams.len() >= 2 && streams[1].len() > 10
+            });
+            assert_eq!(
+                auto_choices(&engine, marked.token),
+                [Some(GainChoice::Album)]
+            );
+            assert_streams_at(
+                &streams.lock().unwrap()[..2],
+                &[(ALBUM_DB, Start::Run), (ALBUM_DB, Start::Gapless)],
             );
         }
 

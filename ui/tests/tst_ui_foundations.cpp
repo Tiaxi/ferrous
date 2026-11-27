@@ -229,6 +229,8 @@ private slots:
     void pressedQueueRowIntensifiesItsSelection();
     void unreadableMarkReadsOnEveryRowBackground_data();
     void unreadableMarkReadsOnEveryRowBackground();
+    void playNextPlaceReadsOnEveryRowBackground_data();
+    void playNextPlaceReadsOnEveryRowBackground();
     void rowBackgroundShowsEachState_data();
     void rowBackgroundShowsEachState();
     void rowBackgroundDrawsTheRingAndTintAsOneRectangle();
@@ -1363,6 +1365,34 @@ void UiFoundationsTest::unreadableMarkReadsOnEveryRowBackground() {
         const QColor under = colorOf(tokens, background);
         const QColor mark = QByteArray(background).startsWith("selection") ? negativeSelected : negative;
         QVERIFY2(contrastRatio(mark, under) >= 3.0,
+                 qPrintable(describeContrast(QLatin1String(background), mark, under)));
+    }
+}
+
+void UiFoundationsTest::playNextPlaceReadsOnEveryRowBackground_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("breeze dark") << true;
+    QTest::newRow("breeze light") << false;
+}
+
+// The place a queue row marked to play next shows, a number, reads as text,
+// at 4.5:1 or more, on every background a queue row can have.
+void UiFoundationsTest::playNextPlaceReadsOnEveryRowBackground() {
+    QFETCH(bool, dark);
+    QQmlEngine engine;
+    QString errorText;
+    const std::unique_ptr<QObject> root =
+        createWindow(engine, themedWindowQml(dark ? kBreezeDark : kBreezeLight, QString()), &errorText);
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    QObject *tokens = root->property("tokens").value<QObject *>();
+    QVERIFY(tokens != nullptr);
+    const QColor place = colorOf(tokens, "playNext");
+    const QColor placeSelected = colorOf(tokens, "playNextSelected");
+    for (const char *background : {"view", "hoveredRow", "selection", "selectionInactive", "selectionHovered",
+                                   "selectionInactiveHovered", "selectionPressed"}) {
+        const QColor under = colorOf(tokens, background);
+        const QColor mark = QByteArray(background).startsWith("selection") ? placeSelected : place;
+        QVERIFY2(contrastRatio(mark, under) >= 4.5,
                  qPrintable(describeContrast(QLatin1String(background), mark, under)));
     }
 }

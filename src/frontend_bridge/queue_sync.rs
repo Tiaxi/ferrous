@@ -14,6 +14,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use super::{BridgeQueueCommand, RowsMove};
 
@@ -252,6 +253,9 @@ pub(super) struct QueueSync {
     selection_serial: u64,
     /// The selected row and the serial the last update sent to the UI had.
     sent_selection: (Option<usize>, u64),
+    /// The rows marked to play next, as the engine last reported them,
+    /// carried across the edits the bridge made since.
+    play_next: Arc<[usize]>,
 }
 
 impl Default for QueueSync {
@@ -267,6 +271,7 @@ impl Default for QueueSync {
             journal_floor: 1,
             selection_serial: 0,
             sent_selection: (None, 0),
+            play_next: Arc::default(),
         }
     }
 }
@@ -308,6 +313,13 @@ impl QueueSync {
             QueueEdit::SetPaths(_) | QueueEdit::Refresh => None,
         };
         if let Some(row_map) = row_map {
+            if !self.play_next.is_empty() {
+                self.play_next = self
+                    .play_next
+                    .iter()
+                    .filter_map(|row| row_map.map(*row))
+                    .collect();
+            }
             self.push_journal(row_map);
         }
         match &mut self.pending {
@@ -342,6 +354,19 @@ impl QueueSync {
         self.journal_indices = 0;
         self.push_journal(RowMap::Reset);
         self.pending = Pending::Full;
+        self.play_next = Arc::default();
+    }
+
+    /// The rows marked to play next, in the order they play.
+    pub(super) fn play_next(&self) -> Arc<[usize]> {
+        Arc::clone(&self.play_next)
+    }
+
+    /// Note that `rows` of the queue now are marked to play next, in this
+    /// order: the engine's report, or what an edit the engine is sent
+    /// leaves. Edits recorded later carry them along.
+    pub(super) fn set_play_next(&mut self, rows: Arc<[usize]>) {
+        self.play_next = rows;
     }
 
     /// Send the whole queue with the next snapshot, for a UI that lost
@@ -462,6 +487,13 @@ impl QueueSync {
                     return Ok(None);
                 }
                 BridgeQueueCommand::RemoveMany(indices)
+            }
+            BridgeQueueCommand::TogglePlayNext(rows) => {
+                let rows: Vec<usize> = rows.into_iter().filter_map(map).collect();
+                if rows.is_empty() {
+                    return Ok(None);
+                }
+                BridgeQueueCommand::TogglePlayNext(rows)
             }
             BridgeQueueCommand::Move { from, to } => {
                 let Some(moved_to) = self.map_move(revision, from, to) else {

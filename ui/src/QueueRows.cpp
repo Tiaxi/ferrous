@@ -118,6 +118,8 @@ QVariant QueueRowsModel::data(const QModelIndex &index, int role) const {
         return row.trackNumber > 0 ? QVariant(row.trackNumber) : QVariant{};
     case YearRole:
         return row.year != std::numeric_limits<int>::min() ? QVariant(row.year) : QVariant{};
+    case PlayNextRole:
+        return m_playNextPlaces.value(index.row(), 0);
     default:
         return {};
     }
@@ -134,7 +136,88 @@ QHash<int, QByteArray> QueueRowsModel::roleNames() const {
         {PathRole, "path"},
         {TrackNumberRole, "trackNumber"},
         {YearRole, "year"},
+        {PlayNextRole, "playNext"},
     };
+}
+
+void QueueRowsModel::setPlayNext(const QVector<int> &rows) {
+    QHash<int, int> places;
+    places.reserve(rows.size());
+    for (int row : rows) {
+        if (row >= 0 && row < m_rows.size() && !places.contains(row)) {
+            places.insert(row, static_cast<int>(places.size()) + 1);
+        }
+    }
+    if (places == m_playNextPlaces) {
+        return;
+    }
+    std::swap(m_playNextPlaces, places);
+    // Each row whose place changed: those marked before, and those now.
+    QVector<int> changed;
+    changed.reserve(places.size() + m_playNextPlaces.size());
+    for (auto it = places.cbegin(); it != places.cend(); ++it) {
+        if (m_playNextPlaces.value(it.key(), 0) != it.value()) {
+            changed.push_back(it.key());
+        }
+    }
+    for (auto it = m_playNextPlaces.cbegin(); it != m_playNextPlaces.cend(); ++it) {
+        if (!places.contains(it.key())) {
+            changed.push_back(it.key());
+        }
+    }
+    notifyPlayNext(std::move(changed));
+}
+
+void QueueRowsModel::notifyPlayNext(QVector<int> rows) {
+    std::sort(rows.begin(), rows.end());
+    for (qsizetype first = 0; first < rows.size();) {
+        qsizetype last = first;
+        while (last + 1 < rows.size() && rows[last + 1] == rows[last] + 1) {
+            ++last;
+        }
+        if (rows[last] < m_rows.size()) {
+            emit dataChanged(index(rows[first], 0), index(rows[last], 0), {PlayNextRole});
+        }
+        first = last + 1;
+    }
+}
+
+QVector<int> QueueRowsModel::playNextRows() const {
+    QVector<int> rows(m_playNextPlaces.size());
+    for (auto it = m_playNextPlaces.cbegin(); it != m_playNextPlaces.cend(); ++it) {
+        rows[it.value() - 1] = it.key();
+    }
+    return rows;
+}
+
+int QueueRowsModel::playNextPlace(int row) const {
+    return m_playNextPlaces.value(row, 0);
+}
+
+int QueueRowsModel::playNextCount() const {
+    return static_cast<int>(m_playNextPlaces.size());
+}
+
+QVector<int> QueueRowsModel::remapPlayNext(const std::function<int(int)> &map) {
+    QVector<int> renumbered;
+    if (m_playNextPlaces.isEmpty()) {
+        return renumbered;
+    }
+    // The places close up over the rows removed.
+    const QVector<int> before = playNextRows();
+    m_playNextPlaces.clear();
+    for (int place = 0; place < before.size(); ++place) {
+        const int moved = map(before[place]);
+        if (moved < 0) {
+            continue;
+        }
+        const int now = static_cast<int>(m_playNextPlaces.size()) + 1;
+        m_playNextPlaces.insert(moved, now);
+        if (now != place + 1) {
+            renumbered.push_back(moved);
+        }
+    }
+    return renumbered;
 }
 
 void QueueRowsModel::setRowReleaser(RowReleaser releaser) {
@@ -181,6 +264,8 @@ bool QueueRowsModel::setRows(QVector<QueueRowData> rows) {
     }
     beginResetModel();
     std::swap(m_rows, rows);
+    // Every row is new; the marks come for them after.
+    m_playNextPlaces.clear();
     m_pathCounts.clear();
     m_pathCounts.reserve(m_rows.size());
     countPaths(m_rows, 0, m_rows.size(), 1);
@@ -205,6 +290,8 @@ bool QueueRowsModel::insertRowsAt(int at, QVector<QueueRowData> rows) {
         m_rows.insert(at, rows.size(), QueueRowData{});
         std::move(rows.begin(), rows.end(), m_rows.begin() + at);
     }
+    const int inserted = static_cast<int>(rows.size());
+    remapPlayNext([at, inserted](int row) { return row >= at ? row + inserted : row; });
     endInsertRows();
     return true;
 }
@@ -231,7 +318,13 @@ bool QueueRowsModel::removeRowsAt(int start, int count) {
     } else {
         m_rows.remove(start, count);
     }
+    const QVector<int> renumbered = remapPlayNext([start, count](int row) {
+        return row < start ? row : (row < start + count ? -1 : row - count);
+    });
     endRemoveRows();
+    // Rows marked after a removed marked row move up a place; their rows
+    // did not change, so tell them.
+    notifyPlayNext(renumbered);
     release(std::move(removed));
     return true;
 }
@@ -248,6 +341,18 @@ bool QueueRowsModel::moveRow(int from, int to) {
         return false;
     }
     m_rows.move(from, to);
+    remapPlayNext([from, to](int row) {
+        if (row == from) {
+            return to;
+        }
+        if (from < row && row <= to) {
+            return row - 1;
+        }
+        if (to <= row && row < from) {
+            return row + 1;
+        }
+        return row;
+    });
     endMoveRows();
     return true;
 }
@@ -270,6 +375,13 @@ bool QueueRowsModel::moveRows(int from, int count, int to) {
     m_rows.remove(from, count);
     m_rows.insert(to, count, QueueRowData{});
     std::move(moved.begin(), moved.end(), m_rows.begin() + to);
+    remapPlayNext([from, count, to](int row) {
+        if (row >= from && row < from + count) {
+            return to + (row - from);
+        }
+        const int rest = row >= from + count ? row - count : row;
+        return rest >= to ? rest + count : rest;
+    });
     endMoveRows();
     return true;
 }

@@ -208,6 +208,10 @@ QtObject {
     // lightness moved away from them until it reaches that.
     readonly property color link: root.readableOn(root.themeIsDark ? root.accent : root.focusRing,
                                                   [root.chrome, root.view], 4.5)
+    // The place of a queue row marked to play next: the link's accent,
+    // 4.5:1 on the rows, hovered or not, and on the selection.
+    readonly property color playNext: root.readableOn(root.link, [root.view, root.hoveredRow], 4.5)
+    readonly property color playNextSelected: root.readableOn(root.link, root._selectedRows, 4.5)
     // #ed5a6a / #c4293b: the theme's negative text, lightened on dark and
     // darkened on light for text contrast.
     readonly property color negative: root.themeIsDark

@@ -93,6 +93,11 @@ const SECTION_QUEUE_UNDO: u16 = 1 << 10;
 /// settings section ends with the widths too, then the u32 generation of the
 /// latest widths the UI sent.
 const SECTION_WINDOW_LAYOUT: u16 = 1 << 11;
+/// The queue rows marked to play next: the u64 queue revision the rows
+/// belong to, then a u32 count of u32 rows, in the order they play. It is
+/// sent when the marks change, and with every queue section, so the UI
+/// numbers the rows the queue section leaves.
+const SECTION_PLAY_NEXT: u16 = 1 << 12;
 
 #[cfg(unix)]
 fn create_nonblocking_pipe() -> Option<(RawFd, RawFd)> {
@@ -644,6 +649,8 @@ struct FfiEncoder {
     analysis_state: AnalysisEmitState,
     queue: QueueRelay,
     stopped: bool,
+    /// The marks the last play-next section carried.
+    play_next_sent: Option<Arc<[usize]>>,
 }
 
 impl FfiEncoder {
@@ -732,7 +739,18 @@ impl FfiEncoder {
                 &analysis_delta,
             )));
             let queue_section = queue_batch.map(|batch| self.queue.section(batch, &snapshot));
-            sections = Some(snapshot_sections(&snapshot, queue_section));
+            let marks = &snapshot.playback.play_next;
+            let play_next_section = (queue_section.is_some()
+                || self.play_next_sent.as_deref() != Some(&**marks))
+            .then(|| {
+                self.play_next_sent = Some(Arc::clone(marks));
+                encode_play_next_section(&snapshot)
+            });
+            sections = Some(snapshot_sections(
+                &snapshot,
+                queue_section,
+                play_next_section,
+            ));
         }
         Prepared {
             events: prepared,
@@ -2315,7 +2333,13 @@ fn parse_queue_command(
         reader.expect_done()?;
         return Ok(Some(BridgeCommand::Queue(BridgeQueueCommand::Redo(id))));
     }
-    if !matches!(cmd_id, 8 | 9 | 10 | 11 | 63 | 70) {
+    if cmd_id == 84 {
+        reader.expect_done()?;
+        return Ok(Some(BridgeCommand::Queue(
+            BridgeQueueCommand::ClearPlayNext,
+        )));
+    }
+    if !matches!(cmd_id, 8 | 9 | 10 | 11 | 63 | 70 | 83) {
         return Ok(None);
     }
     let revision = reader.read_u64()?;
@@ -2342,6 +2366,15 @@ fn parse_queue_command(
                 indices.push(usize_from_u32(reader.read_u32()?));
             }
             BridgeQueueCommand::RemoveMany(indices)
+        }
+        // A u32 count of u32 rows to mark to play next, or to unmark.
+        83 => {
+            let count = reader.read_count(4)?;
+            let mut rows = Vec::with_capacity(count);
+            for _ in 0..count {
+                rows.push(usize_from_u32(reader.read_u32()?));
+            }
+            BridgeQueueCommand::TogglePlayNext(rows)
         }
         10 => BridgeQueueCommand::Remove(usize_from_u32(reader.read_u32()?)),
         // A u8 for where the rows go (0 before row `at`, 1 one row up, 2
@@ -2796,12 +2829,13 @@ impl<'a> BinaryReader<'a> {
 #[cfg(test)]
 #[cfg(test)]
 fn encode_binary_snapshot(snapshot: &BridgeSnapshot, queue_section: Option<Vec<u8>>) -> Vec<u8> {
-    encode_packet(&snapshot_sections(snapshot, queue_section))
+    encode_packet(&snapshot_sections(snapshot, queue_section, None))
 }
 
 fn snapshot_sections(
     snapshot: &BridgeSnapshot,
     queue_section: Option<Vec<u8>>,
+    play_next_section: Option<Vec<u8>>,
 ) -> SnapshotSections {
     let mut sections: SnapshotSections = vec![
         (SECTION_PLAYBACK, encode_playback_section(snapshot)),
@@ -2817,7 +2851,23 @@ fn snapshot_sections(
     if let Some(section) = queue_section {
         sections.insert(1, (SECTION_QUEUE, section));
     }
+    if let Some(section) = play_next_section {
+        sections.push((SECTION_PLAY_NEXT, section));
+    }
     sections
+}
+
+/// The play-next section; `decodePlayNextSection` in
+/// `ui/src/BinaryBridgeCodec.cpp` reads it.
+fn encode_play_next_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
+    let rows = &snapshot.playback.play_next;
+    let mut out = Vec::with_capacity(12 + 4 * rows.len());
+    push_u64(&mut out, snapshot.queue_revision);
+    push_u32(&mut out, clamp_u32(rows.len()));
+    for row in rows.iter() {
+        push_u32(&mut out, clamp_u32(*row));
+    }
+    out
 }
 
 /// The queue undo section: the undo's offer ID and kind, the redo's, the
@@ -3982,6 +4032,8 @@ mod tests {
                 position_sampled_at: MonotonicTime::from_nanos(1_000_000),
                 position_advancing: true,
                 replay_gain: None,
+                play_next: Arc::default(),
+                queue_commands: 0,
             },
             analysis: AnalysisSnapshot {
                 waveform_peaks: vec![0.1, 0.5, 0.9],
@@ -4265,6 +4317,31 @@ mod tests {
         ));
         payload.pop();
         assert!(parse_binary_command(&encode_command(63, &payload)).is_err());
+    }
+
+    #[test]
+    fn play_next_commands_decode_their_rows_and_reject_truncation() {
+        // Mirrored by BinaryBridgeCodec::encodeCommandTogglePlayNext.
+        let mut payload = Vec::new();
+        push_u64(&mut payload, 17);
+        push_u32(&mut payload, 2);
+        for row in [6, 2] {
+            push_u32(&mut payload, row);
+        }
+        assert!(matches!(
+            parse_binary_command(&encode_command(83, &payload)).expect("toggle"),
+            Some(BridgeCommand::QueueAt {
+                revision: 17,
+                command: BridgeQueueCommand::TogglePlayNext(rows),
+            }) if rows == vec![6, 2]
+        ));
+        payload.pop();
+        assert!(parse_binary_command(&encode_command(83, &payload)).is_err());
+        assert!(matches!(
+            parse_binary_command(&encode_command(84, &[])).expect("clear"),
+            Some(BridgeCommand::Queue(BridgeQueueCommand::ClearPlayNext))
+        ));
+        assert!(parse_binary_command(&encode_command(84, &[0])).is_err());
     }
 
     #[test]
@@ -7069,8 +7146,57 @@ mod tests {
                 SECTION_METADATA,
                 SECTION_SETTINGS,
                 SECTION_LASTFM,
-                SECTION_QUEUE_UNDO
+                SECTION_QUEUE_UNDO,
+                SECTION_PLAY_NEXT
             ]
+        );
+    }
+
+    /// The revision and rows of a play-next section.
+    fn play_next_section_rows(payload: &[u8]) -> (u64, Vec<usize>) {
+        let revision = u64::from_le_bytes(payload[..8].try_into().expect("the revision"));
+        let count = u32::from_le_bytes(payload[8..12].try_into().expect("the count"));
+        let rows: Vec<usize> = payload[12..]
+            .chunks_exact(4)
+            .map(|row| usize_from_u32(u32::from_le_bytes(row.try_into().expect("a row"))))
+            .collect();
+        assert_eq!(rows.len(), usize_from_u32(count));
+        (revision, rows)
+    }
+
+    #[test]
+    fn the_marks_travel_with_every_queue_section_and_when_they_change() {
+        let (command_tx, _command_rx) = crossbeam_channel::unbounded();
+        let mut runtime = FfiRuntime::new(command_tx, -1, -1);
+        let mut marks_sent = |snapshot: BridgeSnapshot| {
+            runtime.process_bridge_events([BridgeEvent::Snapshot(Box::new(snapshot))]);
+            let packets = pending_packets(&mut runtime);
+            assert_eq!(packets.len(), 1);
+            section(&packets[0], SECTION_PLAY_NEXT).map(|payload| play_next_section_rows(&payload))
+        };
+        let with_marks = |mut snapshot: BridgeSnapshot, rows: &[usize]| {
+            snapshot.queue_revision = 7;
+            snapshot.playback.play_next = rows.into();
+            snapshot
+        };
+        let queue = || snapshot_with_queue(&["/music/a.flac", "/music/b.flac"], 0);
+        // With the whole queue, also without marks, for the rows it sends.
+        assert_eq!(marks_sent(with_marks(queue(), &[])), Some((7, vec![])));
+        // Unchanged, without a queue section: none.
+        assert_eq!(marks_sent(with_marks(snapshot_without_queue(1), &[])), None);
+        // Changed: the marks, in the order they play.
+        assert_eq!(
+            marks_sent(with_marks(snapshot_without_queue(2), &[1, 0])),
+            Some((7, vec![1, 0]))
+        );
+        assert_eq!(
+            marks_sent(with_marks(snapshot_without_queue(3), &[1, 0])),
+            None
+        );
+        // A queue section brings them again.
+        assert_eq!(
+            marks_sent(with_marks(queue(), &[1, 0])),
+            Some((7, vec![1, 0]))
         );
     }
 
