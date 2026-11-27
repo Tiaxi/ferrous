@@ -42,10 +42,13 @@ ToolBar {
     readonly property bool narrow: root.width < 1200
 
     // The bar under its 1 px seam: 24 px, or the small text's line and 4 px
-    // above and below it when that is more, or the Last.fm glyph clear of
-    // the slot's focus ring, with 1 px above and below, at a font where
-    // that is more.
-    readonly property real barHeight: Math.max(24, Math.round(smallMetrics.height) + 8,
+    // above and below it, growing with the font as the glyphs do, when that
+    // is more, or the Last.fm glyph clear of the slot's focus ring, with
+    // 1 px above and below, at a font where that is more. (A fixed 8 px
+    // left the descenders of a 24 pt line 2 or 3 px from the window's
+    // bottom edge.)
+    readonly property real barHeight: Math.max(24,
+        Math.round(smallMetrics.height) + root.uiPalette.scaledSize(8),
         scrobbleIndicator.minimumBlockHeight + 2)
 
     implicitHeight: root.topPadding + root.barHeight
