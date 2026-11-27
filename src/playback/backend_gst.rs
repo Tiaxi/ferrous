@@ -1288,9 +1288,9 @@ impl GstPlaybackRuntime {
     }
 
     /// Change the rows marked to play next with `edit`. A staged successor
-    /// that is no longer the first marked row, or one staged in the queue's
-    /// order or by shuffle while a row is marked now, is dropped, and the
-    /// current track plays on without it.
+    /// that would no longer play next, or would play next by another pick,
+    /// is dropped, and the current track plays on without it; one that is
+    /// still the same row by the same pick stays staged.
     fn edit_play_next(&mut self, edit: impl FnOnce(&mut GaplessQueue) -> Option<CancelledAdvance>) {
         // The rows stay, and so does the row the snapshot has: a stopped
         // track has none.
