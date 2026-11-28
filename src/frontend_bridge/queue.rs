@@ -255,7 +255,8 @@ fn removed_rows(queue: &[PathBuf], indices: &[usize]) -> Before {
 /// otherwise tell the user nothing was undone. The selection comes back,
 /// and so do the rows it took with their marks; the engine keeps the track
 /// it has open when that track is in the restored queue, see
-/// [`PlaybackCommand::RestoreQueue`]. Added rows go as Delete takes them.
+/// [`PlaybackCommand::RestoreQueue`]. Added rows go as Delete takes them,
+/// with the selection.
 /// Nothing starts playing that was not. The change can then be redone.
 fn undo_queue_change(
     id: u64,
@@ -339,11 +340,10 @@ fn undo_queue_change(
                 event_tx,
                 rows.into_iter().map(|(index, _)| index).collect(),
             );
-            state.selected_queue_index = change.selected.filter(|row| *row < state.queue.len());
+            // The selection follows as for Delete, as it does in the UI,
+            // which takes the rows out as Delete does.
             state.queue_undo.offer_redo(redo);
-            // The UI takes the rows out as Delete does; the selection that
-            // comes back is selected there too.
-            state.selected_queue_index.into_iter().collect()
+            Vec::new()
         }
     };
     state

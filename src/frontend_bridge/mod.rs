@@ -7089,9 +7089,8 @@ mod tests {
             },
             Added,
         );
-        queue_command(&mut runtime, BridgeQueueCommand::Select(Some(3)));
         states.push(queue_state(&runtime));
-        assert_eq!(states[2], (names(&["a", "x", "b", "c"]), Some(3), vec![3]));
+        assert_eq!(states[2], (names(&["a", "x", "b", "c"]), Some(0), vec![3]));
 
         step(
             &mut runtime,
@@ -7099,7 +7098,7 @@ mod tests {
             Removed,
         );
         states.push(queue_state(&runtime));
-        assert_eq!(states[3], (names(&["x", "b", "c"]), Some(2), vec![2]));
+        assert_eq!(states[3], (names(&["x", "b", "c"]), Some(0), vec![2]));
 
         step(
             &mut runtime,
@@ -7107,7 +7106,7 @@ mod tests {
             Moved,
         );
         states.push(queue_state(&runtime));
-        assert_eq!(states[4], (names(&["b", "c", "x"]), Some(1), vec![1]));
+        assert_eq!(states[4], (names(&["b", "c", "x"]), Some(2), vec![1]));
 
         step(
             &mut runtime,
@@ -7325,7 +7324,7 @@ mod tests {
     }
 
     #[test]
-    fn undoing_an_addition_tells_the_ui_the_selection_it_brings_back() {
+    fn undoing_an_addition_moves_the_selection_as_delete_does() {
         let _guard = test_guard();
         let (mut runtime, _engine_rx, event_tx, _album) = queue_order_runtime();
         let queue = vec![p("/music/a.flac"), p("/music/b.flac")];
@@ -7335,16 +7334,18 @@ mod tests {
             &mut runtime,
             BridgeQueueCommand::Append(vec![p("/music/c.flac")]),
         );
-        // The added row is selected; Delete of it would select B.
+        // The added row is selected; Delete of it selects B, and so does
+        // the UI, which takes the row out as Delete does.
         queue_command(&mut runtime, BridgeQueueCommand::Select(Some(2)));
         let undo = runtime.state.snapshot(false).queue_undo.offer_id;
 
         runtime.handle_command(ui_undo(undo), &event_tx);
         assert_eq!(runtime.state.queue, queue);
-        assert_eq!(runtime.state.selected_queue_index, Some(0));
+        assert_eq!(runtime.state.selected_queue_index, Some(1));
+        // No rows came back for the UI to select instead.
         let snapshot = runtime.state.snapshot(false);
-        let restored = snapshot.queue_undo.restored.expect("the selection");
-        assert_eq!((restored.id, restored.ranges), (undo, vec![(0, 1)]));
+        let restored = snapshot.queue_undo.restored.expect("the undo");
+        assert_eq!((restored.id, restored.ranges), (undo, Vec::new()));
     }
 
     #[test]
