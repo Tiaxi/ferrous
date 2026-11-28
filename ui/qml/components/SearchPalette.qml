@@ -338,6 +338,9 @@ Dialog {
     // The width of a pair in the footer's line, with the gap after it
     // unless it is the last, as its Row is laid out.
     function hintPairWidth(hint, last) {
+        // The bindings that measure the hints follow the font:
+        // advanceWidth() is a function, which they cannot follow.
+        root.smallMetrics.font
         return Math.ceil(root.smallMetrics.advanceWidth(hint.key)) + root.hintKeyGap
             + Math.ceil(root.smallMetrics.advanceWidth(hint.action)) + (last ? 0 : root.hintPairGap)
     }
