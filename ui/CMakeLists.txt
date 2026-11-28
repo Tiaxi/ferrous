@@ -287,6 +287,11 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/RowBackground.qml
         qml/components/RowReasonToolTip.qml
         qml/components/ScrobbleIndicator.qml
+        qml/components/SearchPalette.qml
+        qml/components/SearchPaletteCoverLead.qml
+        qml/components/SearchPaletteNoResults.qml
+        qml/components/SearchPaletteResultsView.qml
+        qml/components/SearchPaletteTitleRun.qml
         qml/components/ShortcutAction.qml
         qml/components/TextToolButton.qml
         qml/components/UiPalette.qml

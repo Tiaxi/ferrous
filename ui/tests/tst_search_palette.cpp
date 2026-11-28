@@ -525,6 +525,7 @@ private slots:
     void selectedRowsSecondaryMarksStepUp_data();
     void selectedRowsSecondaryMarksStepUp();
     void footerNamesTheKeysForEachState();
+    void footerGapsFollowAFontSetBeforeTheyOpen();
     void suggestionIsASelectableRow();
     void noResultsSpacingFollowsTheFont_data();
     void noResultsSpacingFollowsTheFont();
@@ -1544,6 +1545,39 @@ void SearchPaletteTest::footerNamesTheKeysForEachState() {
     // No results.
     harness.search(QStringLiteral("zzzz"), {});
     QTRY_COMPARE(harness.hints(), QStringList{QStringLiteral("Esc Close")});
+}
+
+// The footer's gaps follow its own font also when the app opens at a large
+// one: half again a word space of the hints' font between a key and its
+// action, and three times that between pairs. Read through a FontMetrics
+// call, which a binding can't follow, they took the app's larger font, and
+// the pairs drifted apart at 24 pt (#822).
+void SearchPaletteTest::footerGapsFollowAFontSetBeforeTheyOpen() {
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont large = applicationFont;
+    large.setPointSizeF(24);
+    QGuiApplication::setFont(large);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 26});
+    QTRY_COMPARE(harness.hints().size(), 4);
+    QQuickItem *footer = harness.item(QStringLiteral("globalSearchFooter"));
+    const auto keys = visibleNamed(footer, QStringLiteral("globalSearchKeyHintKey"));
+    const auto actions = visibleNamed(footer, QStringLiteral("globalSearchKeyHintAction"));
+    QCOMPARE(keys.size(), 4);
+    QCOMPARE(actions.size(), 4);
+    const QFontMetricsF small(actions.first()->property("font").value<QFont>());
+    const qreal keyGap = std::max(6.0, std::round(1.5 * small.horizontalAdvance(QLatin1Char(' '))));
+    QVERIFY(keyGap > 6.0);
+    for (int i = 0; i < keys.size(); ++i) {
+        QCOMPARE(sceneRect(actions[i]).left() - sceneRect(keys[i]).right(), keyGap);
+        if (i > 0 && sceneRect(keys[i]).top() == sceneRect(actions[i - 1]).top()) {
+            QCOMPARE(sceneRect(keys[i]).left() - sceneRect(actions[i - 1]).right(), 3 * keyGap);
+        }
+    }
 }
 
 // Nothing found, with a correction: "No matches for “merdian”", then
