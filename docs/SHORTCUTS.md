@@ -29,8 +29,8 @@ These work in the main window only:
 | Open files | Ctrl+O |
 | Find (open global search) | Ctrl+F |
 | Find in Queue | Ctrl+J |
-| Undo the latest Clear Queue, removal of queue tracks, move of queue tracks, or replacement of the queue | Ctrl+Z |
-| Redo the queue change that Undo undid | Ctrl+Shift+Z |
+| Undo the latest queue change, one step back each time: adding, removing or moving tracks, Clear Queue, or a replacement of the queue | Ctrl+Z |
+| Redo the queue change that Undo undid, one step forward each time | Ctrl+Shift+Z |
 | Select the previous or next track in the queue | Ctrl+Up, Ctrl+Down |
 | Move the selected tracks up or down the queue | Ctrl+Shift+Up, Ctrl+Shift+Down |
 | Configure Ferrous | Ctrl+Shift+, (Plasma's standard key) |
@@ -54,7 +54,7 @@ Alt and an underlined letter open a menu, such as Alt+P for **Playback**. The me
 
 In the library, typing the start of an artist's name selects that artist. While the library has focus, the letters you type go to it, so F there selects rather than follows the playhead.
 
-Delete, Q and J act only while the queue has focus. Q marks the selected tracks to [play next](FEATURES.md#play-next), and unmarks them when they are all marked; **Edit › Clear Play Next** unmarks every track. Marking is not undone with Undo, but undoing a removal or a replacement brings back the marks the tracks had. Playing from the library or global search replaces the queue. After **Edit › Clear Queue**, Delete, or a replacement, Undo in the **Edit** menu (Ctrl+Z) stays available until the queue changes again. Undo brings back the tracks and their selection. It does not start playback: a track that plays on is left playing, otherwise the track that was current comes back stopped at its start. After an undo, Redo in the **Edit** menu (Ctrl+Shift+Z) makes the change again, until the queue changes some other way, and the change can then be undone again. Redo does not start playback either: redoing a replacement brings the new queue back as Undo brings back the old one.
+Delete, Q and J act only while the queue has focus. Q marks the selected tracks to [play next](FEATURES.md#play-next), and unmarks them when they are all marked; **Edit › Clear Play Next** unmarks every track. Marking is not undone with Undo, but undoing a removal or a replacement brings back the marks the tracks had. Playing from the library or global search replaces the queue. Undo in the **Edit** menu (Ctrl+Z) goes back through your queue changes one at a time, latest first: tracks added from the library, search, dropped or opened files, Delete, moves, **Edit › Clear Queue** and replacements, also of an empty queue. A folder or a selection added at once is one step. Ferrous keeps up to 100 steps while it runs; the oldest go first, and a replacement or a move in a very large queue may take the place of several. Undo brings back the tracks and their selection. It does not start playback: a track that plays on is left playing, otherwise the track that was current comes back stopped at its start. Undoing an addition takes the tracks out as Delete does, with the selection: when one of them plays, another track in the queue takes its place, and playback stops when no tracks are left. After an undo, Redo in the **Edit** menu (Ctrl+Shift+Z) makes the change again, one step forward at a time, until you change the queue some other way, which drops the changes left to redo. Redo does not start playback either: redoing a replacement brings the new queue back as Undo brings back the old one.
 
 The handles between the queue's column headings resize the Artist, Album and Length columns; the title takes the rest. Tab reaches them: Left widens the column after the handle, Right narrows it, and Home, or a double-click, restores its default width. Ferrous keeps the widths you set.
 

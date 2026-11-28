@@ -63,12 +63,12 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QString queueDurationText READ queueDurationText NOTIFY queueChanged)
     Q_PROPERTY(QObject* queueRows READ queueRows CONSTANT)
     Q_PROPERTY(int selectedQueueIndex READ selectedQueueIndex NOTIFY snapshotChanged)
-    // The queue change the user can undo: an ID that changes with each new
-    // change (0 for none) and its kind (BinaryBridgeCodec::QueueUndoKind),
-    // which names it in the Edit menu.
+    // The latest queue change in the backend's history, which the user can
+    // undo: an ID that changes with each step (0 for none) and its kind
+    // (BinaryBridgeCodec::QueueUndoKind), which names it in the Edit menu.
     Q_PROPERTY(double queueUndoId READ queueUndoId NOTIFY queueUndoChanged)
     Q_PROPERTY(int queueUndoKind READ queueUndoKind NOTIFY queueUndoChanged)
-    // The undone queue change the user can redo, as queueUndoId and
+    // The undone queue change the user can redo next, as queueUndoId and
     // queueUndoKind name the change to undo.
     Q_PROPERTY(double queueRedoId READ queueRedoId NOTIFY queueUndoChanged)
     Q_PROPERTY(int queueRedoKind READ queueRedoKind NOTIFY queueUndoChanged)

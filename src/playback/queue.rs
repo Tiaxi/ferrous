@@ -576,6 +576,29 @@ impl GaplessQueue {
         cancelled
     }
 
+    /// The row of `paths`, a queue an undo or a redo brings back, where the
+    /// track `open` that the engine has open stays; see
+    /// [`super::PlaybackCommand::RestoreQueue`]. When the restore puts rows
+    /// back, that is the committed row moved past them, which the engine
+    /// knows better than the bridge's `current` while its snapshots are on
+    /// their way; otherwise `current`, then the first row with its path.
+    pub(crate) fn restored_row(
+        &self,
+        paths: &[PathBuf],
+        current: usize,
+        marks: &PlayNextRestore,
+        open: &Path,
+    ) -> Option<usize> {
+        let moved = play_next::reinserted_rows(marks, paths.len())
+            .zip(self.current_index())
+            .and_then(|(stayed, row)| stayed.get(row).copied());
+        moved
+            .into_iter()
+            .chain([current])
+            .find(|row| paths.get(*row).is_some_and(|path| path == open))
+            .or_else(|| paths.iter().position(|path| path == open))
+    }
+
     /// Replace the queue with `queue`, in which the committed track is row
     /// `current`, such as when an undo puts removed rows back around it,
     /// with the marks `marks` brings back. Staged successors stay while

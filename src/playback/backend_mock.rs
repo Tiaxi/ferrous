@@ -369,13 +369,11 @@ impl MockPlaybackRuntime {
             return;
         };
         let current = current.min(last);
-        let open_row = self.snapshot.current.as_ref().and_then(|open| {
-            if paths.get(current) == Some(open) {
-                Some(current)
-            } else {
-                paths.iter().position(|path| path == open)
-            }
-        });
+        let open_row = self
+            .snapshot
+            .current
+            .as_ref()
+            .and_then(|open| self.queue.restored_row(&paths, current, marks, open));
         let Some(row) = open_row else {
             let marked = play_next::restored(&self.queue.play_next(), marks, paths.len());
             let _ = self.queue.set_queue(paths);

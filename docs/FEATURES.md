@@ -6,7 +6,7 @@ What each part of Ferrous does, in more detail than the [README](../README.md). 
 
 - GStreamer plays the queue with seeking, repeat, shuffle and volume. A track goes on gaplessly into the next one when their file name extensions match, such as two `.flac` files.
 - The queue comes back on the next launch, with the current track where you left it.
-- Clearing the queue, removing, moving or replacing tracks can be undone and redone until the queue changes another way ([details](SHORTCUTS.md#library-and-queue)).
+- Every queue change, from adding and removing tracks to moving them, clearing the queue or replacing it, can be undone several steps back and redone again ([details](SHORTCUTS.md#library-and-queue)).
 - **Play Next** marks queue tracks to play after the current one, in the order you mark them, without moving them and without turning shuffle off ([details](#play-next)).
 - **Find in Queue** finds tracks in the queue alone, then plays one without replacing the queue or marks it to play next ([details](#find-in-queue)).
 - Open files, add folders, import M3U and M3U8 playlists, and drag tracks to reorder them.

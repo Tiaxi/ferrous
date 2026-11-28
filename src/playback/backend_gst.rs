@@ -1312,16 +1312,14 @@ impl GstPlaybackRuntime {
             return;
         };
         let current = current.min(last);
-        let open_row = self.snapshot.current.as_ref().and_then(|open| {
-            if paths.get(current) == Some(open) {
-                Some(current)
-            } else {
-                paths.iter().position(|path| path == open)
-            }
-        });
         let Ok(mut state) = self.queue_state.lock() else {
             return;
         };
+        let open_row = self
+            .snapshot
+            .current
+            .as_ref()
+            .and_then(|open| state.restored_row(&paths, current, marks, open));
         let Some(row) = open_row else {
             let marked = play_next::restored(&state.play_next(), marks, paths.len());
             let cancelled = state.set_queue(paths);
@@ -8077,6 +8075,61 @@ mod engine_tests {
             .any(|snapshot| snapshot.duration.abs_diff(millis(4_500)) < millis(100)));
     }
 
+    /// Undoing an addition sends what Delete of its rows does. When the
+    /// rows hold the staged successor, inserted after the audible track or
+    /// appended and marked to play next, the handoff is cancelled: the
+    /// current track plays on, and the row after it follows gaplessly.
+    #[test]
+    fn undoing_an_addition_that_holds_the_staged_successor_plays_on_to_the_next_row() {
+        for marked in [false, true] {
+            let fixtures = Fixtures::new(if marked {
+                "undo-add-marked"
+            } else {
+                "undo-add-inserted"
+            });
+            let a = fixtures.wav("a.wav", 6_000);
+            let b = fixtures.wav("b.wav", 3_000);
+            let d = fixtures.wav("d.wav", 3_500);
+            let c = fixtures.wav("c.wav", 4_500);
+            let mut engine = Engine::start();
+            engine.send(PlaybackCommand::LoadQueue(vec![a.clone(), c.clone()]));
+            engine.send(PlaybackCommand::Play);
+            engine.wait_for_settled_window(&c);
+            // Added as the bridge sends it, then undone as the bridge sends
+            // the undo.
+            let undo = if marked {
+                engine.send(PlaybackCommand::AddToQueue(vec![b.clone(), d]));
+                engine.send(PlaybackCommand::TogglePlayNext(vec![2]));
+                vec![2, 3]
+            } else {
+                engine.send(PlaybackCommand::InsertIntoQueue {
+                    at: 1,
+                    paths: vec![b.clone(), d],
+                });
+                vec![1, 2]
+            };
+            engine.wait_until("the added row was not staged", |engine| {
+                engine.cancelled_staging == 1 && engine.prepared.last() == Some(&b)
+            });
+            let changes = engine.changes.len();
+            engine.send(PlaybackCommand::RemoveMany(undo));
+            engine.wait_until("the staged addition was not cancelled", |engine| {
+                engine.cancelled_staging == 2
+            });
+            assert_eq!(engine.snapshot.current.as_deref(), Some(a.as_path()));
+            assert_eq!(engine.snapshot.current_queue_index, Some(0));
+            assert_eq!(engine.snapshot.state, PlaybackState::Playing);
+            assert!(engine.snapshot.play_next.is_empty(), "marked: {marked}");
+            assert_change(
+                &engine.wait_for_changes(changes + 1),
+                &c,
+                1,
+                Expect::Gapless,
+            );
+            engine.wait_for_playing(1, millis(4_500));
+        }
+    }
+
     #[test]
     fn restoring_rows_inside_the_window_keeps_the_audible_track_and_its_successor() {
         let fixtures = Fixtures::new("restore-keep");
@@ -8518,6 +8571,40 @@ mod engine_tests {
             Expect::Gapless,
         );
         finish_round(&mut engine, &queue, [first, target], changes + 1);
+    }
+
+    /// Rows an undo puts back keep the engine's own copy of a file queued
+    /// twice, though the row the bridge names, sent before it heard where
+    /// the engine went, holds the other copy.
+    #[test]
+    fn rows_put_back_keep_the_playing_copy_of_a_repeated_track() {
+        let fixtures = Fixtures::new("restore-repeated");
+        let a = fixtures.wav("a.wav", 6_000);
+        let b = fixtures.wav("b.wav", 3_000);
+        let c = fixtures.wav("c.wav", 3_000);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![
+            a.clone(),
+            a.clone(),
+            c.clone(),
+        ]));
+        engine.send(PlaybackCommand::StartAt(1));
+        engine.wait_for_playing(1, millis(6_000));
+        let changes = engine.changes.len();
+        engine.send(PlaybackCommand::RestoreQueue {
+            paths: vec![b, a.clone(), a.clone(), c],
+            current: 1,
+            play_next: PlayNextRestore::Reinserted {
+                rows: vec![0],
+                before: Vec::new(),
+            },
+        });
+        engine.wait_until("the playing A did not keep its row", |engine| {
+            engine.snapshot.current_queue_index == Some(2)
+        });
+        assert_eq!(engine.snapshot.current.as_deref(), Some(a.as_path()));
+        assert_eq!(engine.snapshot.state, PlaybackState::Playing);
+        assert_eq!(engine.changes.len(), changes, "the track was not changed");
     }
 
     /// The engine's side of an undo and a redo of a replacement: two

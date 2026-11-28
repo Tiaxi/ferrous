@@ -2898,8 +2898,8 @@ fn encode_play_next_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     out
 }
 
-/// The queue undo section: the undo's offer ID and kind, the redo's, the
-/// restored rows' change ID and revision, and their ranges.
+/// The queue undo section: the ID and kind of the step to undo, those of the
+/// step to redo, the restored rows' change ID and revision, and their ranges.
 /// `decodeQueueUndoSection` in `ui/src/BinaryBridgeCodec.cpp` reads it.
 fn encode_queue_undo_section(undo: &QueueUndoState) -> Vec<u8> {
     let ranges = undo
@@ -8057,8 +8057,14 @@ mod tests {
     #[test]
     fn queue_undo_kinds_keep_their_values_on_the_wire() {
         // BridgeClientTest::queueUndoSectionIsDecoded decodes these values.
-        use super::super::QueueUndoKind::{Cleared, Moved, Removed, Replaced};
-        for (kind, value) in [(Cleared, 1), (Removed, 2), (Replaced, 3), (Moved, 4)] {
+        use super::super::QueueUndoKind::{Added, Cleared, Moved, Removed, Replaced};
+        for (kind, value) in [
+            (Cleared, 1),
+            (Removed, 2),
+            (Replaced, 3),
+            (Moved, 4),
+            (Added, 5),
+        ] {
             let state = QueueUndoState {
                 offer_id: 7,
                 kind: Some(kind),
@@ -8190,7 +8196,9 @@ mod tests {
         ui.wait(handle, "the restored queue", |ui| {
             ui.queue.paths == tracks && ui.undo.restored_id == id
         });
-        assert_eq!(ui.undo.offer_id, 0);
+        // The append that filled the queue is next to undo.
+        assert_ne!(ui.undo.offer_id, id);
+        assert_eq!(ui.undo.kind, 5);
         // Later refreshes of the rows' details move the revision on, and
         // leave the restored rows where they are.
         assert!(ui.undo.restored_revision > 0);

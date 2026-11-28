@@ -18,7 +18,7 @@ Ferrous started as the player I wanted for my own music: one that feels at home 
 
 ## A look around
 
-**Playback and the queue.** Gapless playback, ReplayGain from the tags in your files, repeat and shuffle, and a queue that comes back where you left it. Clearing, removing, moving and replacing tracks can be undone.
+**Playback and the queue.** Gapless playback, ReplayGain from the tags in your files, repeat and shuffle, and a queue that comes back where you left it. Every queue change, adding tracks included, can be undone several steps back and redone.
 
 **Library and search.** The library follows your music folders as files come and go. [Search](docs/SEARCH.md) finds artists, albums and tracks as you type.
 

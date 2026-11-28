@@ -4064,22 +4064,29 @@ void BridgeClientTest::queueUndoSectionIsDecoded() {
     QCOMPARE(decoded.queueUndo.redoId, quint64(0));
     QCOMPARE(decoded.queueUndo.redoKind, int(BinaryBridgeCodec::QueueUndoNone));
 
-    // A move is the last kind the backend sends, as
-    // queue_undo_kinds_keep_their_values_on_the_wire encodes it.
+    // A move, and an addition, the last kind the backend sends, as
+    // queue_undo_kinds_keep_their_values_on_the_wire encodes them.
     QByteArray moved = section;
     moved[8] = 4;
     QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet(moved), &decoded, &error),
              qPrintable(error));
     QCOMPARE(decoded.queueUndo.kind, int(BinaryBridgeCodec::QueueUndoMoved));
-    QCOMPARE(int(BinaryBridgeCodec::QueueUndoLast), 4);
+    QByteArray added = section;
+    added[8] = 5;
+    added[17] = 5;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet(added), &decoded, &error),
+             qPrintable(error));
+    QCOMPARE(decoded.queueUndo.kind, int(BinaryBridgeCodec::QueueUndoAdded));
+    QCOMPARE(decoded.queueUndo.redoKind, int(BinaryBridgeCodec::QueueUndoAdded));
+    QCOMPARE(int(BinaryBridgeCodec::QueueUndoLast), 5);
 
     // An unknown kind, a range count past the payload, and trailing bytes
     // are refused.
     QByteArray unknownKind = section;
-    unknownKind[8] = 5;
+    unknownKind[8] = 6;
     QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packet(unknownKind), &decoded, &error));
     QByteArray unknownRedoKind = section;
-    unknownRedoKind[17] = 5;
+    unknownRedoKind[17] = 6;
     QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packet(unknownRedoKind), &decoded, &error));
     QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packet(section.left(section.size() - 4)),
                                                      &decoded, &error));
@@ -4206,7 +4213,8 @@ void BridgeClientTest::removedAndReplacedRowsComeBackThroughTheBackend() {
     QTRY_VERIFY_WITH_TIMEOUT(bridge.queueLength() == 3 && bridge.queuePathAt(0) == queued[0]
                                  && bridge.queuePathAt(2) == queued[2],
                              10000);
-    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueUndoId(), 0.0, 10000);
+    // Adding the tracks is a step of the history, under each change after it.
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueUndoKind(), int(BinaryBridgeCodec::QueueUndoAdded), 10000);
     bridge.selectQueueIndex(1);
     QTRY_COMPARE_WITH_TIMEOUT(bridge.selectedQueueIndex(), 1, 10000);
 
@@ -4223,7 +4231,7 @@ void BridgeClientTest::removedAndReplacedRowsComeBackThroughTheBackend() {
     }
     QTRY_COMPARE(restored.count(), 1);
     QCOMPARE(restored[0][0].toList(), QVariantList{1});
-    QTRY_COMPARE(bridge.queueUndoId(), 0.0);
+    QTRY_COMPARE(bridge.queueUndoKind(), int(BinaryBridgeCodec::QueueUndoAdded));
 
     // Playing an album replaces the queue, and the undo outlives its start.
     bridge.replaceWithPaths({replacement});
@@ -4236,7 +4244,7 @@ void BridgeClientTest::removedAndReplacedRowsComeBackThroughTheBackend() {
     for (int i = 0; i < queued.size(); ++i) {
         QCOMPARE(bridge.queuePathAt(i), queued[i]);
     }
-    QTRY_COMPARE(bridge.queueUndoId(), 0.0);
+    QTRY_COMPARE(bridge.queueUndoKind(), int(BinaryBridgeCodec::QueueUndoAdded));
     // Leave no queue of removed fixtures to the tests after this one.
     bridge.clearQueue();
     QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 0, 10000);
@@ -4607,7 +4615,7 @@ void BridgeClientTest::marksComeBackWithAnUndoneRemovalThroughTheBackend() {
     QTRY_VERIFY_WITH_TIMEOUT(bridge.queueLength() == 4 && bridge.queuePathAt(0) == paths[0]
                                  && bridge.queuePathAt(3) == paths[3],
                              10000);
-    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueUndoId(), 0.0, 10000);
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueUndoKind(), int(BinaryBridgeCodec::QueueUndoAdded), 10000);
 
     // Rows 3 and 1, which join in the queue's order, then row 2.
     bridge.togglePlayNext({3, 1});
@@ -4674,7 +4682,7 @@ void BridgeClientTest::aClearedQueueComesBackAndGoesAgainThroughTheBackend() {
     QTRY_COMPARE(restored.count(), 1);
     QCOMPARE(restored[0][0].toList(), QVariantList{1});
     QCOMPARE(bridge.selectedQueueIndex(), 1);
-    QTRY_COMPARE(bridge.queueUndoId(), 0.0);
+    QTRY_COMPARE(bridge.queueUndoKind(), int(BinaryBridgeCodec::QueueUndoAdded));
     QVERIFY2(errors.isEmpty(), qPrintable(errors.isEmpty() ? QString() : errors.first().first().toString()));
 
     // Undoing the same change again is refused where the user sees it.
@@ -4972,7 +4980,7 @@ void BridgeClientTest::movedRowsGoBackThroughTheBackendAndAreSelected() {
     QTRY_COMPARE_WITH_TIMEOUT(rows(), paths, 10000);
     QTRY_COMPARE_WITH_TIMEOUT(restored.count(), 1, 10000);
     QCOMPARE(restored[0][0].toList(), (QVariantList{0, 2}));
-    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueUndoId(), 0.0, 10000);
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueUndoKind(), int(BinaryBridgeCodec::QueueUndoAdded), 10000);
     QCOMPARE(bridge.selectedQueueIndex(), 1);
     QTRY_COMPARE_WITH_TIMEOUT(bridge.playingQueueIndex(), 0, 10000);
     QCOMPARE(bridge.currentTrackPath(), paths[0]);
