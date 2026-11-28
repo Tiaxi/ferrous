@@ -40,6 +40,16 @@ const MAX_STEPS: usize = 100;
 /// though never the latest, which may hold more on its own.
 const MAX_PATHS: usize = 100_000;
 
+/// The row indices that count as one path against [`MAX_PATHS`]. A reorder
+/// keeps an index for every row of the queue, and a removal to redo one for
+/// each row it takes; an index takes 8 bytes, a path several times that.
+const ROWS_PER_PATH: usize = 8;
+
+/// What `rows` row indices count against [`MAX_PATHS`].
+fn rows_cost(rows: usize) -> usize {
+    rows.div_ceil(ROWS_PER_PATH)
+}
+
 /// Sent to the UI as its value. `QueueUndoKind` in
 /// `ui/src/BinaryBridgeCodec.h` mirrors it, and refuses a packet with a kind
 /// it does not know.
@@ -121,11 +131,12 @@ pub(super) struct Redo {
 }
 
 impl Change {
+    /// What the step counts against [`MAX_PATHS`].
     fn paths(&self) -> usize {
         match &self.before {
             Before::Queue(paths) => paths.len(),
             Before::Rows(rows) | Before::Added(rows) => rows.len(),
-            Before::Order { .. } => 0,
+            Before::Order { order, moved } => rows_cost(order.len() + moved.len()),
         }
     }
 
@@ -148,11 +159,13 @@ impl Change {
 }
 
 impl Redo {
+    /// What the step counts against [`MAX_PATHS`].
     fn paths(&self) -> usize {
         match &self.after {
             After::Queue(paths) => paths.len(),
             After::Added(rows) => rows.len(),
-            After::Rows(_) | After::Order { .. } => 0,
+            After::Rows(rows) => rows_cost(rows.len()),
+            After::Order { order, moved } => rows_cost(order.len() + moved.len()),
         }
     }
 
@@ -604,6 +617,38 @@ mod tests {
         });
         assert_eq!(offered(&undo), (None, Some(QueueUndoKind::Replaced)));
         assert_eq!(undo.paths, MAX_PATHS);
+    }
+
+    /// A reorder keeps the order of the whole queue, so moves in a long
+    /// queue count against the path cap, and so do the rows a removal to
+    /// redo names.
+    #[test]
+    fn reorders_and_removals_to_redo_count_against_the_path_cap() {
+        let len = MAX_PATHS;
+        let moved = || Change {
+            kind: QueueUndoKind::Moved,
+            before: Before::Order {
+                order: (0..len).rev().collect(),
+                moved: vec![0],
+            },
+            ..cleared(&[])
+        };
+        let cost = rows_cost(len + 1);
+        let fit = MAX_PATHS / cost;
+        let mut undo = QueueUndo::default();
+        for _ in 0..fit + 3 {
+            undo.record(Some(moved()));
+        }
+        assert_eq!((undo.undo.len(), undo.paths), (fit, fit * cost));
+
+        let mut undo = QueueUndo::default();
+        undo.offer_redo(Redo {
+            after: After::Rows((0..len).collect()),
+            ..redo_of(QueueUndoKind::Removed, &[])
+        });
+        assert_eq!(undo.paths, rows_cost(len));
+        assert!(undo.take_redo(undo.state().redo_id).is_some());
+        assert_eq!(undo.paths, 0);
     }
 
     #[test]
