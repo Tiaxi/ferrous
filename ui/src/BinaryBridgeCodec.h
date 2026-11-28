@@ -654,7 +654,9 @@ enum QueueUndoKind : quint8 {
     QueueUndoRemoved = 2,
     QueueUndoReplaced = 3,
     QueueUndoMoved = 4,
-    QueueUndoLast = QueueUndoMoved,
+    // Rows added or inserted.
+    QueueUndoAdded = 5,
+    QueueUndoLast = QueueUndoAdded,
 };
 
 struct DecodedQueueUndo {

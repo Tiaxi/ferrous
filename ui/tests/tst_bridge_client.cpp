@@ -4064,22 +4064,29 @@ void BridgeClientTest::queueUndoSectionIsDecoded() {
     QCOMPARE(decoded.queueUndo.redoId, quint64(0));
     QCOMPARE(decoded.queueUndo.redoKind, int(BinaryBridgeCodec::QueueUndoNone));
 
-    // A move is the last kind the backend sends, as
-    // queue_undo_kinds_keep_their_values_on_the_wire encodes it.
+    // A move, and an addition, the last kind the backend sends, as
+    // queue_undo_kinds_keep_their_values_on_the_wire encodes them.
     QByteArray moved = section;
     moved[8] = 4;
     QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet(moved), &decoded, &error),
              qPrintable(error));
     QCOMPARE(decoded.queueUndo.kind, int(BinaryBridgeCodec::QueueUndoMoved));
-    QCOMPARE(int(BinaryBridgeCodec::QueueUndoLast), 4);
+    QByteArray added = section;
+    added[8] = 5;
+    added[17] = 5;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet(added), &decoded, &error),
+             qPrintable(error));
+    QCOMPARE(decoded.queueUndo.kind, int(BinaryBridgeCodec::QueueUndoAdded));
+    QCOMPARE(decoded.queueUndo.redoKind, int(BinaryBridgeCodec::QueueUndoAdded));
+    QCOMPARE(int(BinaryBridgeCodec::QueueUndoLast), 5);
 
     // An unknown kind, a range count past the payload, and trailing bytes
     // are refused.
     QByteArray unknownKind = section;
-    unknownKind[8] = 5;
+    unknownKind[8] = 6;
     QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packet(unknownKind), &decoded, &error));
     QByteArray unknownRedoKind = section;
-    unknownRedoKind[17] = 5;
+    unknownRedoKind[17] = 6;
     QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packet(unknownRedoKind), &decoded, &error));
     QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packet(section.left(section.size() - 4)),
                                                      &decoded, &error));

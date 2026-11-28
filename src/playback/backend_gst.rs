@@ -8077,6 +8077,61 @@ mod engine_tests {
             .any(|snapshot| snapshot.duration.abs_diff(millis(4_500)) < millis(100)));
     }
 
+    /// Undoing an addition sends what Delete of its rows does. When the
+    /// rows hold the staged successor, inserted after the audible track or
+    /// appended and marked to play next, the handoff is cancelled: the
+    /// current track plays on, and the row after it follows gaplessly.
+    #[test]
+    fn undoing_an_addition_that_holds_the_staged_successor_plays_on_to_the_next_row() {
+        for marked in [false, true] {
+            let fixtures = Fixtures::new(if marked {
+                "undo-add-marked"
+            } else {
+                "undo-add-inserted"
+            });
+            let a = fixtures.wav("a.wav", 6_000);
+            let b = fixtures.wav("b.wav", 3_000);
+            let d = fixtures.wav("d.wav", 3_500);
+            let c = fixtures.wav("c.wav", 4_500);
+            let mut engine = Engine::start();
+            engine.send(PlaybackCommand::LoadQueue(vec![a.clone(), c.clone()]));
+            engine.send(PlaybackCommand::Play);
+            engine.wait_for_settled_window(&c);
+            // Added as the bridge sends it, then undone as the bridge sends
+            // the undo.
+            let undo = if marked {
+                engine.send(PlaybackCommand::AddToQueue(vec![b.clone(), d]));
+                engine.send(PlaybackCommand::TogglePlayNext(vec![2]));
+                vec![2, 3]
+            } else {
+                engine.send(PlaybackCommand::InsertIntoQueue {
+                    at: 1,
+                    paths: vec![b.clone(), d],
+                });
+                vec![1, 2]
+            };
+            engine.wait_until("the added row was not staged", |engine| {
+                engine.cancelled_staging == 1 && engine.prepared.last() == Some(&b)
+            });
+            let changes = engine.changes.len();
+            engine.send(PlaybackCommand::RemoveMany(undo));
+            engine.wait_until("the staged addition was not cancelled", |engine| {
+                engine.cancelled_staging == 2
+            });
+            assert_eq!(engine.snapshot.current.as_deref(), Some(a.as_path()));
+            assert_eq!(engine.snapshot.current_queue_index, Some(0));
+            assert_eq!(engine.snapshot.state, PlaybackState::Playing);
+            assert!(engine.snapshot.play_next.is_empty(), "marked: {marked}");
+            assert_change(
+                &engine.wait_for_changes(changes + 1),
+                &c,
+                1,
+                Expect::Gapless,
+            );
+            engine.wait_for_playing(1, millis(4_500));
+        }
+    }
+
     #[test]
     fn restoring_rows_inside_the_window_keeps_the_audible_track_and_its_successor() {
         let fixtures = Fixtures::new("restore-keep");

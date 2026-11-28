@@ -2451,7 +2451,8 @@ void UiMenusTest::checkEditMenuNamesItsUndoAndRedoAndClearsTheQueue(QQuickWindow
     QVERIFY(!clear->isEnabled());
     bridge->setProperty("queueUndoId", 7.0);
     const QStringList names{QStringLiteral("Undo Clear Queue"), QStringLiteral("Undo Remove from Queue"),
-                            QStringLiteral("Undo Replace Queue"), QStringLiteral("Undo Move in Queue")};
+                            QStringLiteral("Undo Replace Queue"), QStringLiteral("Undo Move in Queue"),
+                            QStringLiteral("Undo Add to Queue")};
     for (qsizetype kind = 1; kind <= names.size(); ++kind) {
         bridge->setProperty("queueUndoKind", static_cast<int>(kind));
         QTRY_COMPARE(withoutMnemonic(undo->property("text").toString()), names.at(kind - 1));
@@ -2465,7 +2466,8 @@ void UiMenusTest::checkEditMenuNamesItsUndoAndRedoAndClearsTheQueue(QQuickWindow
     QVERIFY(!redo->isEnabled());
     bridge->setProperty("queueRedoId", 8.0);
     const QStringList redoNames{QStringLiteral("Redo Clear Queue"), QStringLiteral("Redo Remove from Queue"),
-                                QStringLiteral("Redo Replace Queue"), QStringLiteral("Redo Move in Queue")};
+                                QStringLiteral("Redo Replace Queue"), QStringLiteral("Redo Move in Queue"),
+                                QStringLiteral("Redo Add to Queue")};
     for (qsizetype kind = 1; kind <= redoNames.size(); ++kind) {
         bridge->setProperty("queueRedoKind", static_cast<int>(kind));
         QTRY_COMPARE(withoutMnemonic(redo->property("text").toString()), redoNames.at(kind - 1));

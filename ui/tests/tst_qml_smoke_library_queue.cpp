@@ -78,6 +78,7 @@ private:
     void checkDeleteRemovesQueueTracksOnlyWhileTheQueueHasFocus(QQuickWindow *window);
     void checkQueueChangesShowNoNoticeAndEditUndoRestoresThem(QQuickWindow *window);
     void checkCtrlZUndoesAQueueChangeAsSearchFadesOut(QQuickWindow *window);
+    void checkCtrlZWalksTheHistoryBackAndCtrlShiftZForward(QQuickWindow *window);
     void checkLibraryRowsLayOutTheirYearsWithoutWarnings(QQuickWindow *window, LibraryTreeModel &libraryModel);
     void checkLibraryKeysReachBothEndsAndOpenTheContextMenu(QQuickWindow *window, LibraryTreeModel &libraryModel);
 };
@@ -1868,7 +1869,8 @@ void LibraryQueueSmokeTest::mainWindowQueueAnswersTheWheelTheKeysAndUndo() {
                [&] { checkQueueKeysReachBothEndsAndOpenTheContextMenu(main.window); },
                [&] { checkDeleteRemovesQueueTracksOnlyWhileTheQueueHasFocus(main.window); },
                [&] { checkQueueChangesShowNoNoticeAndEditUndoRestoresThem(main.window); },
-               [&] { checkCtrlZUndoesAQueueChangeAsSearchFadesOut(main.window); }});
+               [&] { checkCtrlZUndoesAQueueChangeAsSearchFadesOut(main.window); },
+               [&] { checkCtrlZWalksTheHistoryBackAndCtrlShiftZForward(main.window); }});
 }
 
 // The rows first, from an empty library, as the app starts.
@@ -2477,6 +2479,96 @@ void LibraryQueueSmokeTest::checkCtrlZUndoesAQueueChangeAsSearchFadesOut(QQuickW
     animations.reset();
     bridge->setProperty("queueUndoKind", int(BinaryBridgeCodec::QueueUndoNone));
     bridge->setProperty("queueUndoId", 0.0);
+}
+
+// The backend keeps a history of queue changes: Ctrl+Z undoes them one
+// after another, latest first, each named in the Edit menu, and Ctrl+Shift+Z
+// redoes them in order. Each key sends the step the backend offers then.
+void LibraryQueueSmokeTest::checkCtrlZWalksTheHistoryBackAndCtrlShiftZForward(QQuickWindow *window) {
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    bridge->setProperty("queueCommands", QStringList{});
+    bridge->setProperty("queueRows", sampleQueueRows(5));
+    bridge->setProperty("queueLength", 5);
+    QObject *undoAction = window->findChild<QObject *>(QStringLiteral("undoQueueChangeAction"));
+    QObject *redoAction = window->findChild<QObject *>(QStringLiteral("redoQueueChangeAction"));
+    auto *queueView = window->findChild<QQuickItem *>(QStringLiteral("playlistView"));
+    QVERIFY(undoAction != nullptr && redoAction != nullptr && queueView != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(queueView, "forceActiveFocus"));
+    QTRY_VERIFY(queueView->hasActiveFocus());
+
+    // What the backend offers: the step to undo and the step to redo, each
+    // an ID and a kind; 0 for none.
+    struct Offer {
+        double undoId;
+        int undoKind;
+        double redoId;
+        int redoKind;
+    };
+    const auto offer = [&](const Offer &offer) {
+        bridge->setProperty("queueUndoKind", offer.undoKind);
+        bridge->setProperty("queueUndoId", offer.undoId);
+        bridge->setProperty("queueRedoKind", offer.redoKind);
+        bridge->setProperty("queueRedoId", offer.redoId);
+    };
+    const auto names = [&]() {
+        return QStringList{undoAction->property("text").toString(),
+                           redoAction->property("text").toString()};
+    };
+    const int added = BinaryBridgeCodec::QueueUndoAdded;
+    const int moved = BinaryBridgeCodec::QueueUndoMoved;
+    const int removed = BinaryBridgeCodec::QueueUndoRemoved;
+    const int none = BinaryBridgeCodec::QueueUndoNone;
+
+    // Tracks were added, moved, then removed.
+    offer({22.0, removed, 0.0, none});
+    QCOMPARE(names(), (QStringList{QStringLiteral("&Undo Remove from Queue"), QStringLiteral("&Redo")}));
+    QVERIFY(!redoAction->property("enabled").toBool());
+    const QList<Offer> undone{
+        {21.0, moved, 23.0, removed},
+        {20.0, added, 24.0, moved},
+        {0.0, none, 25.0, added},
+    };
+    const QList<QStringList> undoneNames{
+        {QStringLiteral("&Undo Move in Queue"), QStringLiteral("&Redo Remove from Queue")},
+        {QStringLiteral("&Undo Add to Queue"), QStringLiteral("&Redo Move in Queue")},
+        {QStringLiteral("&Undo"), QStringLiteral("&Redo Add to Queue")},
+    };
+    const QStringList undos{QStringLiteral("undo 22"), QStringLiteral("undo 21"), QStringLiteral("undo 20")};
+    for (qsizetype step = 0; step < undone.size(); ++step) {
+        QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(queueCommands(bridge).last(), undos.at(step));
+        offer(undone.at(step));
+        QCOMPARE(names(), undoneNames.at(step));
+    }
+    QCOMPARE(queueCommands(bridge), undos);
+    // Nothing is left to undo.
+    QVERIFY(!undoAction->property("enabled").toBool());
+    QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(queueCommands(bridge).size(), undos.size());
+
+    // Ctrl+Shift+Z redoes them in the order they were made.
+    const QList<Offer> redone{
+        {26.0, added, 24.0, moved},
+        {27.0, moved, 23.0, removed},
+        {28.0, removed, 0.0, none},
+    };
+    const QList<QStringList> redoneNames{
+        {QStringLiteral("&Undo Add to Queue"), QStringLiteral("&Redo Move in Queue")},
+        {QStringLiteral("&Undo Move in Queue"), QStringLiteral("&Redo Remove from Queue")},
+        {QStringLiteral("&Undo Remove from Queue"), QStringLiteral("&Redo")},
+    };
+    const QStringList redos{QStringLiteral("redo 25"), QStringLiteral("redo 24"), QStringLiteral("redo 23")};
+    for (qsizetype step = 0; step < redone.size(); ++step) {
+        QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+        QCOMPARE(queueCommands(bridge).last(), redos.at(step));
+        offer(redone.at(step));
+        QCOMPARE(names(), redoneNames.at(step));
+    }
+    QCOMPARE(queueCommands(bridge), undos + redos);
+    QVERIFY(!redoAction->property("enabled").toBool());
+    QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+    QCOMPARE(queueCommands(bridge).size(), undos.size() + redos.size());
+    offer({0.0, none, 0.0, none});
 }
 
 void LibraryQueueSmokeTest::removingALibraryRootAsksFirstAndNamesIt() {

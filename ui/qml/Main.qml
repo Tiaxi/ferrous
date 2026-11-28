@@ -911,6 +911,8 @@ ApplicationWindow {
                 return I18n.i18nc("@action:inmenu", "&Undo Replace Queue")
             case 4:
                 return I18n.i18nc("@action:inmenu", "&Undo Move in Queue")
+            case 5:
+                return I18n.i18nc("@action:inmenu", "&Undo Add to Queue")
             default:
                 return I18n.i18nc("@action:inmenu", "&Undo")
             }
@@ -937,6 +939,8 @@ ApplicationWindow {
                 return I18n.i18nc("@action:inmenu", "&Redo Replace Queue")
             case 4:
                 return I18n.i18nc("@action:inmenu", "&Redo Move in Queue")
+            case 5:
+                return I18n.i18nc("@action:inmenu", "&Redo Add to Queue")
             default:
                 return I18n.i18nc("@action:inmenu", "&Redo")
             }
