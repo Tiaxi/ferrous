@@ -1312,16 +1312,14 @@ impl GstPlaybackRuntime {
             return;
         };
         let current = current.min(last);
-        let open_row = self.snapshot.current.as_ref().and_then(|open| {
-            if paths.get(current) == Some(open) {
-                Some(current)
-            } else {
-                paths.iter().position(|path| path == open)
-            }
-        });
         let Ok(mut state) = self.queue_state.lock() else {
             return;
         };
+        let open_row = self
+            .snapshot
+            .current
+            .as_ref()
+            .and_then(|open| state.restored_row(&paths, current, marks, open));
         let Some(row) = open_row else {
             let marked = play_next::restored(&state.play_next(), marks, paths.len());
             let cancelled = state.set_queue(paths);
@@ -8578,6 +8576,40 @@ mod engine_tests {
     /// The engine's side of an undo and a redo of a replacement: two
     /// restores in a row, with the rows the bridge would send. Which rows
     /// the bridge sends is covered by its own tests.
+    /// Rows an undo puts back keep the engine's own copy of a file queued
+    /// twice, though the row the bridge names, sent before it heard where
+    /// the engine went, holds the other copy.
+    #[test]
+    fn rows_put_back_keep_the_playing_copy_of_a_repeated_track() {
+        let fixtures = Fixtures::new("restore-repeated");
+        let a = fixtures.wav("a.wav", 6_000);
+        let b = fixtures.wav("b.wav", 3_000);
+        let c = fixtures.wav("c.wav", 3_000);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![
+            a.clone(),
+            a.clone(),
+            c.clone(),
+        ]));
+        engine.send(PlaybackCommand::StartAt(1));
+        engine.wait_for_playing(1, millis(6_000));
+        let changes = engine.changes.len();
+        engine.send(PlaybackCommand::RestoreQueue {
+            paths: vec![b, a.clone(), a.clone(), c],
+            current: 1,
+            play_next: PlayNextRestore::Reinserted {
+                rows: vec![0],
+                before: Vec::new(),
+            },
+        });
+        engine.wait_until("the playing A did not keep its row", |engine| {
+            engine.snapshot.current_queue_index == Some(2)
+        });
+        assert_eq!(engine.snapshot.current.as_deref(), Some(a.as_path()));
+        assert_eq!(engine.snapshot.state, PlaybackState::Playing);
+        assert_eq!(engine.changes.len(), changes, "the track was not changed");
+    }
+
     #[test]
     fn an_undone_and_redone_replacement_stops_at_the_current_row_of_each_queue() {
         let fixtures = Fixtures::new("restore-redo");

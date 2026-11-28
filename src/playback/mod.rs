@@ -174,8 +174,10 @@ pub enum PlaybackCommand {
     RemapPaths(Arc<PathRenames>),
     /// Replace the queue with `paths`, as an undo of a queue change does.
     /// When the track the engine has open, playing, paused or stopped, is
-    /// in `paths`, it stays open undisturbed: at row `current` when that is
-    /// its path, otherwise at its first row. Otherwise playback stops and
+    /// in `paths`, it stays open undisturbed: at its own row moved past the
+    /// rows put back, when `play_next` puts rows back and that row holds
+    /// it; otherwise at row `current` when that is its path, otherwise at
+    /// its first row. Otherwise playback stops and
     /// row `current` becomes the current track, stopped at its start. The
     /// engine never starts playback for this command.
     /// `play_next` says which rows are marked to play next then.
@@ -1100,6 +1102,48 @@ mod tests {
         assert_eq!(snapshot.current, Some(other[1].clone()));
         assert_eq!(snapshot.state, PlaybackState::Stopped);
         assert_eq!(snapshot.position, Duration::ZERO);
+    }
+
+    /// An undo that puts rows back keeps the engine's own copy of a file
+    /// queued twice, though the bridge's row, sent before it heard where the
+    /// engine went, names the other copy: paused, and stopped, when Play
+    /// starts that copy again.
+    #[test]
+    fn rows_put_back_keep_the_open_copy_of_a_repeated_track() {
+        let a = PathBuf::from("/fixture/a.flac");
+        let b = PathBuf::from("/fixture/b.flac");
+        let c = PathBuf::from("/fixture/c.flac");
+        for stop in [false, true] {
+            let (engine, rx) = make_test_engine();
+            engine.command(PlaybackCommand::LoadQueue(vec![
+                a.clone(),
+                a.clone(),
+                c.clone(),
+            ]));
+            // The second A.
+            engine.command(PlaybackCommand::PlayAt(1));
+            engine.command(PlaybackCommand::Play);
+            engine.command(PlaybackCommand::Pause);
+            if stop {
+                engine.command(PlaybackCommand::Stop);
+            }
+            // B goes back before the first A; the bridge names row 1, the
+            // first A, as the current row.
+            engine.command(PlaybackCommand::RestoreQueue {
+                paths: vec![b.clone(), a.clone(), a.clone(), c.clone()],
+                current: 1,
+                play_next: super::PlayNextRestore::Reinserted {
+                    rows: vec![0],
+                    before: Vec::new(),
+                },
+            });
+            if stop {
+                engine.command(PlaybackCommand::Play);
+            }
+            let snapshot = recv_snapshot(&rx, Duration::from_millis(100)).expect("kept track");
+            assert_eq!(snapshot.current.as_ref(), Some(&a), "stopped: {stop}");
+            assert_eq!(snapshot.current_queue_index, Some(2), "stopped: {stop}");
+        }
     }
 
     #[test]

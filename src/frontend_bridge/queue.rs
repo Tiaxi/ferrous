@@ -341,7 +341,9 @@ fn undo_queue_change(
             );
             state.selected_queue_index = change.selected.filter(|row| *row < state.queue.len());
             state.queue_undo.offer_redo(redo);
-            Vec::new()
+            // The UI takes the rows out as Delete does; the selection that
+            // comes back is selected there too.
+            state.selected_queue_index.into_iter().collect()
         }
     };
     state

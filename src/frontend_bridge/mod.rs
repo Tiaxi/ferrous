@@ -7325,6 +7325,29 @@ mod tests {
     }
 
     #[test]
+    fn undoing_an_addition_tells_the_ui_the_selection_it_brings_back() {
+        let _guard = test_guard();
+        let (mut runtime, _engine_rx, event_tx, _album) = queue_order_runtime();
+        let queue = vec![p("/music/a.flac"), p("/music/b.flac")];
+        replace_queue(&mut runtime, &queue, &event_tx);
+        queue_command(&mut runtime, BridgeQueueCommand::Select(Some(0)));
+        queue_command(
+            &mut runtime,
+            BridgeQueueCommand::Append(vec![p("/music/c.flac")]),
+        );
+        // The added row is selected; Delete of it would select B.
+        queue_command(&mut runtime, BridgeQueueCommand::Select(Some(2)));
+        let undo = runtime.state.snapshot(false).queue_undo.offer_id;
+
+        runtime.handle_command(ui_undo(undo), &event_tx);
+        assert_eq!(runtime.state.queue, queue);
+        assert_eq!(runtime.state.selected_queue_index, Some(0));
+        let snapshot = runtime.state.snapshot(false);
+        let restored = snapshot.queue_undo.restored.expect("the selection");
+        assert_eq!((restored.id, restored.ranges), (undo, vec![(0, 1)]));
+    }
+
+    #[test]
     fn undoing_an_addition_that_holds_the_playing_row_removes_it_as_delete_does() {
         let _guard = test_guard();
         let (mut runtime, engine_rx, event_tx, _album) = queue_order_runtime();
@@ -7342,8 +7365,8 @@ mod tests {
 
         runtime.handle_command(ui_undo(offer.offer_id), &event_tx);
         assert_eq!(runtime.state.queue, queue);
-        // The engine gets what Delete of the rows sends: it plays the row
-        // after them, here none, so it stops, as for Delete.
+        // The engine gets what Delete of the rows sends, and another row
+        // takes the playing row's place as it does for Delete.
         assert_eq!(queue_ops(&engine_rx), ["RemoveMany([2, 3])"]);
         assert_eq!(runtime.state.playback.current_queue_index, None);
         let redo = runtime.state.snapshot(false).queue_undo;
