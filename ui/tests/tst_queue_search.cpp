@@ -221,6 +221,10 @@ struct Harness {
     }
 };
 
+QRectF sceneRect(QQuickItem *item) {
+    return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
+}
+
 QString textOf(QQuickItem *row, const QString &name) {
     const auto items = visibleNamed(row, name);
     return items.isEmpty() ? QString() : items.first()->property("text").toString();
@@ -244,6 +248,7 @@ private slots:
     void keysPressedDuringASearchActOnItsResults();
     void thePlayingRowIsMarkedNotOtherRowsOfItsFile();
     void theSelectionStaysOnItsRowThroughTheQueuesEdits();
+    void thePaletteHasGlobalSearchsFrame();
 };
 
 void QueueSearchTest::initTestCase() {
@@ -597,6 +602,45 @@ int main(int argc, char **argv) {
     FerrousLocalization::registerQmlTypes();
     QueueSearchTest test;
     return QTest::qExec(&test, argc, argv);
+}
+
+// Find in Queue is drawn in global search's frame (SearchPalette, #822),
+// with the place column before the rows' leads: the field's glyph is over
+// the leads, the query starts where the titles do, the clear button empties
+// the field and leaves it the keys, and a press on the dim closes the
+// palette.
+void QueueSearchTest::thePaletteHasGlobalSearchsFrame() {
+    Harness harness;
+    QString error;
+    QVERIFY2(harness.load(&error), qPrintable(error));
+    harness.queue.setRows(queueOf({QStringLiteral("Alpha"), QStringLiteral("Beta")}));
+    QVERIFY(harness.open());
+    harness.search(QStringLiteral("beta"), {1});
+    QTRY_COMPARE(harness.rows().size(), 1);
+    QQuickItem *row = harness.rows().first();
+    QQuickItem *glyph = harness.item(QStringLiteral("queueSearchFieldIcon"));
+    const auto tiles = visibleNamed(row, QStringLiteral("queueSearchCoverPlaceholder"));
+    const auto places = visibleNamed(row, QStringLiteral("queueSearchResultPlace"));
+    const auto titles = visibleNamed(row, QStringLiteral("queueSearchResultTitle"));
+    QVERIFY(glyph != nullptr);
+    QCOMPARE(tiles.size(), 1);
+    QCOMPARE(places.size(), 1);
+    QVERIFY(!titles.isEmpty());
+    QCOMPARE(sceneRect(glyph).center().x(), sceneRect(tiles.first()).center().x());
+    QVERIFY(sceneRect(tiles.first()).left() > sceneRect(places.first()).right());
+    QCOMPARE(sceneRect(titles.first()).left(), sceneRect(harness.field()).left());
+
+    QQuickItem *clear = harness.item(QStringLiteral("queueSearchClearButton"));
+    QVERIFY(clear != nullptr);
+    QTest::mouseClick(harness.window, Qt::LeftButton, {}, sceneRect(clear).center().toPoint());
+    QCOMPARE(harness.field()->property("text").toString(), QString());
+    QCOMPARE(harness.strings("queries").last(), QString());
+    QVERIFY(harness.field()->hasActiveFocus());
+    QTRY_VERIFY(harness.item(QStringLiteral("queueSearchClearButton")) == nullptr);
+
+    QTest::mouseClick(harness.window, Qt::LeftButton, {}, QPoint(8, harness.window->height() - 8));
+    QTRY_VERIFY(!harness.dialog->property("visible").toBool());
+    QVERIFY(harness.takeCommands().isEmpty());
 }
 
 #include "tst_queue_search.moc"
