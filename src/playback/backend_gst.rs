@@ -1290,7 +1290,7 @@ impl GstPlaybackRuntime {
     /// Change the rows marked to play next with `edit`. A staged successor
     /// that would no longer play next, or would play next by another pick,
     /// is dropped, and the current track plays on without it; one that is
-    /// still the same row by the same pick stays staged.
+    /// still the same file by the same pick stays staged.
     fn edit_play_next(&mut self, edit: impl FnOnce(&mut GaplessQueue) -> Option<CancelledAdvance>) {
         // The rows stay, and so does the row the snapshot has: a stopped
         // track has none.
@@ -8271,6 +8271,99 @@ mod engine_tests {
         );
         engine.wait_for_playing(3, millis(5_000));
         assert!(engine.snapshot.play_next.is_empty());
+    }
+
+    /// Marking a row that holds the file of the staged successor, so that it
+    /// plays next instead, keeps the handoff: the marked row follows
+    /// gaplessly, and Previous goes back to the row before.
+    #[test]
+    fn marking_another_row_with_the_staged_file_keeps_it_staged() {
+        let fixtures = Fixtures::new("play-next-same-file");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![
+            a.clone(),
+            b.clone(),
+            b.clone(),
+        ]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_settled_window(&b);
+        let changes = engine.changes.len();
+        engine.send(PlaybackCommand::TogglePlayNext(vec![2]));
+        engine.wait_until("row 2 was not marked", |engine| {
+            *engine.snapshot.play_next == [2]
+        });
+        assert_change(
+            &engine.wait_for_changes(changes + 1),
+            &b,
+            2,
+            Expect::Gapless,
+        );
+        engine.wait_for_playing(2, millis(4_500));
+        assert_eq!(engine.cancelled_staging, 0, "the handoff was cancelled");
+        engine.send(PlaybackCommand::Previous);
+        assert_change(&engine.wait_for_changes(changes + 2), &a, 0, Expect::Manual);
+    }
+
+    /// Of two marked rows that hold the same file, removing the staged
+    /// first one stages the second; an undo that puts the first back keeps
+    /// the handoff, and the first plays. Unmarked, the second then follows
+    /// in order, and Previous goes back to the first.
+    #[test]
+    fn an_undo_that_puts_back_a_marked_copy_of_the_staged_file_keeps_the_handoff() {
+        let fixtures = Fixtures::new("play-next-undo-copy");
+        let a = fixtures.wav("a.wav", 6_000);
+        let x = fixtures.wav("x.wav", 3_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let rows = vec![a, x, b.clone(), b.clone()];
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(rows.clone()));
+        engine.send(PlaybackCommand::TogglePlayNext(vec![2, 3]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_settled_window(&b);
+        engine.send(PlaybackCommand::RemoveAt(2));
+        engine.wait_until("the second copy was not staged", |engine| {
+            engine.cancelled_staging == 1
+                && engine.prepared.iter().filter(|path| **path == b).count() == 2
+        });
+        assert_eq!(engine.snapshot.current_queue_index, Some(0));
+        let changes = engine.changes.len();
+        engine.send(PlaybackCommand::RestoreQueue {
+            paths: rows,
+            current: 0,
+            play_next: PlayNextRestore::Reinserted {
+                rows: vec![2],
+                before: vec![2, 3],
+            },
+        });
+        engine.wait_until("the marks did not come back", |engine| {
+            *engine.snapshot.play_next == [2, 3]
+        });
+        assert_change(
+            &engine.wait_for_changes(changes + 1),
+            &b,
+            2,
+            Expect::Gapless,
+        );
+        engine.wait_for_playing(2, millis(4_500));
+        assert_eq!(
+            engine.cancelled_staging, 1,
+            "the undo cancelled the handoff"
+        );
+        engine.send(PlaybackCommand::TogglePlayNext(vec![3]));
+        engine.wait_until("row 3 was not unmarked", |engine| {
+            engine.snapshot.play_next.is_empty()
+        });
+        assert_change(
+            &engine.wait_for_changes(changes + 2),
+            &b,
+            3,
+            Expect::Gapless,
+        );
+        engine.wait_for_playing(3, millis(4_500));
+        engine.send(PlaybackCommand::Previous);
+        assert_change(&engine.wait_for_changes(changes + 3), &b, 2, Expect::Manual);
     }
 
     /// Marking the staged successor that follows anyway, the next row in
