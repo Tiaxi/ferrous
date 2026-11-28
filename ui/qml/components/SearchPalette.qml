@@ -33,12 +33,9 @@ Dialog {
     // What the help button's popup says.
     property string helpText: ""
 
-    // Set by the palette: whether a search runs for the query, and its
-    // rows, from the model rather than the view: the view's count notifies
-    // when the view next lays itself out, which the palette's height, bound
-    // to it, sets off when it scrolls the view back into bounds (#619).
+    // Set by the palette: whether a search runs for the query, and whether
+    // it shows results or found none.
     property bool searching: false
-    property int rowCount: 0
     property bool resultsShown: false
     property bool noResults: false
     readonly property TextField queryField: field
@@ -90,7 +87,7 @@ Dialog {
     // apart (they were 4 px, a word space, and 22 px). 6 and 18 px at
     // 10 pt; they grow with the font.
     readonly property real hintKeyGap: Math.max(Kirigami.Units.mediumSpacing,
-                                                Math.round(1.5 * root.smallMetrics.advanceWidth(" ")))
+                                                Math.round(1.5 * root.smallSpaceMetrics.advanceWidth))
     readonly property real hintPairGap: 3 * root.hintKeyGap
     readonly property real sideInset: 16
     // The glyphs, the lead and the field's buttons are sized for the
@@ -312,6 +309,13 @@ Dialog {
         font.weight: Font.DemiBold
     }
     readonly property FontMetrics smallMetrics: FontMetrics {
+        font.family: root.uiPalette.baseFont.family
+        font.pointSize: root.uiPalette.smallPointSize
+    }
+    // A word space in the footer's font, for its gaps: a binding sees the
+    // font change through this width, not through a FontMetrics call.
+    readonly property TextMetrics smallSpaceMetrics: TextMetrics {
+        text: " "
         font.family: root.uiPalette.baseFont.family
         font.pointSize: root.uiPalette.smallPointSize
     }

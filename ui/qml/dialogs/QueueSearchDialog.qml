@@ -28,7 +28,7 @@ Components.SearchPalette {
 
     readonly property var resultsModel: root.uiBridge.queueSearchModel || null
     searching: !!root.uiBridge.queueSearchBusy
-    rowCount: root.resultsModel ? (root.resultsModel.count || 0) : 0
+    readonly property int rowCount: root.resultsModel ? (root.resultsModel.count || 0) : 0
     resultsShown: root.queryText.length > 0 && root.rowCount > 0
     noResults: root.queryText.length > 0 && !root.searching && root.rowCount === 0
     highlighter: root.resultsModel

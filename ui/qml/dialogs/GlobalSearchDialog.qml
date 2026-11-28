@@ -18,7 +18,11 @@ Components.SearchPalette {
     searching: !!root.controller.uiBridge.globalSearchBusy
     readonly property bool retained: !!root.controller.uiBridge.globalSearchModelRetained
     readonly property string suggestion: root.controller.uiBridge.globalSearchSuggestion || ""
-    rowCount: root.controller.globalSearchModelApi.count || 0
+    // The result rows, from the model rather than the view: the view's
+    // count notifies when the view next lays itself out, which the
+    // palette's height, bound to it, sets off when it scrolls the view
+    // back into bounds (#619).
+    readonly property int rowCount: root.controller.globalSearchModelApi.count || 0
     resultsShown: root.queryText.length > 0 && !root.retained && root.rowCount > 0
     noResults: root.queryText.length > 0 && !root.searching && !root.retained && root.rowCount === 0
     highlighter: root.controller.globalSearchModelApi
