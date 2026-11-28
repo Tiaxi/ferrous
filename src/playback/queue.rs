@@ -597,7 +597,12 @@ impl GaplessQueue {
         let mut marked = self.cursor.play_next.iter().copied();
         let mut rows = Vec::with_capacity(self.pending.len());
         for pending in &self.pending {
-            let row = if pending.marked {
+            let row = if let Some(stayed) = &stayed {
+                // The row it was staged as, among the rows put back. When
+                // another row comes next now, such as a row put back that
+                // holds the same file, revalidation finds it.
+                stayed.get(pending.cursor.index).copied()
+            } else if pending.marked {
                 marked.find(|row| !self.row_failed(*row))
             } else if random {
                 self.queue.iter().position(|path| *path == pending.path)
@@ -1021,10 +1026,11 @@ impl GaplessQueue {
     /// take the marks left after them.
     ///
     /// A successor that would now come to play another way, such as the
-    /// next row in the queue's order once it is marked, stays when it is
-    /// still the same row by the same pick, the pick the gain stage was
-    /// given with it: it takes the cursor it would be staged with now, and
-    /// so do the successors after it.
+    /// next row in the queue's order once it is marked, or another row
+    /// that holds its file, stays when it is still the same file by the
+    /// same pick, the pick the gain stage was given with it: it takes the
+    /// cursor it would be staged with now, and so do the successors after
+    /// it.
     fn revalidate_pending(&mut self) -> Option<CancelledAdvance> {
         let rules = self.rules();
         let marks = Arc::clone(&self.cursor.play_next);
@@ -1074,8 +1080,8 @@ impl GaplessQueue {
     }
 
     /// Give the successor at `position` the cursor that the track before it
-    /// would stage it with now, when that is the same row by the same pick.
-    /// Returns whether it did.
+    /// would stage it with now, when that is the same file by the same
+    /// pick. Returns whether it did.
     fn restage(&mut self, position: usize) -> bool {
         let rules = self.rules();
         let from = position
@@ -1084,10 +1090,14 @@ impl GaplessQueue {
         let Some((cursor, marked)) = self.natural_successor(from) else {
             return false;
         };
-        let pending = &mut self.pending[position];
-        if cursor.index != pending.cursor.index || cursor.pick != pending.cursor.pick {
+        // The pipeline plays the file it was given, so another row that
+        // holds it can take its place.
+        if self.queue.get(cursor.index) != Some(&self.pending[position].path)
+            || cursor.pick != self.pending[position].cursor.pick
+        {
             return false;
         }
+        let pending = &mut self.pending[position];
         pending.cursor = cursor;
         pending.marked = marked;
         pending.random_successor = rules.random_successor();
@@ -2216,6 +2226,90 @@ mod tests {
             queue.previous_manual().map(|previous| previous.index),
             Some(1)
         );
+    }
+
+    #[test]
+    fn an_undo_keeps_the_staged_copy_of_a_marked_file_that_it_was_staged_as() {
+        // Rows 2 and 3 hold the same file, and both are marked.
+        let duplicate = PathBuf::from("/fixture/same.flac");
+        let mut rows = paths(2);
+        rows.extend([duplicate.clone(), duplicate.clone()]);
+        let mut queue = GaplessQueue::new();
+        queue.set_queue(rows.clone());
+        queue.toggle_play_next(&[2, 3]);
+        assert_eq!(staged_index(&mut queue), Some(2));
+        // Removing row 2 drops it; row 3, now row 2, is staged.
+        assert_eq!(queue.remove_many(&[2]).cancelled, HANDED);
+        assert_eq!(staged_index(&mut queue), Some(2));
+
+        // The undo puts row 2 back ahead of it, and row 2 plays next. The
+        // pipeline was given the same file, so it keeps the handoff.
+        let undo = PlayNextRestore::Reinserted {
+            rows: vec![2],
+            before: vec![2, 3],
+        };
+        assert_eq!(queue.restore(rows.clone(), 0, &undo), None);
+        assert_eq!(committed_index(&mut queue), Some(2));
+        assert_eq!(marks(&queue), vec![3]);
+
+        // Unmarked, row 3 plays in order after row 2, and Previous goes
+        // back through both rows.
+        assert_eq!(queue.toggle_play_next(&[3]), None);
+        assert_eq!(staged_index(&mut queue), Some(3));
+        assert_eq!(committed_index(&mut queue), Some(3));
+        assert_eq!(
+            queue.previous_manual().map(|previous| previous.index),
+            Some(2)
+        );
+        assert_eq!(
+            queue.previous_manual().map(|previous| previous.index),
+            Some(0)
+        );
+
+        // With Repeat-One, the marked row 3 plays after row 2, and
+        // Previous goes back through both rows as well.
+        let mut queue = GaplessQueue::new();
+        queue.set_queue(rows.clone());
+        queue.set_repeat_mode(RepeatMode::One);
+        queue.toggle_play_next(&[2, 3]);
+        assert_eq!(staged_index(&mut queue), Some(2));
+        assert_eq!(queue.remove_many(&[2]).cancelled, HANDED);
+        assert_eq!(staged_index(&mut queue), Some(2));
+        assert_eq!(queue.restore(rows, 0, &undo), None);
+        assert_eq!(committed_index(&mut queue), Some(2));
+        assert_eq!(staged_index(&mut queue), Some(3));
+        assert_eq!(committed_index(&mut queue), Some(3));
+        let previous = [queue.previous_manual(), queue.previous_manual()];
+        assert_eq!(
+            previous.map(|previous| previous.map(|p| p.index)),
+            [Some(2), Some(0)]
+        );
+    }
+
+    #[test]
+    fn a_staged_file_stays_when_another_row_with_it_comes_to_play_next() {
+        // Rows 1 and 2 hold the same file; row 1 is staged in order, and
+        // marking row 2 makes it come next. The pipeline was given that
+        // file, so it keeps the handoff, and row 2 plays.
+        let duplicate = PathBuf::from("/fixture/same.flac");
+        let mut queue = GaplessQueue::new();
+        queue.set_queue(vec![
+            PathBuf::from("/fixture/0.flac"),
+            duplicate.clone(),
+            duplicate,
+        ]);
+        assert_eq!(staged_index(&mut queue), Some(1));
+        assert_eq!(queue.toggle_play_next(&[2]), None);
+        assert_eq!(committed_index(&mut queue), Some(2));
+        assert_eq!(
+            queue.previous_manual().map(|previous| previous.index),
+            Some(0)
+        );
+
+        // A different file coming next still drops the staged one.
+        let (mut queue, _) = queue_of(3);
+        assert_eq!(staged_index(&mut queue), Some(1));
+        assert_eq!(queue.toggle_play_next(&[2]), HANDED);
     }
 
     #[test]
